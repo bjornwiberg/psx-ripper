@@ -1423,16 +1423,34 @@ static void lv1_storage_unpatch()
 
 // ---------------------------------------------------------------- settings UI
 // Human-readable name of a destination directory.
+// Free space of a mounted device ("/dev_hdd0", "/dev_usb001"): lv2 syscall 840 (sys_fs_disk_free).
+static int disk_free(const char *dev, uint64_t *mb)
+{
+	uint64_t total = 0, avail = 0;
+	lv2syscall3(840, (uint64_t)dev, (uint64_t)&total, (uint64_t)&avail);
+	int r = (int)p1;
+	if (r == 0) *mb = avail / (1024 * 1024);
+	return r;
+}
+
 static void target_name(const char *dir, char *out, size_t n)
 {
+	// "Hard disk (/PSXISO, 120 GB free)", "USB 0 · exFAT (/PSXISO, 3 GB free)", "USB 1 · FAT32 (...)":
+	// the same for every destination; /dev_usbNNN is just the PS3's internal name
 	int port;
-	if (sscanf(dir, "/dev_usb%3d", &port) == 1) snprintf(out, n, T(STR_TARGET_USB), port, dir);
-	else if (sscanf(dir, "exfat%1d:", &port) == 1) {
-		uint64_t mb = 0;
+	uint64_t mb = 0;
+	if (sscanf(dir, "exfat%1d:", &port) == 1) {
 		vf_free_mb(dir, &mb);
 		snprintf(out, n, T(STR_TARGET_EXFAT), port, (unsigned)(mb / 1024));
+		return;
 	}
-	else snprintf(out, n, T(STR_TARGET_HDD), dir);
+	char dev[16];
+	snprintf(dev, sizeof(dev), "%.12s", dir);   // "/dev_hdd0" or "/dev_usb001"
+	char *sl = strchr(dev + 1, '/');
+	if (sl) *sl = 0;
+	if (disk_free(dev, &mb)) mb = 0;
+	if (sscanf(dir, "/dev_usb%3d", &port) == 1) snprintf(out, n, T(STR_TARGET_USB), port, (unsigned)(mb / 1024));
+	else snprintf(out, n, T(STR_TARGET_HDD), (unsigned)(mb / 1024));
 }
 
 // Destination next to the current one in the list hard disk, USB 0, USB 1, ... (by port; a FAT32
