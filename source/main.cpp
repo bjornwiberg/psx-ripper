@@ -393,6 +393,40 @@ static int debug_cmd(const char *q, char *out, int n)
 	if (!strcmp(op, "usb")) { usbodd_status(out, n); return 0; }
 	int dv = qget(q, "drive", v, sizeof(v)) ? atoi(v) : g_usb;   // which SuperDrive
 	if (!strcmp(op, "usbreset")) { snprintf(out, n, "bulk-only reset -> %d\n", usbodd_reset(dv)); return 0; }
+	if (!strcmp(op, "usbbench")) {   // speed: n sectors from lba, per command, READ CD with/without Q or READ(10)
+		uint32_t lba = qget(q, "lba", v, sizeof(v)) ? strtoul(v, NULL, 0) : 20000;
+		int cnt = qget(q, "n", v, sizeof(v)) ? atoi(v) : 2000;
+		int per = qget(q, "per", v, sizeof(v)) ? atoi(v) : 27;
+		int sub = qget(q, "sub", v, sizeof(v)) ? atoi(v) : 2;         // 0 none, 2 formatted Q; -1 = READ(10) user data
+		int sp = qget(q, "speed", v, sizeof(v)) ? atoi(v) : -2;       // KB/s for SET CD SPEED first (-2 = leave)
+		int blk = sub < 0 ? 2048 : sub == 2 ? RAW_SIZE + SUBQ_SIZE : RAW_SIZE;
+		out[0] = 0;
+		if (per < 1) per = 1;
+		if (per > USBODD_MAX / blk) per = USBODD_MAX / blk;
+		static uint8_t data[USBODD_MAX];
+		if (sp != -2) {
+			uint8_t c[12] = {0xBB, 0, (uint8_t)(sp >> 8), (uint8_t)sp, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0};
+			snprintf(out, n, "set cd speed %d -> 0x%x\n", sp, usbodd_cmd(dv, c, 12, NULL, 0, 0));
+		}
+		struct timeval tv0, tv1;
+		gettimeofday(&tv0, NULL);
+		int errs = 0, done = 0;
+		while (done < cnt) {
+			int k = cnt - done < per ? cnt - done : per;
+			uint32_t l = lba + done;
+			uint8_t c[12] = {0};
+			if (sub < 0) { c[0] = 0x28; c[2] = l >> 24; c[3] = l >> 16; c[4] = l >> 8; c[5] = l; c[7] = k >> 8; c[8] = k; }
+			else { c[0] = 0xBE; c[2] = l >> 24; c[3] = l >> 16; c[4] = l >> 8; c[5] = l; c[6] = k >> 16; c[7] = k >> 8; c[8] = k; c[9] = 0xF8; c[10] = sub; }
+			if (usbodd_cmd(dv, c, 12, data, k * blk, 1)) errs++;
+			done += k;
+		}
+		gettimeofday(&tv1, NULL);
+		uint64_t ms = (uint64_t)(tv1.tv_sec - tv0.tv_sec) * 1000 + (tv1.tv_usec - tv0.tv_usec) / 1000;
+		size_t o = strlen(out);
+		snprintf(out + o, n - o, "%d sectors from %u, %d per command, sub %d: %llu ms, %.0f KB/s (%.1fx), %d errors\n", cnt, lba, per, sub,
+		         (unsigned long long)ms, ms ? cnt * 2352.0 / 1.024 / ms : 0.0, ms ? cnt * 1000.0 / 75 / ms : 0.0, errs);
+		return 0;
+	}
 	if (!strcmp(op, "usbscsi")) {   // SCSI to the USB optical drive over our own Bulk-Only Transport
 		uint8_t cdb[16] = {0};
 		int cl = unhex(qget(q, "cdb", v2, sizeof(v2)) ? v2 : "", cdb, 16);
