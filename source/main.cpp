@@ -1997,12 +1997,6 @@ static void settings_screen()
 			snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON_N), host, ne);
 		}
 		snprintf(vals[9], sizeof(vals[9]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
-		{   // mark the default values
-			int def[10] = {!strcmp(outdir, "/dev_hdd0/PSXISO"), retries == 4, speed == 0, eject == 1, autostart == 0, redump == RD_OFF, 0,
-			               remote == 0, webhook_on == 0, check == CHECK_BITPERFECT};
-			for (int r = 0; r < 10; r++)
-				if (def[r]) snprintf(vals[r] + strlen(vals[r]), sizeof(vals[r]) - strlen(vals[r]), " %s", T(STR_DEFAULT_MARK));
-		}
 		const char *labels[10] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
 		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK)};
 		if (row < first) first = row;
