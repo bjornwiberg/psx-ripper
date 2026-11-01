@@ -1278,6 +1278,7 @@ int main(int argc, char *argv[])
 #endif
 
 	logf("---- PSX Ripper start ----");
+	logf("video %ux%u pitch=%u", display_width, display_height, color_pitch);
 	struct stat ast;
 	if (stat(AUTO_FLAG, &ast) == 0) {
 		// remote test mode (used for development via webMAN /play.ps3): rip the disc in the drive once
