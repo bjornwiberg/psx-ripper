@@ -128,7 +128,9 @@ for name, body in (("f1080_btn", 36), ("f720_btn", 24)):
         k = target / max(img.size)
         img = img.resize((max(1, round(img.width * k)), max(1, round(img.height * k))), Image.LANCZOS)
         canvas = Image.new("L", (d * SS, d * SS), 0)
-        canvas.paste(img, ((d * SS - img.width) // 2, (d * SS - img.height) // 2))
+        # a triangle's visual weight sits low (centroid 1/6 below the box centre): lift it a bit
+        lift = round(img.height * 0.09) if ch == "△" else 0
+        canvas.paste(img, ((d * SS - img.width) // 2, (d * SS - img.height) // 2 - lift))
         canvas = canvas.resize((d, d), Image.BOX)
         glyphs.append((ord(ch), d, d, 0, 0, d, len(data)))
         data += pack4(canvas)
