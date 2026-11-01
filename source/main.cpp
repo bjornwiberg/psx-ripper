@@ -16,6 +16,8 @@
 #include <unistd.h>
 #include <sysutil/msg.h>
 #include <sysutil/sysutil.h>
+#include <sysutil/osk.h>
+#include <sys/memory.h>
 #include <sysutil/disc.h>
 #include <net/net.h>
 #include <sys/socket.h>
@@ -125,9 +127,11 @@ static void dialog_handler(msgButton button, void *usrData)
 }
 
 static volatile int exit_requested = 0;
+static volatile int g_osk_event = 0;   // last on-screen keyboard event (SYSUTIL_OSK_*)
 static void sysutil_callback(u64 status, u64 param, void *usrdata)
 {
 	if (status == SYSUTIL_EXIT_GAME) exit_requested = 1;
+	if (status >= SYSUTIL_OSK_LOADED && status <= SYSUTIL_OSK_INPUT_CANCELED) g_osk_event = (int)status;
 }
 
 static volatile int disc_inserted = 0, disc_present = 1;   // assume a disc until the drive says otherwise
@@ -1919,45 +1923,146 @@ static void notify_url(StrId fmt, const char *page)
 	webman_get(url);
 }
 
-// Read-only view of the webhook settings; they are changed on the remote view's web page.
-static void webhook_info_screen(int on)
+// PS3 on-screen keyboard: edits `text` (UTF-8, BMP characters). Returns 1 when OK was pressed.
+static int osk_input(const char *title, char *text, size_t n)
 {
+	static u16 msg[128], start[512], result[512];
+	size_t o = 0;
+	for (const char *p = title; *p && o < 127; ) o < 127 ? (void)(msg[o++] = (u16)ui_next_cp(&p)) : (void)0;
+	msg[o] = 0;
+	o = 0;
+	for (const char *p = text; *p && o < 511; ) start[o++] = (u16)ui_next_cp(&p);
+	start[o] = 0;
+	sys_mem_container_t cont;
+	if (sysMemContainerCreate(&cont, 4 * 1024 * 1024)) return 0;
+	oskParam prm;
+	memset(&prm, 0, sizeof(prm));
+	prm.allowedPanels = OSK_PANEL_TYPE_URL | OSK_PANEL_TYPE_ALPHABET | OSK_PANEL_TYPE_NUMERAL;
+	prm.firstViewPanel = OSK_PANEL_TYPE_URL;
+	prm.prohibitFlags = OSK_PROHIBIT_RETURN;
+	oskInputFieldInfo fld;
+	fld.message = msg; fld.startText = start; fld.maxLength = 500;
+	oskSetKeyLayoutOption(OSK_FULLKEY_PANEL);
+	g_osk_event = 0;
+	if (oskLoadAsync(cont, &prm, &fld)) { sysMemContainerDestroy(cont); return 0; }
+	oskCallbackReturnParam ret;
+	memset(&ret, 0, sizeof(ret));
+	ret.str = result; ret.len = 500;
+	int unloading = 0;
+	while (!exit_requested) {
+		do_flip();
+		if (!unloading && (g_osk_event == SYSUTIL_OSK_DONE || g_osk_event == SYSUTIL_OSK_INPUT_CANCELED)) {
+			oskUnloadAsync(&ret);
+			unloading = 1;
+		}
+		if (g_osk_event == SYSUTIL_OSK_UNLOADED) break;
+	}
+	sysMemContainerDestroy(cont);
+	g_redraw = 2;
+	g_backdrop_shown = 0;
+	if (ret.res != OSK_OK && ret.res != OSK_NO_TEXT) return 0;
+	o = 0;
+	for (int i = 0; result[i] && o + 4 < n; i++) {   // UTF-16 -> UTF-8
+		u16 c = result[i];
+		if (c < 0x80) text[o++] = (char)c;
+		else if (c < 0x800) { text[o++] = (char)(0xC0 | c >> 6); text[o++] = (char)(0x80 | (c & 63)); }
+		else { text[o++] = (char)(0xE0 | c >> 12); text[o++] = (char)(0x80 | ((c >> 6) & 63)); text[o++] = (char)(0x80 | (c & 63)); }
+	}
+	text[o] = 0;
+	return 1;
+}
+
+static void set_webhook(const char *url);
+static int test_webhook();
+
+// Webhook settings: address (on-screen keyboard), each event on/off, progress step (off or every
+// 1 ... 50 %), and a test. The values live in CFG_PATH and can also be edited there over FTP.
+static void webhook_settings_screen()
+{
+	// rows: 0 address, events except progress, progress, test
+	int ev[WH_COUNT], nev = 0;
+	for (int i = 0; i < WH_COUNT; i++) if (i != WH_RIP_PROGRESS) ev[nev++] = i;
+	const int R_ADDR = 0, R_EV = 1, R_PROG = 1 + nev, R_TEST = 2 + nev, NROWS = 3 + nev, VIS = 9;
+	int row = 0, first = 0, test_status = 0;
 	pad_pressed();
 	g_redraw = 2;
 	while (!exit_requested) {
 		if (g_redraw > 0) {
 			g_redraw = 0;
 			draw_backdrop();
-			int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
-			int y = ui_h() / 10 + ui_line(UI_TITLE) + lb / 2;
-			ui_text(UI_BODY, ui_w() / 2, y, 0xA8B0C8, T(STR_L_WEBHOOK), UI_CENTER);
-			y += lb * 2;
-			char host[96], line[200];
-			if (g_webhook[0]) webhook_host(g_webhook, host, sizeof(host)); else snprintf(host, sizeof(host), "%s", T(STR_WEBHOOK_NOURL));
-			snprintf(line, sizeof(line), T(STR_WH_INFO_STATE), on ? T(STR_ON) : T(STR_OFF), host);
-			ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, line, UI_CENTER);
-			y += lb * 3 / 2;
-			for (int i = 0; i < WH_COUNT; i++) {
-				int sel = (g_webhook_mask >> i) & 1;
-				// small font: • chosen, – not chosen
-				if (i == WH_RIP_PROGRESS) { char pl[64]; snprintf(pl, sizeof(pl), T(STR_WH_PROGRESS_N), g_webhook_step); snprintf(line, sizeof(line), "%s  %s", sel ? "•" : "–", pl); }
-				else snprintf(line, sizeof(line), "%s  %s", sel ? "•" : "–", T(wh_label(i)));
-				ui_text(UI_SMALL, ui_w() / 3, y, sel ? 0x7CE0A0 : 0x6870A0, line);
-				y += ls * 12 / 10;
+			ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_WH_SETTINGS), UI_CENTER);
+			if (row < first) first = row;
+			if (row >= first + VIS) first = row - VIS + 1;
+			int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10;
+			int left = ui_w() / 6, right = ui_w() * 5 / 6;
+			for (int r = first; r < NROWS && r < first + VIS; r++) {
+				int y = top + (r - first) * lh;
+				char label[160], val[160];
+				if (r == R_ADDR) {
+					snprintf(label, sizeof(label), "%s", T(STR_WH_ADDRESS));
+					if (g_webhook[0]) webhook_host(g_webhook, val, sizeof(val)); else snprintf(val, sizeof(val), "%s", T(STR_WH_NONE));
+				} else if (r < R_PROG) {
+					int i = ev[r - R_EV];
+					snprintf(label, sizeof(label), "%s", T(wh_label(i)));
+					snprintf(val, sizeof(val), "%s", (g_webhook_mask >> i) & 1 ? T(STR_ON) : T(STR_OFF));
+				} else if (r == R_PROG) {
+					snprintf(label, sizeof(label), "%s", T(STR_WH_PROGRESS));
+					if ((g_webhook_mask >> WH_RIP_PROGRESS) & 1) snprintf(val, sizeof(val), T(STR_WH_PROGRESS_N), g_webhook_step);
+					else snprintf(val, sizeof(val), "%s", T(STR_OFF));
+				} else {
+					snprintf(label, sizeof(label), "%s", T(STR_WH_TEST));
+					if (test_status) snprintf(val, sizeof(val), "HTTP %d", test_status); else val[0] = 0;
+				}
+				if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh, 0x703D6FD9);
+				ui_text(UI_BODY, left, y, 0xFFFFFF, label);
+				char v[200];
+				int toggle = r != R_ADDR && r != R_TEST;
+				snprintf(v, sizeof(v), r == row && toggle ? "‹ %s ›" : "%s", val);
+				ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 			}
-			y += ls;
-			char ip[20];
-			remote_ip(ip, sizeof(ip));
-			snprintf(line, sizeof(line), T(g_remote ? STR_WEBHOOK_HELP2 : STR_WEBHOOK_HELP), ip, REMOTE_PORT);
-			ui_text(UI_SMALL, ui_w() / 2, y, 0x9AD0A8, line, UI_CENTER);
-			const char *b[] = {"circle"};
-			const char *l[] = {T(STR_HINT_BACK)};
-			hint_bar(b, l, 1);
+			char foot[200];
+			snprintf(foot, sizeof(foot), T(STR_WH_CFG_PATH), CFG_PATH);
+			ui_text(UI_SMALL, ui_w() / 2, top + VIS * lh - lh / 4, 0x8890A8, foot, UI_CENTER);
+			if (row == R_ADDR || row == R_TEST) {
+				const char *b[] = {"updown", "cross", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), T(row == R_ADDR ? STR_HINT_EDIT : STR_HINT_SEND), T(STR_HINT_BACK)};
+				hint_bar(b, l, 3);
+			} else {
+				const char *b[] = {"updown", "leftright", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
+				hint_bar(b, l, 3);
+			}
 			g_drawn = 2;
 			g_backdrop_shown = 0;
 		}
 		flip_frame();
-		if (pad_pressed() & (B_CIRCLE | B_CROSS)) return;
+		int p = pad_pressed();
+		if (p) g_redraw = 2;
+		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
+		if (p & B_DOWN) row = (row + 1) % NROWS;
+		if (p & B_CIRCLE) return;
+		if ((p & B_CROSS) && row == R_ADDR) {
+			char url[512];
+			snprintf(url, sizeof(url), "%s", g_webhook[0] ? g_webhook : "http://");
+			if (osk_input(T(STR_WH_ADDRESS_Q), url, sizeof(url))) set_webhook(!strcmp(url, "http://") ? "" : url);
+			pad_pressed();
+			continue;
+		}
+		if ((p & B_CROSS) && row == R_TEST) { test_status = test_webhook(); continue; }
+		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
+		if ((p & B_CROSS) && row > R_ADDR && row < R_PROG) d = 1;   // X toggles an event too
+		if (!d) continue;
+		if (row > R_ADDR && row < R_PROG) {
+			g_webhook_mask ^= 1 << ev[row - R_EV];
+		} else if (row == R_PROG) {
+			// Off, 1, 2, 5, 10, 15, 25, 50 %
+			int k = (g_webhook_mask >> WH_RIP_PROGRESS) & 1 ? 1 : 0;
+			if (k) { int j = 0; while (j < 7 && wh_steps[j] != g_webhook_step) j++; k = j + 1; }
+			k = (k + (d > 0 ? 1 : 7)) % 8;
+			if (k == 0) g_webhook_mask &= ~(1 << WH_RIP_PROGRESS);
+			else { g_webhook_mask |= 1 << WH_RIP_PROGRESS; g_webhook_step = wh_steps[k - 1]; }
+		} else continue;
+		cfg_save();
 	}
 }
 
@@ -2046,7 +2151,7 @@ static void settings_screen()
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
 		if ((p & B_CROSS) && row == 8) {
-			webhook_info_screen(webhook_on);
+			webhook_settings_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
@@ -2098,7 +2203,6 @@ static void settings_screen()
 				if (remote) notify_url(STR_REMOTE_HELP, "");
 			} else if (row == 8) {
 				webhook_on = !webhook_on;
-				if (webhook_on) notify_url(STR_WEBHOOK_HELP, "webhook");
 			} else if (row == 9) {
 				check = (check + (d > 0 ? 1 : 2)) % 3;
 			}
@@ -2361,11 +2465,6 @@ static int status_json(char *js, int n)
 	return (int)strlen(js);
 }
 
-static void get_webhook(char *out, int n) { snprintf(out, n, "%s", g_webhook); }
-static int get_events() { return g_webhook_mask; }
-static int get_step() { return g_webhook_step; }
-static void set_step(int v) { for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
-static void set_events(int mask) { g_webhook_mask = mask & ((1 << WH_COUNT) - 1); }
 
 static void set_webhook(const char *url)
 {
@@ -2932,7 +3031,7 @@ int main(int argc, char *argv[])
 		for (int i = 0; i < nv && i < 8; i++) logf("exFAT drive on USB port %d (%llu MB free)", v[i].port, (unsigned long long)v[i].free_mb);
 	}
 	{
-		static const RemoteHooks hooks = {status_json, get_webhook, set_webhook, test_webhook, get_events, set_events, get_step, set_step};
+		static const RemoteHooks hooks = {status_json};
 		remote_init(&hooks);
 		if (g_remote) { remote_set(1); notify_url(STR_REMOTE_HELP, ""); }
 	}

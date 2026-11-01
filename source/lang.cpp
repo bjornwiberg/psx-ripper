@@ -163,10 +163,19 @@ static const char *en[STR_COUNT] = {
 	"(default)",
 	"Reset all",
 	"Reset all settings to their defaults?\n\nThe webhook address and the local Redump copy are kept.",
-	"Show",
+	"Settings",
 	"%s · sent to %s",
 	"Change them at http://%s:%d/webhook",
 	"Progress every %d %%",
+	"Webhook settings",
+	"Address",
+	"Not set",
+	"Progress",
+	"Send test",
+	"Saved in %s (webhook=, webhook_events=, webhook_step=); can also be edited over FTP",
+	"Edit",
+	"Send",
+	"Webhook address (http://host:port/path)",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -326,10 +335,19 @@ static const char *sv[STR_COUNT] = {
 	"(standard)",
 	"Återställ alla",
 	"Vill du återställa alla inställningar till standard?\n\nWebhook-adressen och den lokala Redump-kopian behålls.",
-	"Visa",
+	"Inställningar",
 	"%s · skickas till %s",
 	"Ändra dem på http://%s:%d/webhook",
 	"Framsteg var %d:e %%",
+	"Webhook-inställningar",
+	"Adress",
+	"Inte angiven",
+	"Framsteg",
+	"Skicka test",
+	"Sparas i %s (webhook=, webhook_events=, webhook_step=); kan också ändras via FTP",
+	"Ändra",
+	"Skicka",
+	"Webhook-adress (http://värd:port/sökväg)",
 };
 
 static const char **table = en;

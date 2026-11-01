@@ -156,7 +156,7 @@ static void dpad(float cx, float cy, float size, bool vertical, uint32_t fill, u
 	}
 }
 
-static uint32_t next_cp(const char **s)
+uint32_t ui_next_cp(const char **s)
 {
 	const unsigned char *p = (const unsigned char *)*s;
 	uint32_t c = *p++;
@@ -177,7 +177,7 @@ static const Glyph *find_glyph(const Font *f, uint32_t cp)
 int ui_text_width(UiFont fi, const char *s)
 {
 	int w = 0;
-	while (*s) { const Glyph *g = find_glyph(fonts[fi], next_cp(&s)); if (g) w += g->adv; }
+	while (*s) { const Glyph *g = find_glyph(fonts[fi], ui_next_cp(&s)); if (g) w += g->adv; }
 	return w;
 }
 
@@ -209,7 +209,7 @@ int ui_text(UiFont fi, int x, int y, uint32_t rgb, const char *s, UiAlign align)
 	if (align == UI_CENTER) x -= w / 2; else if (align == UI_RIGHT) x -= w;
 	const Font *f = fonts[fi];
 	while (*s) {
-		uint32_t cp = next_cp(&s);
+		uint32_t cp = ui_next_cp(&s);
 		const Glyph *g = find_glyph(f, cp);
 		if (!g) continue;
 		if (g->w) draw_glyph(f, g, x, y, rgb);

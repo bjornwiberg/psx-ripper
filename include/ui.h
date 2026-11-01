@@ -16,6 +16,7 @@ int ui_line(UiFont f);                       // line height in pixels
 void ui_background();                        // full-screen gradient
 void ui_rect(int x, int y, int w, int h, uint32_t argb);
 int ui_text_width(UiFont f, const char *utf8);
+uint32_t ui_next_cp(const char **utf8);         // decode one UTF-8 character
 int ui_text(UiFont f, int x, int y, uint32_t rgb, const char *utf8, UiAlign align = UI_LEFT);  // y = top
 // Draws a PS button symbol ("cross", "circle", "triangle", "square") followed by a label; returns width.
 int ui_hint(int x, int y, const char *button, const char *label);

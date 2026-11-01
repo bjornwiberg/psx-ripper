@@ -1,5 +1,4 @@
-// Remote view (see remote.h): MJPEG stream of the UI canvas, /status.json and a page to set the
-// webhook address. System dialogs are drawn by the PS3 on top of the app and are not included.
+// Remote view (see remote.h): MJPEG stream of the UI canvas and /status.json. System dialogs are drawn by the PS3 on top of the app and are not included.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +15,6 @@
 #include "ui.h"
 #include "lang.h"
 #include "remote.h"
-#include "webhook.h"
 
 static RemoteHooks g_hooks;
 static volatile int g_on = 0, g_listen = -1, g_running = 0;
@@ -75,78 +73,6 @@ static int send_all(int s, const void *p, int n)
 
 static int send_str(int s, const char *t) { return send_all(s, t, strlen(t)); }
 
-// application/x-www-form-urlencoded value of `key` from a request body.
-static void form_value(const char *body, const char *key, char *out, size_t n)
-{
-	out[0] = 0;
-	size_t kl = strlen(key);
-	for (const char *p = body; p && *p; ) {
-		if (!strncmp(p, key, kl) && p[kl] == '=') {
-			size_t o = 0;
-			for (const char *v = p + kl + 1; *v && *v != '&' && o < n - 1; v++) {
-				if (*v == '+') out[o++] = ' ';
-				else if (*v == '%' && v[1] && v[2]) { char h[3] = {v[1], v[2], 0}; out[o++] = (char)strtol(h, NULL, 16); v += 2; }
-				else out[o++] = *v;
-			}
-			out[o] = 0;
-			return;
-		}
-		p = strchr(p, '&');
-		if (p) p++;
-	}
-}
-
-static void html_attr(char *out, size_t n, const char *s)
-{
-	size_t o = 0;
-	for (; *s && o + 7 < n; s++) {
-		if (*s == '"') o += snprintf(out + o, n - o, "&quot;");
-		else if (*s == '&') o += snprintf(out + o, n - o, "&amp;");
-		else if (*s == '<') o += snprintf(out + o, n - o, "&lt;");
-		else out[o++] = *s;
-	}
-	out[o] = 0;
-}
-
-static void webhook_page(int s, const char *msg)
-{
-	char url[512] = "", esc[1024];
-	if (g_hooks.get_webhook) g_hooks.get_webhook(url, sizeof(url));
-	html_attr(esc, sizeof(esc), url);
-	char boxes[2400] = "";
-	int mask = g_hooks.get_events ? g_hooks.get_events() : 0;
-	for (int i = 0; i < WH_COUNT; i++) {
-		size_t o = strlen(boxes);
-		snprintf(boxes + o, sizeof(boxes) - o, "<label style='display:block;padding:4px 0'><input type=checkbox name=ev_%s%s> %s <span style='color:#8890a8'>(%s)</span>",
-		         WEBHOOK_EVENTS[i], (mask >> i) & 1 ? " checked" : "", T(wh_label(i)), WEBHOOK_EVENTS[i]);
-		if (i == WH_RIP_PROGRESS) {   // how often: every 1 ... 50 percent
-			static const int steps[] = {1, 2, 5, 10, 15, 25, 50};
-			int cur = g_hooks.get_step ? g_hooks.get_step() : 5;
-			o = strlen(boxes);
-			o += snprintf(boxes + o, sizeof(boxes) - o, " <select name=step>");
-			for (int k = 0; k < 7; k++)
-				o += snprintf(boxes + o, sizeof(boxes) - o, "<option value=%d%s>%d %%</option>", steps[k], steps[k] == cur ? " selected" : "", steps[k]);
-			snprintf(boxes + o, sizeof(boxes) - o, "</select>");
-		}
-		o = strlen(boxes);
-		snprintf(boxes + o, sizeof(boxes) - o, "</label>");
-	}
-	char *page = (char *)malloc(6144);
-	if (!page) return;
-	snprintf(page, 6144,
-		"HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n\r\n"
-		"<!doctype html><meta name=viewport content='width=device-width'><title>PSX Ripper</title>"
-		"<body style='font-family:sans-serif;background:#141826;color:#e8e8f0;padding:16px;max-width:640px'>"
-		"<h2>PSX Ripper · Webhook</h2><p>%s</p>"
-		"<form method=post action='/webhook'><input name=url value=\"%s\" placeholder='http://homeassistant.local:8123/api/webhook/...' "
-		"style='width:100%%;padding:8px;font-size:16px;box-sizing:border-box'><h3>%s</h3>%s<p><button>%s</button></p></form>"
-		"<form method=post action='/webhook/test'><button>%s</button></form>"
-		"<p style='color:#f0c060'>%s</p><p><a style='color:#9ad0a8' href='/'>%s</a></p></body>",
-		T(STR_WEB_HELP), esc, T(STR_WEB_EVENTS), boxes, T(STR_WEB_SAVE), T(STR_WEB_TEST), msg ? msg : "", T(STR_WEB_BACK));
-	send_str(s, page);
-	free(page);
-}
-
 static void client_thread(void *arg)
 {
 	int s = (int)(long)arg;
@@ -194,36 +120,12 @@ static void client_thread(void *arg)
 		char hdr[128];
 		snprintf(hdr, sizeof(hdr), "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: %d\r\n\r\n", (int)strlen(js));
 		if (!send_str(s, hdr)) send_str(s, js);
-	} else if (!strncmp(req, "POST /webhook/test", 18)) {
-		char msg[96];
-		snprintf(msg, sizeof(msg), T(STR_WEB_TESTED), g_hooks.test_webhook ? g_hooks.test_webhook() : -1);
-		webhook_page(s, msg);
-	} else if (!strncmp(req, "POST /webhook", 13)) {
-		char url[512];
-		form_value(body, "url", url, sizeof(url));
-		int mask = 0;
-		for (int i = 0; i < WH_COUNT; i++) {
-			char key[40], v[8];
-			snprintf(key, sizeof(key), "ev_%s", WEBHOOK_EVENTS[i]);
-			form_value(body, key, v, sizeof(v));
-			if (v[0]) mask |= 1 << i;
-		}
-		if (g_hooks.set_events) g_hooks.set_events(mask);   // before the address: it saves the config
-		char step[8];
-		form_value(body, "step", step, sizeof(step));
-		if (step[0] && g_hooks.set_step) g_hooks.set_step(atoi(step));
-		// only change the address when the form sent the field (an empty field clears it)
-		if (g_hooks.set_webhook && (!strncmp(body, "url=", 4) || strstr(body, "&url="))) g_hooks.set_webhook(url);
-		webhook_page(s, T(STR_WEB_SAVED));
-	} else if (!strncmp(req, "GET /webhook", 12)) {
-		webhook_page(s, NULL);
 	} else {
 		send_str(s,
 			"HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
 			"<!doctype html><meta name=viewport content='width=device-width'><title>PSX Ripper</title>"
 			"<body style='margin:0;background:#111;font-family:sans-serif'><img src='/stream' style='width:100%;display:block'>"
-			"<p style='padding:8px 16px'><a style='color:#9ad0a8' href='/webhook'>Webhook</a> · "
-			"<a style='color:#9ad0a8' href='/status.json'>status.json</a></p></body>");
+			"<p style='padding:8px 16px'><a style='color:#9ad0a8' href='/status.json'>status.json</a></p></body>");
 	}
 	close(s);
 	sysThreadExit(0);
