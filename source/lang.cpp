@@ -188,10 +188,10 @@ static const char *en[STR_COUNT] = {
 	", with known errors (%d sectors).",
 	"Drive",
 	"PS3 drive",
-	"USB · Apple SuperDrive",
-	"USB · no SuperDrive connected",
+	"USB %d · %s",
+	"USB · %s",
 	"Reads from: %s",
-	"The SuperDrive is spinning up the disc (up to a minute) …",
+	"The USB drive is spinning up the disc (up to a minute) …",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -376,10 +376,10 @@ static const char *sv[STR_COUNT] = {
 	", med kända fel (%d sektorer).",
 	"Läsare",
 	"PS3:ans läsare",
-	"USB · Apple SuperDrive",
-	"USB · ingen SuperDrive ansluten",
+	"USB %d · %s",
+	"USB · %s",
 	"Läses från: %s",
-	"SuperDriven varvar upp skivan (upp till en minut) …",
+	"USB-läsaren varvar upp skivan (upp till en minut) …",
 };
 
 static const char **table = en;

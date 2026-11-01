@@ -42,6 +42,7 @@ struct UsbDrive {
 	volatile s32 res, cnt;
 	volatile int last_got;
 	usbDeviceRequest req;          // control request in flight (must stay valid until done)
+	char name[40];                 // "Apple SuperDrive" from INQUIRY, empty until asked
 	char trace[1024];              // step trace of the last command (the callers that want it pass their own)
 };
 static UsbDrive g_drv[USBODD_DRIVES];
@@ -128,7 +129,7 @@ static s32 odd_detach(s32 dev)
 	ulog("usbodd: detach dev %d", dev);
 	for (int i = 0; i < USBODD_DRIVES; i++)
 		if (g_drv[i].attached && g_drv[i].dev == dev) {   // transfer memory and lock are kept for the next drive
-			g_drv[i].attached = 0; g_drv[i].dev = -1; g_drv[i].ctrl = g_drv[i].in = g_drv[i].out = -1;
+			g_drv[i].attached = 0; g_drv[i].dev = -1; g_drv[i].name[0] = 0; g_drv[i].ctrl = g_drv[i].in = g_drv[i].out = -1;
 		}
 	return 0;
 }
@@ -356,3 +357,26 @@ int usbodd_eject(int i)
 	ulog("usbodd: drive %d eject -> 0x%x", i, r);
 	return r;
 }
+
+// INQUIRY: vendor and product ("Apple SuperDrive") for the drive list. Not done in attach (that
+// runs on the USB thread, which also delivers the transfer callbacks).
+int usbodd_identify(int i)
+{
+	UsbDrive *d = drive(i);
+	if (!d) return -1;
+	uint8_t inq[36];
+	const uint8_t cdb[12] = {0x12, 0, 0, 0, sizeof(inq), 0, 0, 0, 0, 0, 0, 0};
+	memset(inq, 0, sizeof(inq));
+	int r = usbodd_cmd(i, cdb, 12, inq, sizeof(inq), 1);
+	if (r) { snprintf(d->name, sizeof(d->name), "CD/DVD"); return r; }
+	char v[9], p[17];
+	memcpy(v, inq + 8, 8); v[8] = 0;
+	memcpy(p, inq + 16, 16); p[16] = 0;
+	for (int k = 7; k >= 0 && v[k] == ' '; k--) v[k] = 0;
+	for (int k = 15; k >= 0 && p[k] == ' '; k--) p[k] = 0;
+	snprintf(d->name, sizeof(d->name), "%s%s%s", v, v[0] && p[0] ? " " : "", p);
+	if (!d->name[0]) snprintf(d->name, sizeof(d->name), "CD/DVD");
+	return 0;
+}
+
+const char *usbodd_name(int i) { return i >= 0 && i < USBODD_DRIVES ? g_drv[i].name : ""; }

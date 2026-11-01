@@ -62,6 +62,8 @@ static int g_webhook_hdr_on = 0;               // send them (off keeps them stor
 enum { SRC_BD, SRC_USB };
 static int g_src = SRC_BD;                     // drive to rip from: the PS3's own or a USB SuperDrive (usbodd)
 static int g_usb = 0;                          // which SuperDrive (usbodd drive number)
+static volatile int g_use = SRC_BD;            // the drive actually used: the chosen one when it is connected, else the PS3's
+static int g_usb_port = -1;                    // USB port of that drive (as "Spara till" counts them), -1 unknown
 
 // "Name: value" cleaned of CR/LF, so a header can never add lines to the request
 static void clean_header(char *h)
@@ -274,7 +276,7 @@ static int cdb_len(const uint8_t *) { return 12; }
 
 static int atapi(const uint8_t *cdb, uint8_t *buf, uint32_t len, uint32_t proto)
 {
-	if (g_src == SRC_USB) return usbodd_cmd(g_usb, cdb, cdb_len(cdb), buf, len, 1);
+	if (g_use == SRC_USB) return usbodd_cmd(g_usb, cdb, cdb_len(cdb), buf, len, 1);
 	struct lv2_atapi_cmnd_block cmd;
 	atapi_init(&cmd, len, proto, len ? ATAPI_DIR_READ : ATAPI_DIR_WRITE);
 	if (!len) cmd.proto = ATAPI_NON_DATA_PROTO;
@@ -463,7 +465,7 @@ static int debug_cmd(const char *q, char *out, int n)
 // Data-out command (MODE SELECT).
 static int atapi_out(const uint8_t *cdb, uint8_t *buf, uint32_t len)
 {
-	if (g_src == SRC_USB) return usbodd_cmd(g_usb, cdb, cdb_len(cdb), buf, len, 0);
+	if (g_use == SRC_USB) return usbodd_cmd(g_usb, cdb, cdb_len(cdb), buf, len, 0);
 	struct lv2_atapi_cmnd_block cmd;
 	atapi_init(&cmd, len, ATAPI_PIO_DATA_OUT_PROTO, ATAPI_DIR_WRITE);
 	memcpy(cmd.pkt, cdb, 12);
@@ -543,8 +545,8 @@ static int read_toc()
 	// probe which syscall/proto combination the drive accepts
 	const uint32_t scs[2] = {616, 604};
 	const uint32_t protos[2] = {ATAPI_PIO_DATA_IN_PROTO, ATAPI_DMA_PROTO};
-	if (g_src == SRC_USB) { ret = atapi(cdb, g_cmdbuf, 0x324, 0); logf("READ TOC (USB) -> 0x%x", ret); }
-	for (int s = 0; s < 2 && ret && g_src == SRC_BD; s++)
+	if (g_use == SRC_USB) { ret = atapi(cdb, g_cmdbuf, 0x324, 0); logf("READ TOC (USB) -> 0x%x", ret); }
+	for (int s = 0; s < 2 && ret && g_use == SRC_BD; s++)
 		for (int p = 0; p < 2 && ret; p++) {
 			g_sc = scs[s];
 			ret = atapi(cdb, g_cmdbuf, 0x324, protos[p]);
@@ -578,7 +580,7 @@ static int g_read_mode = 0;   // 0 = syscall 604/6 args, 1 = syscall 616/7 args
 // READ CD with a chosen subchannel selection: 0 = none, 1 = raw P-W (96 bytes), 2 = formatted Q (16 bytes)
 static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, uint32_t blk)
 {
-	if (g_src == SRC_USB) {   // one USB command moves at most USBODD_MAX bytes: split the read
+	if (g_use == SRC_USB) {   // one USB command moves at most USBODD_MAX bytes: split the read
 		uint32_t per = USBODD_MAX / blk;
 		for (uint32_t done = 0; done < count; ) {
 			uint32_t n = count - done < per ? count - done : per, l = lba + done;
@@ -662,7 +664,7 @@ static void bd_auth()
 
 static int probe_read()
 {
-	if (g_src == SRC_USB) {
+	if (g_use == SRC_USB) {
 		memset(g_sec, 0, 4096);
 		int r = read_cd(16, 1, g_sec);
 		logf("READ CD probe (USB) -> 0x%x [%02x %02x .. %02x %02x]", r, g_sec[0], g_sec[1], g_sec[15], g_sec[24]);
@@ -2441,6 +2443,15 @@ static void webhook_settings_screen()
 	}
 }
 
+// "PS3:ans läsare", "USB 1 · Apple SuperDrive": like the destinations, by port
+static void source_name(int src, char *out, size_t n)
+{
+	if (src == SRC_BD) { snprintf(out, n, "%s", T(STR_SRC_BD)); return; }
+	const char *m = usbodd_name(g_usb)[0] ? usbodd_name(g_usb) : "CD/DVD";
+	if (g_usb_port >= 0) snprintf(out, n, T(STR_SRC_USB), g_usb_port, m);
+	else snprintf(out, n, T(STR_SRC_USB_NOPORT), m);
+}
+
 static void settings_screen()
 {
 	// edit locally; each change is applied and saved at once, O goes back
@@ -2472,7 +2483,7 @@ static void settings_screen()
 			snprintf(vals[1], sizeof(vals[1]), "%s", t);
 		}
 		snprintf(g_outdir, sizeof(g_outdir), "%s", save_dir);
-		snprintf(vals[0], sizeof(vals[0]), "%s", src == SRC_BD ? T(STR_SRC_BD) : usbodd_attached(g_usb) ? T(STR_SRC_USB) : T(STR_SRC_USB_NONE));
+		source_name(g_use, vals[0], sizeof(vals[0]));   // only drives that are there: the chosen one when connected
 		snprintf(vals[2], sizeof(vals[2]), "%d", retries);
 		if (speed) snprintf(vals[3], sizeof(vals[3]), "%d\xC3\x97", speed_x[speed]); else snprintf(vals[3], sizeof(vals[3]), "%s", T(STR_SPEED_MAX));
 		snprintf(vals[4], sizeof(vals[4]), "%s", eject ? T(STR_ON) : T(STR_OFF));
@@ -2513,7 +2524,8 @@ static void settings_screen()
 			if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
 			ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
 			char v[128];
-			snprintf(v, sizeof(v), r == row && r != 7 ? "‹ %s ›" : "%s", vals[r]);   // row 7 is an action
+			// row 7 is an action; row 0 has nothing to choose from without a USB drive
+			snprintf(v, sizeof(v), r == row && r != 7 && (r != 0 || usbodd_attached(g_usb)) ? "‹ %s ›" : "%s", vals[r]);
 			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 		}
 		{   // all settings live in one file that can also be edited over FTP
@@ -2564,8 +2576,8 @@ static void settings_screen()
 			}
 		}
 		if (d && !reset) {
-			if (row == 0) {
-				src = !src;
+			if (row == 0) {   // the PS3's drive and the USB drives that are connected, nothing else
+				if (usbodd_attached(g_usb)) src = g_use == SRC_USB ? SRC_BD : SRC_USB;
 			} else if (row == 1) {
 				char save_dir2[64]; snprintf(save_dir2, sizeof(save_dir2), "%s", g_outdir);
 				snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
@@ -2598,6 +2610,7 @@ static void settings_screen()
 		if (d || reset) {
 			// every change is applied and saved immediately
 			snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
+			if (src != g_src) g_use = src == SRC_USB && usbodd_attached(g_usb) ? SRC_USB : SRC_BD;
 			g_src = src; g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on; g_check = check; g_webhook_step = whstep;
 			OUT_DIR = g_outdir;
 			cfg_save();
@@ -2613,7 +2626,7 @@ static void settings_screen()
 static void eject_disc()
 {
 	while (g_ident_busy) usleep(10000);
-	if (g_src == SRC_USB) {
+	if (g_use == SRC_USB) {
 		usbodd_eject(g_usb);
 		fire_event("disc_ejected");
 		g_disc_state = DISC_NONE;
@@ -2630,18 +2643,42 @@ static void eject_disc()
 
 // The system reports discs only for its own drive: with the USB drive selected a thread asks the
 // drive (TEST UNIT READY) every two seconds whenever the app is not using it.
-static int g_src_cb_ignore() { return g_src == SRC_USB; }
+static int g_use_cb_ignore() { return g_use == SRC_USB; }
+static int g_src_cb_ignore() { return g_use == SRC_USB; }
 static void usb_presence_thread(void *arg)
 {
-	int was = -1;   // unknown
+	int was = -1;   // disc in the USB drive: unknown
 	while (!exit_requested) {
 		usleep(2000 * 1000);
-		if (g_src != SRC_USB || g_state_busy()) { was = -1; continue; }
+		if (g_state_busy()) { was = -1; continue; }
+		if (usbodd_attached(g_usb) && !usbodd_name(g_usb)[0]) {   // a drive just connected: model and port
+			usbodd_identify(g_usb);
+			g_usb_port = -1;
+			for (int port = 0; port < 8 && g_usb_port < 0; port++) {   // the optical one in the system's list
+				struct storage_device_info info __attribute__((aligned(16)));
+				memset(&info, 0, sizeof(info));
+				if (sys_storage_get_device_info(usb_device_id(port), (uint8_t *)&info)) continue;
+				if (info.sector_size == 2048 || (info.sector_size == 0 && info.total_sectors == 0)) g_usb_port = port;
+			}
+			logf("usb drive %d: %s, port %d", g_usb, usbodd_name(g_usb), g_usb_port);
+		}
+		// the chosen drive came or went: switch and identify what the drive now in use holds
+		int use = g_src == SRC_USB && usbodd_attached(g_usb) ? SRC_USB : SRC_BD;
+		if (use != g_use) {
+			logf("drive in use: %s", use == SRC_USB ? "usb" : "ps3");
+			g_use = use;
+			was = -1;
+			disc_present = 1;
+			g_disc_state = DISC_NONE;
+			disc_inserted = 1;
+			continue;
+		}
+		if (g_use != SRC_USB) { was = -1; continue; }
 		const uint8_t tur[6] = {0};
-		int r = usbodd_attached(g_usb) ? usbodd_cmd(g_usb, tur, 6, NULL, 0, 0) : -1;
+		int r = usbodd_cmd(g_usb, tur, 6, NULL, 0, 0);
 		// a disc that is still spinning up (not ready, unit attention) counts as present
 		int now = r == 0 || (r != -1 && !((r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A));
-		if (!now && was != 0 && usbodd_attached(g_usb)) usbodd_unlock(g_usb);   // lets the slot take the next disc
+		if (!now && was != 0) usbodd_unlock(g_usb);   // lets the slot take the next disc
 		if (was == 0 && now) { disc_present = 1; disc_inserted = 1; logf("usb drive: disc inserted"); }
 		if (was == 1 && !now) { disc_present = 0; disc_inserted = 0; logf("usb drive: disc removed"); }
 		if (was == -1) disc_present = now;
@@ -2684,7 +2721,7 @@ static int home_screen()
 				ui_text(UI_TITLE, ui_w() / 2, y - ui_line(UI_BODY), 0xFFFFFF, g_disc_title, UI_CENTER);
 				ui_text(UI_BODY, ui_w() / 2, y - ui_line(UI_BODY) + ui_line(UI_TITLE) * 9 / 10, 0xA8B0C8, info, UI_CENTER);
 			} else {
-				const char *msg = st == DISC_READING ? T(g_src == SRC_USB ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
+				const char *msg = st == DISC_READING ? T(g_use == SRC_USB ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
 				ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, msg, UI_CENTER);
 			}
 			if (g_webhook_on && g_webhook[0]) {   // just a hint that webhooks are on; details in the settings
@@ -2711,9 +2748,10 @@ static int home_screen()
 			}
 			// group 3: where it comes from (only when it is not the PS3's own drive) and where it goes
 			int sy = ly + lb;
-			if (g_src == SRC_USB) {
-				char from[96];
-				snprintf(from, sizeof(from), T(STR_SRC_LINE), T(STR_SRC_USB));
+			if (g_use == SRC_USB) {
+				char from[96], name[80];
+				source_name(SRC_USB, name, sizeof(name));
+				snprintf(from, sizeof(from), T(STR_SRC_LINE), name);
 				ui_text(UI_SMALL, ui_w() / 2, sy, 0x8890A8, from, UI_CENTER);
 				sy += ls;
 			}
@@ -2769,9 +2807,9 @@ static int home_screen()
 		}
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
 		if (p & B_START) {
-			int old = g_redump, old_src = g_src;
+			int old = g_redump, old_src = g_use;
 			settings_screen();
-			if (g_src != old_src) {   // another drive: forget the disc and identify what is in the new one
+			if (g_use != old_src) {   // another drive: forget the disc and identify what is in the new one
 				while (g_ident_busy) usleep(10000);
 				disc_present = 1;
 				g_disc_state = DISC_NONE;
@@ -2817,7 +2855,7 @@ static int prepare_disc(int *err, int *code)
 	if (!g_mounttest) webman_unmount();
 
 	int ret;
-	if (g_src == SRC_USB) {   // no lv2 device and no lv1 patch: our own driver talks to the drive
+	if (g_use == SRC_USB) {   // no lv2 device and no lv1 patch: our own driver talks to the drive
 		g_fd = -1;
 		if (!usbodd_attached(g_usb)) { *err = STR_OPEN_FAILED; *code = -1; return -2; }
 		usbodd_unlock(g_usb);          // harmless when it is already unlocked; lets the slot take a disc
@@ -2834,7 +2872,7 @@ static int prepare_disc(int *err, int *code)
 	if (ret) { sys_storage_close(g_fd); *err = STR_TOC_FAILED; *code = ret; return -2; }   // -2: no (readable) disc
 
 	ret = probe_read();
-	if (ret && g_src == SRC_BD && lv1_storage_patch() == 0) {
+	if (ret && g_use == SRC_BD && lv1_storage_patch() == 0) {
 		bd_auth();
 		ret = probe_read();
 	}
@@ -3552,7 +3590,10 @@ int main(int argc, char *argv[])
 	if (warn[0]) own_dialog(warn, 0);   // what the start-up checks found and fixed
 	{ struct stat ds; g_debug_on = stat("/dev_hdd0/tmp/psxrip.debug", &ds) == 0; if (g_debug_on) logf("debug commands on (/dbg)"); }
 	usbodd_init();   // USB SuperDrive (setting "Läsare")
-	if (g_src == SRC_USB) for (int i = 0; i < 30 && !usbodd_attached(g_usb); i++) usleep(100 * 1000);   // let it attach first
+	if (g_src == SRC_USB) {   // let a chosen USB drive attach first; without it the PS3's drive is used
+		for (int i = 0; i < 30 && !usbodd_attached(g_usb); i++) usleep(100 * 1000);
+		g_use = usbodd_attached(g_usb) ? SRC_USB : SRC_BD;
+	}
 	{ sys_ppu_thread_t t; sysThreadCreate(&t, usb_presence_thread, NULL, 1500, 0x4000, 0, (char *)"psxusbpoll"); }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
