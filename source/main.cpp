@@ -64,7 +64,8 @@ static void cfg_load()
 	char line[640];
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = 0;
-		if (!strncmp(line, "outdir=", 7) && line[7] == '/') snprintf(g_outdir, sizeof(g_outdir), "%s", line + 7);
+		if (!strncmp(line, "outdir=", 7) && (line[7] == '/' || !strncmp(line + 7, "exfat", 5)))   // also exFAT drives
+			snprintf(g_outdir, sizeof(g_outdir), "%s", line + 7);
 		else if (!strncmp(line, "retries=", 8)) { int r = atoi(line + 8); if (r >= 1 && r <= 64) g_retries = r; }
 		else if (!strncmp(line, "speed=", 6)) { int v = atoi(line + 6); if (v >= 0 && v <= 3) g_speed = v; }
 		else if (!strncmp(line, "eject=", 6)) g_eject = atoi(line + 6) ? 1 : 0;
