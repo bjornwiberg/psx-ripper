@@ -1308,16 +1308,19 @@ static void progress_draw(const char *title, const char *detail, uint32_t pct, c
 {
 	if (pct > 100) pct = 100;
 	draw_backdrop();
-	int y = ui_h() * 2 / 5, bw = ui_w() * 3 / 5, bx = (ui_w() - bw) / 2, bh = ui_line(UI_BODY) / 3;
-	ui_text(UI_BODY, ui_w() / 2, y - ui_line(UI_BODY) * 2, 0xFFFFFF, title, UI_CENTER);
-	if (detail && detail[0]) ui_text(UI_SMALL, bx + bw, y - ui_line(UI_SMALL) * 3 / 2, 0xA8B0C8, detail, UI_RIGHT);
+	// layout, top to bottom: title, (gap), sector count, bar, percentage, status line
+	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
+	int ty = ui_h() * 2 / 5 - lb, y = ty + lb * 3;
+	int bw = ui_w() * 3 / 5, bx = (ui_w() - bw) / 2, bh = lb / 3;
+	ui_text(UI_BODY, ui_w() / 2, ty, 0xFFFFFF, title, UI_CENTER);
+	if (detail && detail[0]) ui_text(UI_SMALL, bx + bw, y - ls - ls / 3, 0xA8B0C8, detail, UI_RIGHT);
 	ui_rect(bx, y, bw, bh, 0x50FFFFFF);
 	ui_rect(bx, y, (int)((uint64_t)bw * pct / 100), bh, 0xFFC8E05A);
 	char p[16];
 	snprintf(p, sizeof(p), "%u %%", pct);
-	ui_text(UI_SMALL, ui_w() / 2, y + bh + ui_line(UI_SMALL) / 2, 0xE8E8F0, p, UI_CENTER);
+	ui_text(UI_SMALL, ui_w() / 2, y + bh + ls / 2, 0xE8E8F0, p, UI_CENTER);
 	if (cancelling) note = T(STR_CANCELLING);   // O was pressed: say what we are waiting for
-	if (note && note[0]) ui_text(UI_SMALL, ui_w() / 2, y + bh + ui_line(UI_SMALL) * 2, 0xF0C060, note, UI_CENTER);
+	if (note && note[0]) ui_text(UI_SMALL, ui_w() / 2, y + bh + ls * 2, 0xF0C060, note, UI_CENTER);
 	if (!cancelling) {
 		const char *b[] = {"circle"};
 		const char *l[] = {T(STR_HINT_CANCEL)};
