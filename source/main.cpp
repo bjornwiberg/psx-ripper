@@ -2104,12 +2104,6 @@ static void identify_thread(void *arg)
 		}
 	}
 	logf("identify -> %d (state %d)", r, g_disc_state);
-	static int started_sent = 0;
-	if (!started_sent) {   // first identification after the app started: report the start once
-		started_sent = 1;
-		if (r != 0) { g_state_title[0] = 0; g_state_serial[0] = 0; }
-		fire_event("app_started");
-	}
 	snprintf(g_id_serial, sizeof(g_id_serial), "%s", g_serial);
 	g_id_total = (uint64_t)g_leadout * RAW_SIZE;
 	g_id_ntracks = g_ntracks;
@@ -2888,16 +2882,19 @@ static void card_set_outdir(int c, const char *dir)
 static void usb_presence_thread(void *arg)
 {
 	int was[USBODD_DRIVES];   // disc in USB drive n: -1 unknown, 0 no, 1 yes
-	for (int i = 0; i < USBODD_DRIVES; i++) was[i] = -1;
+	uint64_t since[USBODD_DRIVES];   // when the drive connected (or the app started)
+	for (int i = 0; i < USBODD_DRIVES; i++) { was[i] = -1; since[i] = 0; }
 	while (!exit_requested) {
 		usleep(2000 * 1000);
 		int busy = g_state_busy();
 		for (int i = 0; i < USBODD_DRIVES; i++) {
 			Card &k = g_cards[1 + i];
 			if (!usbodd_attached(i)) {
+				since[i] = 0;
 				if (was[i] != -1 || k.present) { k.present = 0; k.inserted = 0; was[i] = -1; g_redraw = 2; }
 				continue;
 			}
+			if (!since[i]) since[i] = now_ms();
 			if (busy && g_card == 1 + i) { was[i] = -1; continue; }   // in use: its own commands tell
 			if (!usbodd_name(i)[0]) {   // just connected: model, port and the destination chosen for that port
 				usbodd_identify(i);
@@ -2916,7 +2913,12 @@ static void usb_presence_thread(void *arg)
 			// a disc that is still spinning up (not ready, unit attention) counts as present
 			int now = r == 0 || (r != -1 && !((r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A));
 			if (!now && was[i] != 0) usbodd_unlock(i);   // without it the slot does not take a disc
-			if (was[i] == 0 && now) { k.present = 1; k.inserted = 1; logf("usb drive %d: disc inserted", i); }
+			// a disc found in the first half minute was already in it (the drive pulls it in after the
+			// unlock and spins it up): part of the start, not an insert
+			if (was[i] == 0 && now) {
+				k.present = 1;
+				if (now_ms() - since[i] > 30000) { k.inserted = 1; logf("usb drive %d: disc inserted", i); }
+			}
 			if (was[i] == 1 && !now) { k.present = 0; k.inserted = 0; logf("usb drive %d: disc removed", i); }
 			if (was[i] == -1) k.present = now;
 			if (was[i] != now) g_redraw = 2;
@@ -3013,6 +3015,26 @@ static int home_screen()
 				if (!k.present) { if (k.state != DISC_NONE) k.state = DISC_NONE; k.tried = 0; k.fresh = 0; continue; }
 				if (!k.tried) { k.tried = 1; select_card(list[i]); identify_start(k.fresh); break; }
 				if (k.recheck) { k.recheck = 0; if (k.state == DISC_READY) { select_card(list[i]); prev_rip_check(); } g_redraw = 2; }
+			}
+		}
+		// app_started: once every drive there at start has been looked at (USB drives attach and spin
+		// up first), with all the discs; at most two minutes after the start
+		static int started_sent = 0;
+		static uint64_t t_start = 0;
+		if (!t_start) t_start = now_ms();
+		if (!started_sent && !g_ident_busy && now_ms() - t_start > 5000) {
+			int pending = 0;
+			for (int i = 0; i < nc; i++) if (g_cards[list[i]].present && !g_cards[list[i]].tried) pending = 1;
+			if (!pending || now_ms() - t_start > 120000) {
+				started_sent = 1;
+				int c0 = 0;   // title/serial of the first disc, for receivers that only read those
+				for (int i = nc - 1; i >= 0; i--) if (g_cards[list[i]].state == DISC_READY) c0 = list[i];
+				select_card(c0);
+				if (g_cards[c0].state == DISC_READY) {
+					snprintf(g_state_title, sizeof(g_state_title), "%s", g_cards[c0].title);
+					snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_cards[c0].serial);
+				} else { g_state_title[0] = 0; g_state_serial[0] = 0; }
+				fire_event("app_started");
 			}
 		}
 		int sig = nc;
@@ -3262,6 +3284,29 @@ static void event_json(char *js, size_t n, const char *event)
 	         g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
 	json_fields(js, n);
 	size_t o = strlen(js);
+	char dn[96], did[8];
+	source_name(g_card ? g_card - 1 : -1, dn, sizeof(dn));
+	if (g_card && usbodd_port(g_card - 1) >= 0) snprintf(did, sizeof(did), "usb%d", usbodd_port(g_card - 1));
+	else snprintf(did, sizeof(did), g_card ? "usb" : "ps3");
+	snprintf(js + o, n - o, ",\"drive_id\":\"%s\",\"drive\":", did);
+	json_str(js, n, dn);
+	if (!strcmp(event, "app_started")) {   // every drive and the disc in it, when there is one
+		o = strlen(js);
+		snprintf(js + o, n - o, ",\"discs\":[");
+		int list[NCARDS], nc = card_list(list), first = 1;
+		for (int i = 0; i < nc; i++) {
+			const Card &k = g_cards[list[i]];
+			if (k.state != DISC_READY) continue;
+			source_name(list[i] ? list[i] - 1 : -1, dn, sizeof(dn));
+			o = strlen(js); snprintf(js + o, n - o, "%s{\"drive\":", first ? "" : ","); json_str(js, n, dn);
+			o = strlen(js); snprintf(js + o, n - o, ",\"title\":"); json_str(js, n, k.title);
+			o = strlen(js); snprintf(js + o, n - o, ",\"serial\":"); json_str(js, n, k.serial);
+			o = strlen(js); snprintf(js + o, n - o, "}");
+			first = 0;
+		}
+		o = strlen(js); snprintf(js + o, n - o, "]");
+	}
+	o = strlen(js);
 	snprintf(js + o, n - o, ",\"seconds\":%ld,\"path\":", g_rip_t0 ? (long)(time(NULL) - g_rip_t0) : 0L);
 	char bin[300];
 	snprintf(bin, sizeof(bin), "%s.bin", g_base);
@@ -3285,7 +3330,7 @@ static void fire_event(const char *event)
 {
 	int idx = webhook_event_index(event);
 	if (!g_webhook_on || !g_webhook[0] || idx < 0 || !((g_webhook_mask >> idx) & 1)) return;
-	char js[1024];
+	char js[2048];
 	event_json(js, sizeof(js), event);
 	char hdrs[1024];
 	webhook_headers(hdrs, sizeof(hdrs));
