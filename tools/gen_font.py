@@ -103,38 +103,35 @@ for name, body in (("f1080_sym", 36), ("f720_sym", 24)):
     out.write("};\n")
     out.write("static const Font %s = {%s_glyphs, %d, %s_data, %d};\n\n" % (name, name, len(glyphs), name, 0))
     out.write("static const int %s_cap_top = %d, %s_cap_bottom = %d;\n\n" % (name, cap_top, name, cap_bottom))
-# Face-button symbols drawn inside a disc of 1.5x the cap height: about 55 % of the disc,
-# centred on the cap height (the UI centres them horizontally in the disc).
+# Face-button symbols, pre-composed on a square canvas the size of the button disc (1.5x the
+# cap height). Each symbol is rendered large, cropped to its ink box in both directions, scaled
+# so its larger side is 55 % of the disc, and placed with the ink box centred exactly on the
+# canvas centre. The UI draws the disc and the glyph at the same top-left corner.
+SS = 8   # supersampling factor for placement and downscaling
 for name, body in (("f1080_btn", 36), ("f720_btn", 24)):
     bodyfont = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), body)
     eb = bodyfont.getbbox("E")
     eimg = Image.new("L", (eb[2] - eb[0], eb[3] - eb[1]), 0)
     ImageDraw.Draw(eimg).text((-eb[0], -eb[1]), "E", font=bodyfont, fill=255)
     et, ebot = ink_rows(eimg)
-    cap_top, cap_bottom = eb[1] + et, eb[1] + ebot
-    cap_h = cap_bottom - cap_top + 1
-    target_h = max(8, int(round(cap_h * 1.5 * 0.55)))
-    centre2 = cap_top + cap_bottom          # twice the cap centre row
+    cap_h = ebot - et + 1
+    d = cap_h * 3 // 2                       # disc diameter, same formula as disc_size() in ui.cpp
+    target = cap_h * 1.5 * 0.55 * SS
+    big = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), body * SS)
     data = bytearray()
     glyphs = []
     for ch in "△○✕□":
-        size, img = body, None
-        for _ in range(16):
-            f = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), size)
-            b = f.getbbox(ch)
-            cand = Image.new("L", (b[2] - b[0], b[3] - b[1]), 0)
-            ImageDraw.Draw(cand).text((-b[0], -b[1]), ch, font=f, fill=255)
-            t, bt = ink_rows(cand)
-            img = cand.crop((0, t, cand.width, bt + 1))
-            if bt - t + 1 == target_h:
-                break
-            size = max(6, size + (1 if bt - t + 1 < target_h else -1))
-        if img.height != target_h:
-            img = img.resize((max(1, round(img.width * target_h / img.height)), target_h), Image.LANCZOS)   # keep proportions
-        w, h = img.size
-        top = (centre2 - h + 1) // 2
-        glyphs.append((ord(ch), w, h, 0, top, w, len(data)))
-        data += pack4(img)
+        b = big.getbbox(ch)
+        img = Image.new("L", (b[2] - b[0], b[3] - b[1]), 0)
+        ImageDraw.Draw(img).text((-b[0], -b[1]), ch, font=big, fill=255)
+        img = img.crop(img.getbbox())        # ink box, both axes
+        k = target / max(img.size)
+        img = img.resize((max(1, round(img.width * k)), max(1, round(img.height * k))), Image.LANCZOS)
+        canvas = Image.new("L", (d * SS, d * SS), 0)
+        canvas.paste(img, ((d * SS - img.width) // 2, (d * SS - img.height) // 2))
+        canvas = canvas.resize((d, d), Image.BOX)
+        glyphs.append((ord(ch), d, d, 0, 0, d, len(data)))
+        data += pack4(canvas)
     out.write("static const uint8_t %s_data[] = {%s};\n" % (name, ",".join(str(b) for b in data)))
     out.write("static const Glyph %s_glyphs[] = {\n" % name)
     for gl in glyphs:

@@ -110,8 +110,10 @@ static volatile int disc_inserted = 0, disc_present = 1;   // assume a disc unti
 static void disc_eject_cb(void) { disc_inserted = 0; disc_present = 0; }
 static void disc_insert_cb(u32 type, char *title) { disc_inserted = 1; disc_present = 1; }
 
+static void lv1_storage_unpatch();
 static void program_exit_callback()
 {
+	lv1_storage_unpatch();   // safety net; normally already done
 	gcmSetWaitFlip(context);
 	rsxFinish(context, 1);
 }
@@ -957,8 +959,11 @@ static void identify_thread(void *arg)
 	if ((long)arg) usleep(2000 * 1000);   // freshly inserted: let the drive spin up
 	int err = 0, code = 0;
 	int r = prepare_disc(&err, &code);
+	if (r == 0) sys_storage_close(g_fd);
+	// Undo the lv1 patch straight away: if the app is then killed (webMAN exit, XMB quit) the
+	// hypervisor would stay patched and the next system storage operation (pkg install) hangs.
+	lv1_storage_unpatch();
 	if (r == 0) {
-		sys_storage_close(g_fd);
 		snprintf(g_disc_title, sizeof(g_disc_title), "%s", g_name);
 		snprintf(g_disc_serial, sizeof(g_disc_serial), "%s", g_serial[0] ? g_serial : T(STR_UNKNOWN));
 		g_disc_mb = (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024));
@@ -1372,6 +1377,7 @@ static int rip_disc_inner(int fresh, int autorip)
 
 static int rip_disc(int fresh, int autorip)
 {
+	while (g_ident_busy) usleep(10000);   // the identify thread patches/unpatches lv1 itself
 	int ok = rip_disc_inner(fresh, autorip);
 	lv1_storage_unpatch();
 	return ok;
@@ -1454,6 +1460,7 @@ int main(int argc, char *argv[])
 		}
 	}
 	sysDiscUnregisterDiscChangeCallback();
+	while (g_ident_busy) usleep(10000);
 	if (g_ripped && !exit_requested && ask_yesno(T(STR_ASK_REFRESH))) {
 		if (webman_get("/refresh.ps3")) tell(T(STR_REFRESH_MANUAL));
 	}

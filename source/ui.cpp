@@ -100,6 +100,62 @@ static void disc(float cx, float cy, float r, uint32_t fill, uint32_t ring)
 	}
 }
 
+// D-pad icon: a dark cross with a light border; the two highlighted arms get a small triangle
+// pointing outwards. Coverage is supersampled 4x4 per pixel for smooth edges.
+static uint32_t blend(uint32_t dst, uint32_t col, float a)
+{
+	uint32_t al = (uint32_t)(a * 255);
+	uint32_t r = (((col >> 16) & 255) * al + ((dst >> 16) & 255) * (255 - al)) / 255;
+	uint32_t g = (((col >> 8) & 255) * al + ((dst >> 8) & 255) * (255 - al)) / 255;
+	uint32_t b = ((col & 255) * al + (dst & 255) * (255 - al)) / 255;
+	return 0xFF000000 | (r << 16) | (g << 8) | b;
+}
+
+static bool in_cross(float x, float y, float h, float arm)   // centred at 0,0, half size h
+{
+	return (x >= -arm && x <= arm && y >= -h && y <= h) || (y >= -arm && y <= arm && x >= -h && x <= h);
+}
+
+static bool in_tri(float x, float y, float ax, float ay, float bx, float by, float cx, float cy)
+{
+	float d1 = (x - bx) * (ay - by) - (ax - bx) * (y - by);
+	float d2 = (x - cx) * (by - cy) - (bx - cx) * (y - cy);
+	float d3 = (x - ax) * (cy - ay) - (cx - ax) * (y - ay);
+	bool neg = d1 < 0 || d2 < 0 || d3 < 0, pos = d1 > 0 || d2 > 0 || d3 > 0;
+	return !(neg && pos);
+}
+
+static void dpad(float cx, float cy, float size, bool vertical, uint32_t fill, uint32_t ring, uint32_t arrow)
+{
+	float h = size / 2, arm = size * 0.19f, bw = 2.0f;
+	float t = size * 0.13f;                      // arrow half width
+	for (int y = (int)(cy - h - 1); y <= (int)(cy + h + 1); y++) {
+		if (y < 0 || y >= (int)display_height) continue;
+		uint32_t *p = fb_row(y);
+		for (int x = (int)(cx - h - 1); x <= (int)(cx + h + 1); x++) {
+			if (x < 0 || x >= (int)display_width) continue;
+			int outer = 0, inner = 0, arr = 0;
+			for (int sy = 0; sy < 4; sy++)
+				for (int sx = 0; sx < 4; sx++) {
+					float fx = x + (sx + 0.5f) / 4 - cx, fy = y + (sy + 0.5f) / 4 - cy;
+					if (!in_cross(fx, fy, h, arm)) continue;
+					outer++;
+					if (in_cross(fx, fy, h - bw, arm - bw)) inner++;
+					float e = h * 0.80f, b0 = h * 0.42f;   // arrow tip and base distance from centre
+					bool tri = vertical
+						? in_tri(fx, fy, 0, -e, -t, -b0, t, -b0) || in_tri(fx, fy, 0, e, -t, b0, t, b0)
+						: in_tri(fx, fy, -e, 0, -b0, -t, -b0, t) || in_tri(fx, fy, e, 0, b0, -t, b0, t);
+					if (tri) arr++;
+				}
+			if (!outer) continue;
+			uint32_t px = blend(p[x], ring, outer / 16.0f);
+			if (inner) px = blend(px, fill, inner / 16.0f);
+			if (arr) px = blend(px, arrow, arr / 16.0f);
+			p[x] = px;
+		}
+	}
+}
+
 static uint32_t next_cp(const char **s)
 {
 	const unsigned char *p = (const unsigned char *)*s;
@@ -189,7 +245,8 @@ static int disc_size()
 int ui_hint_width(const char *button, const char *label)
 {
 	uint32_t col;
-	int sw = is_face_button(button) ? disc_size() : ui_text_width(UI_SYM, hint_symbol(button, &col));
+	int sw = disc_size();   // face buttons and the d-pad share the icon size
+	(void)col;
 	return sw + ui_text_width(UI_BODY, " ") + ui_text_width(UI_BODY, label);
 }
 
@@ -205,18 +262,18 @@ int ui_hint(int x, int y, const char *button, const char *label)
 		ui_rect(x - 6, y + top, ui_hint_width(button, label) + 12, 1, 0xFFFFFF40);
 		ui_rect(x - 6, y + bot, ui_hint_width(button, label) + 12, 1, 0xFF40FFFF);
 	}
-	int w;
+	// icon box: disc_size() square, centred on the cap height, on whole pixels so the
+	// pre-centred button glyph (same size as the disc) lines up exactly with the disc
+	int d = disc_size();
+	int oy = (int)(y + (top + bot + 1) / 2.0f - d / 2.0f + 0.5f);
+	float cx = x + d / 2.0f, cy = oy + d / 2.0f;
 	if (is_face_button(button)) {
-		// controller-style button: dark disc centred on the cap height, coloured symbol inside
-		int d = disc_size();
-		float cx = x + d / 2.0f, cy = y + (top + bot + 1) / 2.0f;
 		disc(cx, cy, d / 2.0f, 0x1E2234, 0x5A6280);
-		int sw = ui_text_width(UI_BTN, sym);
-		ui_text(UI_BTN, (int)(cx - sw / 2.0f + 0.5f), y, col, sym);
-		w = d;
+		ui_text(UI_BTN, x, oy, col, sym);
 	} else {
-		w = ui_text(UI_SYM, x, y, col, sym);
+		dpad(cx, cy, d, !strcmp(button, "updown"), 0x1E2234, 0x5A6280, 0xE8E8F0);
 	}
+	int w = d;
 	w += ui_text_width(UI_BODY, " ");
 	w += ui_text(UI_BODY, x + w, y, 0xE8E8F0, label);
 	return w;
