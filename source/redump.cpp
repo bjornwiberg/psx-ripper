@@ -240,7 +240,7 @@ static int read_rec(FILE *f, RdDisc *d)
 	return 1;
 }
 
-int rd_local_info(char *version, size_t n)
+int rd_local_info(char *version, size_t n, time_t *fetched)
 {
 	FILE *f = fopen(RD_VER, "r");
 	if (!f) return 0;
@@ -251,6 +251,7 @@ int rd_local_info(char *version, size_t n)
 	fclose(f);
 	struct stat st;
 	if (stat(RD_IDX, &st)) return 0;
+	if (fetched) *fetched = st.st_mtime;
 	if (version && n) snprintf(version, n, "%s", line);
 	return count;
 }

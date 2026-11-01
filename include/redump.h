@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <time.h>
 
 enum { RD_OFF, RD_ONLINE, RD_LOCAL };
 
@@ -19,8 +20,9 @@ struct RdDisc {
 	uint8_t md5[RD_MAX_TRACKS][16];
 };
 
-// Local copy. rd_local_info() returns the number of discs in the index (0 = none) and its version.
-int rd_local_info(char *version, size_t n);
+// Local copy. rd_local_info() returns the number of discs in the index (0 = none), its version
+// and when it was downloaded (UTC, may be NULL).
+int rd_local_info(char *version, size_t n, time_t *fetched);
 // Downloads the dat and builds the index. *done/*total report progress (bytes, phase 0 = download,
 // 1 = index); *abort cancels. Returns the number of discs, or a negative error.
 int rd_download(volatile uint32_t *done, volatile uint32_t *total, volatile int *phase, volatile int *abort);

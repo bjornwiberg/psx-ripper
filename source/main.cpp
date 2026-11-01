@@ -1187,11 +1187,9 @@ static void flip_frame()
 	present();
 }
 
-// Redump's dat version ("2026-06-15 11-55-46") in the console's date and time format.
-static void fmt_rd_version(const char *ver, char *out, size_t n, int with_time)
+// Date (and time) in the console's date and time format.
+static void fmt_datetime(int y, int mo, int d, int h, int mi, int with_time, char *out, size_t n)
 {
-	int y, mo, d, h, mi, sec;
-	if (sscanf(ver, "%d-%d-%d %d-%d-%d", &y, &mo, &d, &h, &mi, &sec) < 3) { snprintf(out, n, "%s", ver); return; }
 	s32 df = 0, tf = 1;   // 0 = YYYYMMDD, 1 = DDMMYYYY, 2 = MMDDYYYY; 0 = 12 h, 1 = 24 h
 	sysUtilGetSystemParamInt(SYSUTIL_SYSTEMPARAM_ID_DATE_FORMAT, &df);
 	sysUtilGetSystemParamInt(SYSUTIL_SYSTEMPARAM_ID_TIME_FORMAT, &tf);
@@ -1199,11 +1197,32 @@ static void fmt_rd_version(const char *ver, char *out, size_t n, int with_time)
 	if (df == 1) snprintf(date, sizeof(date), "%02d/%02d/%04d", d, mo, y);
 	else if (df == 2) snprintf(date, sizeof(date), "%02d/%02d/%04d", mo, d, y);
 	else snprintf(date, sizeof(date), "%04d-%02d-%02d", y, mo, d);
-	if (with_time && sscanf(ver, "%*d-%*d-%*d %d-%d", &h, &mi) == 2) {
+	if (with_time) {
 		if (tf == 0) snprintf(tm, sizeof(tm), " %d:%02d %s", (h + 11) % 12 + 1, mi, h < 12 ? "AM" : "PM");
 		else snprintf(tm, sizeof(tm), " %02d:%02d", h, mi);
 	}
 	snprintf(out, n, "%s%s", date, tm);
+}
+
+// Redump's dat version ("2026-06-15 11-55-46") in the console's format.
+static void fmt_rd_version(const char *ver, char *out, size_t n)
+{
+	int y, mo, d, h = 0, mi = 0;
+	int k = sscanf(ver, "%d-%d-%d %d-%d", &y, &mo, &d, &h, &mi);
+	if (k < 3) { snprintf(out, n, "%s", ver); return; }
+	fmt_datetime(y, mo, d, h, mi, k == 5, out, n);
+}
+
+// A UTC time stamp as local time (console time zone and summer time).
+static void fmt_local(time_t t, char *out, size_t n)
+{
+	s32 tz = 0, dst = 0;   // minutes from UTC; summer time on/off
+	sysUtilGetSystemParamInt(SYSUTIL_SYSTEMPARAM_ID_TIMEZONE, &tz);
+	sysUtilGetSystemParamInt(SYSUTIL_SYSTEMPARAM_ID_SUMMERTIME, &dst);
+	t += (time_t)(tz + (dst ? 60 : 0)) * 60;
+	struct tm *g = gmtime(&t);
+	if (!g) { out[0] = 0; return; }
+	fmt_datetime(g->tm_year + 1900, g->tm_mon + 1, g->tm_mday, g->tm_hour, g->tm_min, 1, out, n);
 }
 
 // Downloads the Redump dat to the console and builds the local index (progress dialog, O cancels).
@@ -1254,8 +1273,8 @@ static void redump_download_screen()
 	char msg[256], ver[64] = "";
 	if (g_dl_result > 0) {
 		char raw[64] = "";
-		rd_local_info(raw, sizeof(raw));
-		fmt_rd_version(raw, ver, sizeof(ver), 1);
+		rd_local_info(raw, sizeof(raw), NULL);
+		fmt_rd_version(raw, ver, sizeof(ver));
 		snprintf(msg, sizeof(msg), T(STR_RD_DL_DONE), g_dl_result, ver);
 	}
 	else snprintf(msg, sizeof(msg), T(STR_RD_DL_FAILED), g_dl_result);
@@ -1270,7 +1289,8 @@ static void settings_screen()
 	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, redump = g_redump, row = 0;
 	const int NROWS = 7;
 	char rdver[64] = "";
-	int rdcount = rd_local_info(rdver, sizeof(rdver));
+	time_t rdwhen = 0;
+	int rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
 	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	pad_pressed();
 	g_redraw = 2;
@@ -1291,9 +1311,9 @@ static void settings_screen()
 		snprintf(vals[4], sizeof(vals[4]), "%s", autostart ? T(STR_ON) : T(STR_OFF));
 		snprintf(vals[5], sizeof(vals[5]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
 		if (rdcount > 0) {
-			char date[24];
-			fmt_rd_version(rdver, date, sizeof(date), 0);
-			snprintf(vals[6], sizeof(vals[6]), T(STR_RD_COPY_VALUE), date, rdcount);
+			char when[32];
+			fmt_local(rdwhen, when, sizeof(when));
+			snprintf(vals[6], sizeof(vals[6]), T(STR_RD_COPY_VALUE), when, rdcount);
 		} else {
 			snprintf(vals[6], sizeof(vals[6]), "%s", T(STR_RD_MISSING));
 		}
@@ -1318,7 +1338,7 @@ static void settings_screen()
 		if (p & B_DOWN) row = (row + 1) % NROWS;
 		if ((p & B_CROSS) && row == 6) {
 			redump_download_screen();
-			rdcount = rd_local_info(rdver, sizeof(rdver));
+			rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
 			pad_pressed();
 			g_redraw = 2;
 			continue;

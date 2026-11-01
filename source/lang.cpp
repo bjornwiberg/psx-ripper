@@ -76,7 +76,7 @@ static const char *en[STR_COUNT] = {
 	"Redump: no match. The rip differs from every known dump.",
 	"Redump: could not be checked.",
 	"Redump: the serial was not found.",
-	"%s (%d discs)",
+	"Downloaded %s (%d discs)",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -149,7 +149,7 @@ static const char *sv[STR_COUNT] = {
 	"Redump: ingen träff. Rippen skiljer sig från alla kända dumpar.",
 	"Redump: kunde inte kontrolleras.",
 	"Redump: skivnumret hittades inte.",
-	"%s (%d skivor)",
+	"Hämtad %s (%d skivor)",
 };
 
 static const char **table = en;
