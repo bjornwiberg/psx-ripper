@@ -47,6 +47,8 @@ static int g_eject = 1;            // eject the disc after a successful rip
 static int g_autostart = 0;        // rip an inserted disc without the confirmation
 static int g_redump = RD_OFF;      // verification against Redump: off, online or local copy
 static int g_remote = 0;           // remote view (web server on port 8090)
+enum { CHECK_OFF, CHECK_ON, CHECK_BITPERFECT };
+static int g_check = CHECK_BITPERFECT;   // sector check: off, EDC/ECC + re-read, + secure read and confirmation
 static int g_webhook_on = 0;       // send webhooks
 static char g_webhook[512] = "";   // webhook address (http://...); may contain a secret id, never logged
 static const int speed_x[4] = {0, 8, 4, 2};
@@ -65,6 +67,7 @@ static void cfg_load()
 		else if (!strncmp(line, "autostart=", 10)) g_autostart = atoi(line + 10) ? 1 : 0;
 		else if (!strncmp(line, "redump=", 7)) { int v = atoi(line + 7); if (v >= RD_OFF && v <= RD_LOCAL) g_redump = v; }
 		else if (!strncmp(line, "remote=", 7)) g_remote = atoi(line + 7) ? 1 : 0;
+		else if (!strncmp(line, "check=", 6)) { int v = atoi(line + 6); if (v >= CHECK_OFF && v <= CHECK_BITPERFECT) g_check = v; }
 		else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
 		else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
 	}
@@ -75,8 +78,8 @@ static void cfg_save()
 {
 	FILE *f = fopen(CFG_PATH, "w");
 	if (!f) return;
-	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\n",
-	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook);
+	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\n",
+	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook, g_check);
 	fclose(f);
 }
 
@@ -743,6 +746,8 @@ static void note_hard(uint32_t lba, int edc_bad)
 static uint32_t g_suspect[MAX_SUSPECT];
 static uint8_t *g_suspect_data;   // MAX_SUSPECT * RAW_SIZE
 static uint32_t g_nsuspect = 0;
+static uint8_t g_suspect_ok[MAX_SUSPECT];   // confirmed in the second pass
+#define HARD_RESOLVED 0x40000000u          // g_hard flag: read correctly in the second pass
 static volatile uint32_t g_confirmed = 0, g_changed = 0;
 
 static void note_suspect(uint32_t lba, const uint8_t *sector)
@@ -751,6 +756,7 @@ static void note_suspect(uint32_t lba, const uint8_t *sector)
 	if (!g_suspect_data || g_nsuspect >= MAX_SUSPECT) return;
 	for (uint32_t i = 0; i < g_nsuspect; i++) if (g_suspect[i] == lba) { memcpy(g_suspect_data + i * RAW_SIZE, sector, RAW_SIZE); return; }
 	g_suspect[g_nsuspect] = lba;
+	g_suspect_ok[g_nsuspect] = 0;
 	memcpy(g_suspect_data + g_nsuspect * RAW_SIZE, sector, RAW_SIZE);
 	g_nsuspect++;
 }
@@ -952,6 +958,7 @@ static int confirm_read(uint32_t lba, int need_edc, int max_reads, uint8_t *out)
 
 static int second_pass()
 {
+	if (g_check != CHECK_BITPERFECT) g_nsuspect = 0;   // confirmation only in bit-perfect mode
 	uint32_t total = g_nhard + g_nsuspect;
 	if (!total || g_abort || g_write_failed) return 0;
 	logf("second pass: %u failed and %u fixed sector(s) at 2x", g_nhard, g_nsuspect);
@@ -963,8 +970,9 @@ static int second_pass()
 	time_t t0 = time(NULL);
 	for (uint32_t k = 0; k < total && !g_abort; k++) {
 		int suspect = k >= g_nhard;
-		uint32_t lba = suspect ? g_suspect[k - g_nhard] : (g_hard[k] & 0x7FFFFFFF);
+		uint32_t lba = suspect ? g_suspect[k - g_nhard] : (g_hard[k] & 0x3FFFFFFF);
 		int edc_bad = !suspect && (g_hard[k] >> 31);
+		if (!suspect && (g_hard[k] & HARD_RESOLVED)) { g_pass2_done = k + 1; continue; }
 		int in_data = data1 && lba < t1_end;
 		g_rr_lba = lba; g_rr_max = reads;
 		int ok = confirm_read(lba, in_data, reads, sec);   // check_sector() skips sectors without EDC
@@ -972,6 +980,7 @@ static int second_pass()
 		if (suspect) {
 			if (ok) {
 				g_confirmed++;
+				g_suspect_ok[k - g_nhard] = 1;
 				if (memcmp(sec, g_suspect_data + (k - g_nhard) * RAW_SIZE, RAW_SIZE)) {
 					g_changed++;
 					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) patched++;
@@ -982,6 +991,7 @@ static int second_pass()
 			}
 		} else if (ok && vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) {
 			patched++;
+			g_hard[k] |= HARD_RESOLVED;
 			if (edc_bad) g_badsect--; else g_readerrs--;
 			g_recovered++;
 			logf("second pass: sector %u recovered", lba);
@@ -1099,7 +1109,7 @@ static void rip_thread(void *arg)
 		}
 		// data track 1: sectors without EDC are read a second time and compared; a sector that
 		// differs is read until two reads in a row agree
-		if ((g_tracks[0].ctrl & 0x4) && g_vbuf) {
+		if (g_check == CHECK_BITPERFECT && (g_tracks[0].ctrl & 0x4) && g_vbuf) {
 			uint32_t t1_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
 			for (uint32_t a = 0; a < n && lba + a < t1_end && !g_abort; ) {
 				if (dead[a] || !unverifiable(buf + a * SECT_Q)) { a++; continue; }
@@ -1127,8 +1137,8 @@ static void rip_thread(void *arg)
 				a = b;
 			}
 		}
-		// data track 1: re-read sectors whose sync, address or EDC is wrong
-		if (g_tracks[0].ctrl & 0x4) {
+		// data track 1: re-read sectors whose sync, address, EDC or ECC is wrong
+		if (g_check != CHECK_OFF && (g_tracks[0].ctrl & 0x4)) {
 			uint32_t t1_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
 			for (uint32_t i = 0; i < n && lba + i < t1_end; i++) {
 				uint8_t *sp = buf + i * SECT_Q;
@@ -1707,8 +1717,9 @@ static void settings_screen()
 	char outdir[64];
 	snprintf(outdir, sizeof(outdir), "%s", g_outdir);
 	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, redump = g_redump, row = 0;
-	int remote = g_remote, webhook_on = g_webhook_on;
-	const int NROWS = 9;
+	int remote = g_remote, webhook_on = g_webhook_on, check = g_check;
+	const int NROWS = 10, VIS = 9;   // the list scrolls when it is longer than VIS rows
+	int first = 0;
 	char rdver[64] = "";
 	time_t rdwhen = 0;
 	int rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
@@ -1721,7 +1732,7 @@ static void settings_screen()
 		g_drawn = 2;
 		draw_backdrop();
 		ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_SETTINGS_TITLE), UI_CENTER);
-		char vals[9][96];
+		char vals[10][96];
 		char save_dir[64]; snprintf(save_dir, sizeof(save_dir), "%s", g_outdir);
 		snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
 		target_name(outdir, vals[0], sizeof(vals[0]));
@@ -1748,12 +1759,15 @@ static void settings_screen()
 		if (!webhook_on) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
 		else if (!g_webhook[0]) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_WEBHOOK_NOURL));
 		else { char host[96]; webhook_host(g_webhook, host, sizeof(host)); snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON), host); }
-		const char *labels[9] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
-		                         T(STR_L_REMOTE), T(STR_L_WEBHOOK)};
+		snprintf(vals[9], sizeof(vals[9]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
+		const char *labels[10] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
+		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK)};
+		if (row < first) first = row;
+		if (row >= first + VIS) first = row - VIS + 1;
 		// first row below the "Settings" subtitle (drawn at h/10 + title + body/2), then nine rows
 		int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10, left = ui_w() / 6, right = ui_w() * 5 / 6;
-		for (int r = 0; r < NROWS; r++) {
-			int y = top + r * lh;
+		for (int r = first; r < NROWS && r < first + VIS; r++) {
+			int y = top + (r - first) * lh;
 			if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
 			ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
 			char v[128];
@@ -1763,7 +1777,7 @@ static void settings_screen()
 		if ((row == 7 && remote) || row == 8) {   // where to watch / where to set the webhook address
 			char help[160];
 			snprintf(help, sizeof(help), T(row == 7 ? STR_REMOTE_HELP : STR_WEBHOOK_HELP), ip, REMOTE_PORT);
-			ui_text(UI_SMALL, ui_w() / 2, top + NROWS * lh - lh / 4 + ui_line(UI_SMALL) / 4, 0x9AD0A8, help, UI_CENTER);
+			ui_text(UI_SMALL, ui_w() / 2, top + VIS * lh - lh / 4 + ui_line(UI_SMALL) / 4, 0x9AD0A8, help, UI_CENTER);
 		}
 		const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "circle"};
 		const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
@@ -1806,10 +1820,12 @@ static void settings_screen()
 				remote_set(remote);
 			} else if (row == 8) {
 				webhook_on = !webhook_on;
+			} else if (row == 9) {
+				check = (check + (d > 0 ? 1 : 2)) % 3;
 			}
 			// every change is applied and saved immediately
 			snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
-			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on;
+			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on; g_check = check;
 			OUT_DIR = g_outdir;
 			cfg_save();
 			logf("settings saved: outdir=%s retries=%d speed=%d eject=%d autostart=%d redump=%d remote=%d webhook=%d",
@@ -2051,6 +2067,7 @@ static void fire_event(const char *event)
 	webhook_send_async(g_webhook, js);
 }
 
+static void write_riplog();
 static int rip_disc_inner(int fresh, int autorip)
 {
 	char msg[768];
@@ -2222,6 +2239,7 @@ static int rip_disc_inner(int fresh, int autorip)
 	if (g_nsuspect) res_add(g_confirmed == g_nsuspect ? 0x7CE0A0 : 0xF0C060, T(STR_CONFIRMED), g_nsuspect, g_confirmed);
 	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
 	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);
+	write_riplog();
 	logf("done: %s errs=%u", g_base, g_readerrs);
 	snprintf(g_done_msg, sizeof(g_done_msg), "%s", msg);
 	g_state = ST_HOME;
@@ -2235,6 +2253,32 @@ static int rip_disc(int fresh, int autorip)
 	int ok = rip_disc_inner(fresh, autorip);
 	lv1_storage_unpatch();
 	return ok;
+}
+
+// Rip log next to the image (<name>.log): what was read and which sectors are still wrong, so a
+// later "repair" (after cleaning the disc) can re-read just those sectors.
+static void write_riplog()
+{
+	char path[320];
+	snprintf(path, sizeof(path), "%s.log", g_base);
+	VFile *f = vf_open(path, "wb");
+	if (!f) return;
+	time_t now = time(NULL);
+	struct tm *g = gmtime(&now);
+	vf_printf(f, "PSX Ripper rip log\n");
+	vf_printf(f, "title=%s\nserial=%s\n", g_res_title, g_serial);
+	if (g) vf_printf(f, "date=%04d-%02d-%02d %02d:%02d UTC\n", g->tm_year + 1900, g->tm_mon + 1, g->tm_mday, g->tm_hour, g->tm_min);
+	vf_printf(f, "sectors=%u\ncheck=%s\nretries=%d\n", g_leadout, g_check == CHECK_OFF ? "off" : g_check == CHECK_ON ? "on" : "bitperfect", g_retries);
+	for (int t = 0; t < g_ntracks; t++) vf_printf(f, "track=%02d start=%u md5=%s\n", g_tracks[t].num, g_tstart[t], g_track_md5[t]);
+	vf_printf(f, "redump=%s%s%s\n", rd_result_str(), g_rd_result_name[0] ? " " : "", g_rd_result_name);
+	vf_printf(f, "unreadable_count=%u\nbad_count=%u\nfixed_count=%u\n", g_readerrs, g_badsect, g_recovered);
+	for (uint32_t k = 0; k < g_nhard; k++) {
+		if (g_hard[k] & HARD_RESOLVED) continue;
+		vf_printf(f, "%s=%u\n", (g_hard[k] >> 31) ? "bad" : "unreadable", g_hard[k] & 0x3FFFFFFF);
+	}
+	for (uint32_t k = 0; k < g_nsuspect; k++) vf_printf(f, "uncertain=%u %s\n", g_suspect[k], g_suspect_ok[k] ? "confirmed" : "unconfirmed");
+	vf_close(f);
+	logf("rip log written: %s", path);
 }
 
 // Own result screen after a rip (instead of the system dialog). Returns 1 when a new disc was

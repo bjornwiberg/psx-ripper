@@ -102,6 +102,9 @@ static const char *en[STR_COUNT] = {
 	"Unreadable sectors: %u",
 	"The disc has been ejected. Insert the next disc and it will be ripped automatically.",
 	"Remove the disc and insert the next one and it will be ripped automatically.",
+	"Sector check",
+	"Check and re-read",
+	"Bit-perfect",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -200,6 +203,9 @@ static const char *sv[STR_COUNT] = {
 	"Oläsbara sektorer: %u",
 	"Skivan har matats ut. Sätt i nästa skiva så rippas den automatiskt.",
 	"Ta ut skivan och sätt i nästa så rippas den automatiskt.",
+	"Sektorkontroll",
+	"Kontrollera och läs om",
+	"Bitperfekt",
 };
 
 static const char **table = en;
