@@ -4109,9 +4109,10 @@ static void event_json(char *js, size_t n, const char *event)
 	json_fields(js, n);
 	size_t o = strlen(js);
 	char dn[96], did[8];
-	source_name(g_card ? g_card - 1 : -1, dn, sizeof(dn));
-	if (g_card && usbodd_port(g_card - 1) >= 0) snprintf(did, sizeof(did), "usb%d", usbodd_port(g_card - 1));
-	else snprintf(did, sizeof(did), g_card ? "usb" : "ps3");
+	int ec = cur_card();   // the card the event is about (a rip's thread), not the one on the screen
+	source_name(ec ? ec - 1 : -1, dn, sizeof(dn));
+	if (ec && usbodd_port(ec - 1) >= 0) snprintf(did, sizeof(did), "usb%d", usbodd_port(ec - 1));
+	else snprintf(did, sizeof(did), ec ? "usb" : "ps3");
 	snprintf(js + o, n - o, ",\"drive_id\":\"%s\",\"drive\":", did);
 	json_str(js, n, dn);
 	if (!strcmp(event, "app_started")) {   // every drive and the disc in it, when there is one
