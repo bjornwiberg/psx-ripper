@@ -262,6 +262,7 @@ static const char *en[STR_COUNT] = {
 	"Known errors: %d sectors (repair reads only those again).",
 	"The check reads the file here, not the disc, and writes the result into its rip log.",
 	"Not ripped to this destination yet.",
+	"Cancel check",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -520,6 +521,7 @@ static const char *sv[STR_COUNT] = {
 	"Kända fel: %d sektorer (Laga läser om bara dem).",
 	"Kontrollen läser filen här, inte skivan, och skriver resultatet i rippens logg.",
 	"Inte rippad till det här målet än.",
+	"Avbryt kontroll",
 };
 
 static const char **table = en;

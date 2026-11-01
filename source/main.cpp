@@ -3790,6 +3790,7 @@ static void draw_page(int c, int y)
 		return yy;
 	};
 	if (k.job) {
+		{ int under = ytop + lb + ls * 2 + ls / 2; if (y < under) y = under; }   // below the right column
 		y = dest_block(y, 0, 0x8890A8) + ls;
 		OnCard o(c);
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done, tot = g_total ? g_total : 1;
@@ -3827,9 +3828,11 @@ static void draw_page(int c, int y)
 			ui_text_fit(UI_BODY, L, y, 0xF0C060, r0, R - L);
 		}
 		y += lb;
-		char cnt[160] = "";
-		snprintf(cnt, sizeof(cnt), T(STR_READ_STATS), "", g_readerrs, g_recovered);
-		ui_text_fit(UI_BODY, L, y, g_readerrs ? 0xF0C060 : 0xC8D0E0, cnt, R - L);
+		if (g_phase != 4) {   // the check reads the file, not the disc: no read counts then
+			char cnt[160] = "";
+			snprintf(cnt, sizeof(cnt), T(STR_READ_STATS), "", g_readerrs, g_recovered);
+			ui_text_fit(UI_BODY, L, y, g_readerrs ? 0xF0C060 : 0xC8D0E0, cnt, R - L);
+		}
 		y += lb + ls;
 		// the latest events, newest at the bottom
 		if (g_nev > 0) {
@@ -3993,8 +3996,10 @@ static int home_screen()
 				const char *l[] = {T(STR_HINT_SKIP), T(STR_HINT_CANCEL_RIP)};
 				hint_bar(b, l, 2);
 			} else if (f.job) {
+				int checking;
+				{ OnCard o(sel); checking = g_phase == 4; }
 				const char *b[] = {"circle"};
-				const char *l[] = {T(STR_HINT_CANCEL_RIP)};
+				const char *l[] = {T(checking ? STR_HINT_CANCEL_CHECK : STR_HINT_CANCEL_RIP)};
 				hint_bar(b, l, 1);
 			} else if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
 				const char *b[] = {"cross", "square", "triangle", "select"};
