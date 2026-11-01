@@ -1,3 +1,4 @@
+#include <math.h>
 #include <string.h>
 #include "rsxutil.h"
 #include "ui.h"
@@ -152,6 +153,53 @@ static void dpad(float cx, float cy, float size, bool vertical, uint32_t fill, u
 			if (inner) px = blend(px, fill, inner / 16.0f);
 			if (arr) px = blend(px, arrow, arr / 16.0f);
 			p[x] = px;
+		}
+	}
+}
+
+// Drive icons, own drawings: a disc (the internal drive) and a USB trident (USB drives).
+// Shapes in unit coordinates (0..1, y down), 4x4 supersampled like the d-pad.
+static float seg_dist(float x, float y, float ax, float ay, float bx, float by)
+{
+	float dx = bx - ax, dy = by - ay, t = ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy);
+	if (t < 0) t = 0;
+	if (t > 1) t = 1;
+	float ex = x - (ax + t * dx), ey = y - (ay + t * dy);
+	return sqrtf(ex * ex + ey * ey);
+}
+static bool in_usb(float u, float v)
+{
+	const float w = 0.045f;   // half line width
+	if (in_tri(u, v, 0.5f, 0.02f, 0.37f, 0.22f, 0.63f, 0.22f)) return true;            // arrow
+	if (seg_dist(u, v, 0.5f, 0.2f, 0.5f, 0.84f) <= w) return true;                       // stem
+	float bx = u - 0.5f, by = v - 0.86f;
+	if (bx * bx + by * by <= 0.11f * 0.11f) return true;                                   // base
+	if (seg_dist(u, v, 0.5f, 0.66f, 0.26f, 0.52f) <= w || seg_dist(u, v, 0.26f, 0.52f, 0.26f, 0.4f) <= w) return true;
+	float lx = u - 0.26f, ly = v - 0.34f;
+	if (lx * lx + ly * ly <= 0.075f * 0.075f) return true;                                 // left: circle
+	if (seg_dist(u, v, 0.5f, 0.58f, 0.74f, 0.44f) <= w || seg_dist(u, v, 0.74f, 0.44f, 0.74f, 0.34f) <= w) return true;
+	return u >= 0.67f && u <= 0.81f && v >= 0.22f && v <= 0.36f;                           // right: square
+}
+static bool in_disc(float u, float v)
+{
+	float dx = u - 0.5f, dy = v - 0.5f, d = sqrtf(dx * dx + dy * dy);
+	return d <= 0.48f && d >= 0.13f && !(d > 0.27f && d < 0.31f);   // the disc, its hole and a groove
+}
+void ui_icon(const char *name, int x0, int y0, int size, uint32_t rgb)
+{
+	bool usb = !strcmp(name, "usb");
+	for (int y = y0; y < y0 + size; y++) {
+		if (y < 0 || y >= (int)display_height) continue;
+		uint32_t *p = fb_row(y);
+		for (int x = x0; x < x0 + size; x++) {
+			if (x < 0 || x >= (int)display_width) continue;
+			int n = 0;
+			for (int sy = 0; sy < 4; sy++)
+				for (int sx = 0; sx < 4; sx++) {
+					float u = (x - x0 + (sx + 0.5f) / 4) / size, v = (y - y0 + (sy + 0.5f) / 4) / size;
+					if (usb ? in_usb(u, v) : in_disc(u, v)) n++;
+				}
+			if (n) p[x] = blend(p[x], rgb, n / 16.0f);
 		}
 	}
 }

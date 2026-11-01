@@ -3124,9 +3124,14 @@ static int draw_card(int c, int y, int focused, int single)
 	source_name(c ? c - 1 : -1, drive, sizeof(drive));
 	int ly = y;
 	// the drive in the top right corner (single drive: above the title, centred, as before)
-	int dw = ui_text_width(UI_SMALL, drive) + ui_w() / 60;
-	if (single) { ui_text(UI_SMALL, cx, ly - ls, 0x8890A8, drive, UI_CENTER); dw = 0; }
-	else ui_text(UI_SMALL, right, ly + (lb - ls) / 2, 0x8890A8, drive, UI_RIGHT);
+	// with a small icon in front: a disc for the internal drive, the USB trident for USB drives
+	int isz = ls * 3 / 4, igap = ls / 3, tw = ui_text_width(UI_SMALL, drive);
+	int dw = tw + isz + igap + ui_w() / 60;
+	int iy = single ? ly - ls : ly + (lb - ls) / 2;
+	int tx = single ? cx - (tw + isz + igap) / 2 + isz + igap : right - tw;
+	ui_icon(c ? "usb" : "disc", tx - igap - isz, iy + (ls - isz) / 2, isz, 0x8890A8);
+	ui_text(UI_SMALL, tx, iy, 0x8890A8, drive);
+	if (single) dw = 0;
 	if (k.job || st == DISC_READY) {
 		char line[200];
 		snprintf(line, sizeof(line), "%s  ·  %s  ·  %u MB", k.title, k.serial, k.mb);
