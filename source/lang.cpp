@@ -97,7 +97,7 @@ static const char *en[STR_COUNT] = {
 	"Saved.",
 	"Back to the screen",
 	"USB %d (exFAT, %u GB free)",
-	"Uncertain sectors: %u, confirmed: %u",
+	"Fixed sectors: %u, confirmed: %u",
 	"Done!",
 	"Unreadable sectors: %u",
 	"The disc has been ejected. Insert the next disc and it will be ripped automatically.",
@@ -154,6 +154,7 @@ static const char *en[STR_COUNT] = {
 	"Sector %u read differently – the first read was right",
 	"Time %s · about %s left",
 	"Finishing – checking against Redump … ",
+	"Fixed sectors: %u, all confirmed",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -247,7 +248,7 @@ static const char *sv[STR_COUNT] = {
 	"Sparat.",
 	"Tillbaka till skärmen",
 	"USB %d (exFAT, %u GB ledigt)",
-	"Osäkra sektorer: %u, bekräftade: %u",
+	"Lagade sektorer: %u, bekräftade: %u",
 	"Klart!",
 	"Oläsbara sektorer: %u",
 	"Skivan har matats ut. Sätt i nästa skiva så rippas den automatiskt.",
@@ -304,6 +305,7 @@ static const char *sv[STR_COUNT] = {
 	"Sektor %u lästes olika – första läsningen var rätt",
 	"Tid %s · kvar ca %s",
 	"Slutför – kontrollerar mot Redump … ",
+	"Lagade sektorer: %u, alla bekräftade",
 };
 
 static const char **table = en;

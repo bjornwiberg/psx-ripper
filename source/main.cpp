@@ -2491,7 +2491,8 @@ static int rip_disc_inner(int fresh, int autorip)
 	if (rdinfo[0]) res_add(g_rd_result == 1 ? 0x7CE0A0 : g_rd_result == 0 ? 0xFF8A80 : 0xA8B0C8, "%s", rdinfo);
 	if (lcinfo[0]) res_add(0xE8E8F0, "%s", lcinfo);
 	if (g_secure) res_add(g_unstable ? 0xF0C060 : 0xA8B0C8, T(STR_VERIFY_RESULT), g_secure, g_unstable);
-	if (g_nsuspect) res_add(g_confirmed == g_nsuspect ? 0x7CE0A0 : 0xF0C060, T(STR_CONFIRMED), g_nsuspect, g_confirmed);
+	if (g_nsuspect && g_confirmed == g_nsuspect) res_add(0x7CE0A0, T(STR_FIXED_ALL_CONFIRMED), g_nsuspect);
+	else if (g_nsuspect) res_add(0xF0C060, T(STR_CONFIRMED), g_nsuspect, g_confirmed);
 	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
 	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);
 	{
@@ -2588,6 +2589,9 @@ static int repair_disc()
 		}
 		res_add(0x7CE0A0, "%s", T(STR_NOTHING_TO_REPAIR));
 		logf("repair %s: nothing to repair", g_base);
+		snprintf(g_state_title, sizeof(g_state_title), "%s", g_name);
+		snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
+		fire_event("repair_finished");
 		return 1;
 	}
 
