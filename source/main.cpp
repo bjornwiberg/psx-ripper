@@ -3164,8 +3164,11 @@ static void settings_rows(const char *subtitle, const char *const *labels, char 
 	ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, subtitle, UI_CENTER);
 	// first row below the subtitle (drawn at h/10 + title + body/2)
 	int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10, left = ui_w() / 6, right = ui_w() * 5 / 6;
-	for (int r = 0; r < nrows; r++) {
-		int y = top + r * lh;
+	// at most VIS rows fit above the footer: a longer list scrolls with the focused row
+	const int VIS = 9;
+	int first = row < VIS ? 0 : row - VIS + 1;
+	for (int r = first; r < nrows && r < first + VIS; r++) {
+		int y = top + (r - first) * lh;
 		if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
 		ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
 		char v[128];
@@ -3231,7 +3234,7 @@ static void settings_screen()
 			settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 7);   // row 7 is an action
 			if (row == 9 || row == 5) {   // webhooks and the file name: X opens their own view
 				const char *b[] = {"updown", "leftright", "cross", "triangle", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(row == 5 ? STR_HINT_EDIT : STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 				hint_bar(b, l, 5);
 			} else {
 				const char *b[] = {"updown", row == 7 ? "cross" : "leftright", "triangle", "circle"};
