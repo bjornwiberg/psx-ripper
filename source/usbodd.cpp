@@ -136,7 +136,11 @@ int usbodd_scsi(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_
 {
 	if (!g_attached) { snprintf(log, logn, "not attached\n"); return -1; }
 	static void *cbw, *csw, *buf;
-	if (!cbw) { usbAllocateMemory(&cbw, 64); usbAllocateMemory(&csw, 64); usbAllocateMemory(&buf, 65536); }
+	if (!cbw) {
+		ulog("usbodd: allocating transfer memory");
+		s32 a1 = usbAllocateMemory(&cbw, 64), a2 = usbAllocateMemory(&csw, 64), a3 = usbAllocateMemory(&buf, 65536);
+		ulog("usbodd: allocate -> 0x%x 0x%x 0x%x (%p %p %p)", a1, a2, a3, cbw, csw, buf);
+	}
 	if (!cbw || !csw || !buf || len > 65536) { snprintf(log, logn, "no USB memory\n"); return -2; }
 	uint8_t *c = (uint8_t *)cbw;
 	memset(c, 0, 31);
@@ -149,8 +153,11 @@ int usbodd_scsi(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_
 	memcpy(c + 15, cdb, cdblen);
 	size_t o = 0;
 	g_done = 0;
+	ulog("usbodd: CBW submit (out pipe %d)", g_out);
 	s32 r = usbBulkTransfer(g_out, cbw, 31, done_cb, NULL);
+	ulog("usbodd: CBW submitted -> 0x%x", r);
 	int w = wait_done(3000);
+	ulog("usbodd: CBW wait -> %d (res 0x%x cnt %d)", w, g_res, g_cnt);
 	o += snprintf(log + o, logn - o, "CBW -> 0x%x, done %d res 0x%x cnt %d\n", r, !w, g_res, g_cnt);
 	if (r || w || g_res) return -3;
 	*got = 0;
