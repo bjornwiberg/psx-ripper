@@ -135,7 +135,7 @@ static const char *en[STR_COUNT] = {
 	"On · %s · %d events",
 	"A disc was inserted and identified",
 	"A rip started",
-	"Progress, every percent",
+	"Progress (how often: see the list)",
 	"A rip finished",
 	"A rip was cancelled",
 	"A rip failed",
@@ -149,6 +149,8 @@ static const char *en[STR_COUNT] = {
 	"Failed",
 	"Repaired",
 	"Ejected",
+	"Webhook progress",
+	"%d %%",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -280,7 +282,7 @@ static const char *sv[STR_COUNT] = {
 	"På · %s · %d händelser",
 	"En skiva sattes i och identifierades",
 	"En rippning startade",
-	"Framsteg, varje procent",
+	"Framsteg (hur ofta: välj i listan)",
 	"En rippning blev klar",
 	"En rippning avbröts",
 	"En rippning misslyckades",
@@ -294,6 +296,8 @@ static const char *sv[STR_COUNT] = {
 	"Fel",
 	"Lagad",
 	"Utmatad",
+	"Webhook-framsteg",
+	"%d %%",
 };
 
 static const char **table = en;

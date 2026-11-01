@@ -53,6 +53,8 @@ static int g_check = CHECK_BITPERFECT;   // sector check: off, EDC/ECC + re-read
 static int g_webhook_on = 0;       // send webhooks
 static char g_webhook[512] = "";   // webhook address (http://...); may contain a secret id, never logged
 static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
+static const int wh_steps[] = {1, 2, 5, 10, 15, 25, 50};
+static int g_webhook_step = 5;                 // rip_progress every this many percent
 static const int speed_x[4] = {0, 8, 4, 2};
 
 static void cfg_load()
@@ -73,6 +75,7 @@ static void cfg_load()
 		else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
 		else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
 		else if (!strncmp(line, "webhook_events=", 15)) g_webhook_mask = atoi(line + 15) & ((1 << WH_COUNT) - 1);
+		else if (!strncmp(line, "webhook_step=", 13)) { int v = atoi(line + 13); for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
 	}
 	fclose(f);
 }
@@ -81,8 +84,8 @@ static void cfg_save()
 {
 	FILE *f = fopen(CFG_PATH, "w");
 	if (!f) return;
-	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\n",
-	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook, g_check, g_webhook_mask);
+	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\nwebhook_step=%d\n",
+	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook, g_check, g_webhook_mask, g_webhook_step);
 	fclose(f);
 }
 
@@ -1871,8 +1874,8 @@ static void settings_screen()
 	char outdir[64];
 	snprintf(outdir, sizeof(outdir), "%s", g_outdir);
 	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, redump = g_redump, row = 0;
-	int remote = g_remote, webhook_on = g_webhook_on, check = g_check;
-	const int NROWS = 10, VIS = 9;   // the list scrolls when it is longer than VIS rows
+	int remote = g_remote, webhook_on = g_webhook_on, check = g_check, whstep = g_webhook_step;
+	const int NROWS = 11, VIS = 9;   // the list scrolls when it is longer than VIS rows
 	int first = 0;
 	char rdver[64] = "";
 	time_t rdwhen = 0;
@@ -1886,7 +1889,7 @@ static void settings_screen()
 		g_drawn = 2;
 		draw_backdrop();
 		ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_SETTINGS_TITLE), UI_CENTER);
-		char vals[10][96];
+		char vals[11][96];
 		char save_dir[64]; snprintf(save_dir, sizeof(save_dir), "%s", g_outdir);
 		snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
 		target_name(outdir, vals[0], sizeof(vals[0]));
@@ -1920,8 +1923,9 @@ static void settings_screen()
 			snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON_N), host, ne);
 		}
 		snprintf(vals[9], sizeof(vals[9]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
-		const char *labels[10] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
-		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK)};
+		snprintf(vals[10], sizeof(vals[10]), T(STR_WH_STEP_VALUE), whstep);
+		const char *labels[11] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
+		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK), T(STR_L_WH_STEP)};
 		if (row < first) first = row;
 		if (row >= first + VIS) first = row - VIS + 1;
 		// first row below the "Settings" subtitle (drawn at h/10 + title + body/2), then nine rows
@@ -1979,10 +1983,13 @@ static void settings_screen()
 				if (webhook_on) notify_url(STR_WEBHOOK_HELP, "webhook");
 			} else if (row == 9) {
 				check = (check + (d > 0 ? 1 : 2)) % 3;
+			} else if (row == 10) {
+				int k = 0; while (k < 7 && wh_steps[k] != whstep) k++;
+				whstep = wh_steps[(k + (d > 0 ? 1 : 6)) % 7];
 			}
 			// every change is applied and saved immediately
 			snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
-			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on; g_check = check;
+			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on; g_check = check; g_webhook_step = whstep;
 			OUT_DIR = g_outdir;
 			cfg_save();
 			logf("settings saved: outdir=%s retries=%d speed=%d eject=%d autostart=%d redump=%d remote=%d webhook=%d",
@@ -2238,6 +2245,8 @@ static int status_json(char *js, int n)
 
 static void get_webhook(char *out, int n) { snprintf(out, n, "%s", g_webhook); }
 static int get_events() { return g_webhook_mask; }
+static int get_step() { return g_webhook_step; }
+static void set_step(int v) { for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
 static void set_events(int mask) { g_webhook_mask = mask & ((1 << WH_COUNT) - 1); }
 
 static void set_webhook(const char *url)
@@ -2334,7 +2343,10 @@ static int rip_disc_inner(int fresh, int autorip)
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / (g_total ? g_total : 1));
-		if (pct > sent_pct && pct < 100 && !g_phase) { sent_pct = pct; fire_event("rip_progress"); }   // every percent
+		if (pct >= sent_pct + (uint32_t)g_webhook_step && pct < 100 && !g_phase) {   // every g_webhook_step percent
+			sent_pct = pct - pct % g_webhook_step;
+			fire_event("rip_progress");
+		}
 		int rmax = g_rr_max, rtry = rmax ? g_rr_try : 0;
 		uint32_t rlba = g_rr_lba;
 		// redraw on a new percentage, every 256 sectors, or when the re-read state changes
@@ -2790,7 +2802,7 @@ int main(int argc, char *argv[])
 		for (int i = 0; i < nv && i < 8; i++) logf("exFAT drive on USB port %d (%llu MB free)", v[i].port, (unsigned long long)v[i].free_mb);
 	}
 	{
-		static const RemoteHooks hooks = {status_json, get_webhook, set_webhook, test_webhook, get_events, set_events};
+		static const RemoteHooks hooks = {status_json, get_webhook, set_webhook, test_webhook, get_events, set_events, get_step, set_step};
 		remote_init(&hooks);
 		if (g_remote) { remote_set(1); notify_url(STR_REMOTE_HELP, ""); }
 	}

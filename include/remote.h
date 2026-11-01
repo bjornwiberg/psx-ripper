@@ -12,6 +12,8 @@ struct RemoteHooks {
 	int (*test_webhook)();                        // send a test event, returns the HTTP status
 	int (*get_events)();                          // bit mask of WEBHOOK_EVENTS that are sent
 	void (*set_events)(int mask);
+	int (*get_step)();                            // rip_progress every N percent
+	void (*set_step)(int percent);
 };
 
 void remote_init(const RemoteHooks *hooks);

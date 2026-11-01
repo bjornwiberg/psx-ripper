@@ -113,12 +113,23 @@ static void webhook_page(int s, const char *msg)
 	char url[512] = "", esc[1024];
 	if (g_hooks.get_webhook) g_hooks.get_webhook(url, sizeof(url));
 	html_attr(esc, sizeof(esc), url);
-	char boxes[1600] = "";
+	char boxes[2400] = "";
 	int mask = g_hooks.get_events ? g_hooks.get_events() : 0;
 	for (int i = 0; i < WH_COUNT; i++) {
 		size_t o = strlen(boxes);
-		snprintf(boxes + o, sizeof(boxes) - o, "<label style='display:block;padding:4px 0'><input type=checkbox name=ev_%s%s> %s <span style='color:#8890a8'>(%s)</span></label>",
+		snprintf(boxes + o, sizeof(boxes) - o, "<label style='display:block;padding:4px 0'><input type=checkbox name=ev_%s%s> %s <span style='color:#8890a8'>(%s)</span>",
 		         WEBHOOK_EVENTS[i], (mask >> i) & 1 ? " checked" : "", T((StrId)(STR_WH_EV_0 + i)), WEBHOOK_EVENTS[i]);
+		if (i == WH_RIP_PROGRESS) {   // how often: every 1 ... 50 percent
+			static const int steps[] = {1, 2, 5, 10, 15, 25, 50};
+			int cur = g_hooks.get_step ? g_hooks.get_step() : 5;
+			o = strlen(boxes);
+			o += snprintf(boxes + o, sizeof(boxes) - o, " <select name=step>");
+			for (int k = 0; k < 7; k++)
+				o += snprintf(boxes + o, sizeof(boxes) - o, "<option value=%d%s>%d %%</option>", steps[k], steps[k] == cur ? " selected" : "", steps[k]);
+			snprintf(boxes + o, sizeof(boxes) - o, "</select>");
+		}
+		o = strlen(boxes);
+		snprintf(boxes + o, sizeof(boxes) - o, "</label>");
 	}
 	char *page = (char *)malloc(6144);
 	if (!page) return;
@@ -198,6 +209,9 @@ static void client_thread(void *arg)
 			if (v[0]) mask |= 1 << i;
 		}
 		if (g_hooks.set_events) g_hooks.set_events(mask);   // before the address: it saves the config
+		char step[8];
+		form_value(body, "step", step, sizeof(step));
+		if (step[0] && g_hooks.set_step) g_hooks.set_step(atoi(step));
 		if (g_hooks.set_webhook) g_hooks.set_webhook(url);
 		webhook_page(s, T(STR_WEB_SAVED));
 	} else if (!strncmp(req, "GET /webhook", 12)) {
