@@ -3893,11 +3893,7 @@ static void draw_page(int c, int y)
 	y = y + lb > ydest ? y + lb : ydest;
 	y += section_head(L, R, y, T(STR_SEC_DEST));
 	y = dest_block(y, 1, 0xC8D0E0) + ls;
-	if (st == DISC_READY && k.prev_rip && k.repair_n) {   // what square does
-		char tip[200];
-		snprintf(tip, sizeof(tip), T(STR_REPAIR_TIP), k.repair_n);
-		ui_text_fit(UI_SMALL, L, y, 0x8890A8, tip, R - L);
-	}
+
 }
 
 static void rip_job_start(int c, int fresh);
