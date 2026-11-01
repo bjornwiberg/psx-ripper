@@ -3058,8 +3058,10 @@ static int own_dialog(const char *msg, int yesno)
 
 // Own result screen after a rip (instead of the system dialog). Returns 1 when a new disc was
 // inserted (rip it right away), 0 for O (back to the start screen).
+static void eject_disc();
 static int result_screen()
 {
+	int ejected = g_eject;   // the rip already ejected the disc
 	disc_inserted = 0;
 	pad_pressed();
 	g_redraw = 2;
@@ -3080,16 +3082,24 @@ static int result_screen()
 				y += lb * 13 / 10;
 			}
 			y += lb / 2;
-			ui_text(UI_SMALL, ui_w() / 2, y, 0xA8B0C8, T(g_eject ? STR_RES_NEXT : STR_RES_NEXT_NOEJECT), UI_CENTER);
-			const char *b[] = {"circle"};
-			const char *l[] = {T(STR_HINT_BACK)};
-			hint_bar(b, l, 1);
+			ui_text(UI_SMALL, ui_w() / 2, y, 0xA8B0C8, T(ejected ? STR_RES_NEXT : STR_RES_NEXT_NOEJECT), UI_CENTER);
+			if (ejected) {
+				const char *b[] = {"circle"};
+				const char *l[] = {T(STR_HINT_BACK)};
+				hint_bar(b, l, 1);
+			} else {   // the disc is still in the drive: offer to eject it
+				const char *b[] = {"triangle", "circle"};
+				const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_BACK)};
+				hint_bar(b, l, 2);
+			}
 			g_drawn = 2;
 			g_backdrop_shown = 0;
 		}
 		flip_frame();
 		if (disc_inserted) return 1;
-		if (pad_pressed() & B_CIRCLE) return 0;
+		int p = pad_pressed();
+		if ((p & B_TRIANGLE) && !ejected) { eject_disc(); ejected = 1; disc_inserted = 0; g_redraw = 2; }
+		if (p & B_CIRCLE) return 0;
 	}
 	return 0;
 }
