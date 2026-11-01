@@ -735,6 +735,25 @@ static void note_hard(uint32_t lba, int edc_bad)
 {
 	if (g_nhard < MAX_HARD) g_hard[g_nhard++] = lba | (edc_bad ? 0x80000000u : 0);
 }
+
+// Sectors that were wrong at first but fixed in the first pass (EDC fixed by a re-read, or two
+// reads that disagreed): they are confirmed in the second pass. Their data is kept to see whether
+// the confirmation changes them.
+#define MAX_SUSPECT 512
+static uint32_t g_suspect[MAX_SUSPECT];
+static uint8_t *g_suspect_data;   // MAX_SUSPECT * RAW_SIZE
+static uint32_t g_nsuspect = 0;
+static volatile uint32_t g_confirmed = 0, g_changed = 0;
+
+static void note_suspect(uint32_t lba, const uint8_t *sector)
+{
+	if (!g_suspect_data) g_suspect_data = (uint8_t *)malloc(MAX_SUSPECT * RAW_SIZE);
+	if (!g_suspect_data || g_nsuspect >= MAX_SUSPECT) return;
+	for (uint32_t i = 0; i < g_nsuspect; i++) if (g_suspect[i] == lba) { memcpy(g_suspect_data + i * RAW_SIZE, sector, RAW_SIZE); return; }
+	g_suspect[g_nsuspect] = lba;
+	memcpy(g_suspect_data + g_nsuspect * RAW_SIZE, sector, RAW_SIZE);
+	g_nsuspect++;
+}
 static volatile int g_abort = 0, g_finished = 0, g_result = 0;
 static volatile uint32_t g_readerrs = 0;
 static int g_ripped = 0;    // discs ripped this session
@@ -811,6 +830,46 @@ static uint32_t edc(const uint8_t *p, int n)
 	return e;
 }
 
+// ECC (P and Q parity, ECMA-130) of mode 1 and mode 2 form 1 sectors. The drive can return a
+// sector whose data and EDC are right but whose ECC bytes are not; Redump compares those too.
+static uint8_t g_ecc_f[256], g_ecc_b[256];
+
+static void ecc_init()
+{
+	for (int i = 0; i < 256; i++) {
+		int j = (i << 1) ^ ((i & 0x80) ? 0x11D : 0);
+		g_ecc_f[i] = (uint8_t)j;
+		g_ecc_b[i ^ j] = (uint8_t)i;
+	}
+}
+
+static int ecc_part_ok(const uint8_t *src, int major_count, int minor_count, int major_mult, int minor_inc, const uint8_t *dest)
+{
+	int size = major_count * minor_count;
+	for (int major = 0; major < major_count; major++) {
+		int index = (major >> 1) * major_mult + (major & 1);
+		uint8_t a = 0, b = 0;
+		for (int minor = 0; minor < minor_count; minor++) {
+			uint8_t t = src[index];
+			index += minor_inc;
+			if (index >= size) index -= size;
+			a ^= t; b ^= t;
+			a = g_ecc_f[a];
+		}
+		a = g_ecc_b[g_ecc_f[a] ^ b];
+		if (dest[major] != a || dest[major + major_count] != (uint8_t)(a ^ b)) return 0;
+	}
+	return 1;
+}
+
+static int ecc_ok(const uint8_t *s, int mode2)
+{
+	static uint8_t t[RAW_SIZE];
+	const uint8_t *p = s;
+	if (mode2) { memcpy(t, s, RAW_SIZE); memset(t + 12, 0, 4); p = t; }   // mode 2: header counts as zero
+	return ecc_part_ok(p + 0xC, 86, 24, 2, 86, p + 0x81C) && ecc_part_ok(p + 0xC, 52, 43, 86, 88, p + 0x8C8);
+}
+
 static const char *check_sector(uint32_t lba, const uint8_t *s)
 {
 	static const uint8_t sync[12] = {0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0};
@@ -825,7 +884,9 @@ static const char *check_sector(uint32_t lba, const uint8_t *s)
 	else return 0;
 	uint32_t stored = st[0] | st[1] << 8 | st[2] << 16 | (uint32_t)st[3] << 24;
 	if (s[15] == 2 && (s[18] & 0x20) && !stored) return 0;   // form 2 EDC is optional
-	return stored == calc ? 0 : "EDC";
+	if (stored != calc) return "EDC";
+	if (s[15] == 1 || !(s[18] & 0x20)) return ecc_ok(s, s[15] == 2) ? 0 : "ECC";   // form 2 has no ECC
+	return 0;
 }
 
 // Form 2 sectors (video, XA audio) may have no EDC (stored as 0): a read error there cannot be
@@ -870,40 +931,68 @@ static void set_cd_speed(int x)   // x = 0: maximum, otherwise the CD speed fact
 	logf("set cd speed %u KB/s -> 0x%x", kbs, atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
 }
 
-// Second pass over the sectors that failed: low speed (2x), the configured tries, the drive's own
-// retries restored. O stops it and keeps the image as it is. A sector
-// that reads (with a correct EDC on the data track) is written into the image at its place.
-// Returns the number of sectors fixed.
+// Second pass, at low speed (2x) with the drive's own retries restored:
+//  - sectors that failed (unreadable, wrong EDC, reads that never agreed) are read again;
+//  - sectors that were fixed in the first pass are confirmed.
+// A sector counts as read only when three reads in a row are identical (and, where the sector has
+// one, the EDC is right); it is then written into the image. O stops the pass and keeps the image.
+static int confirm_read(uint32_t lba, int need_edc, int max_reads, uint8_t *out)
+{
+	static uint8_t prev[SECT_Q] __attribute__((aligned(128)));
+	int streak = 0;
+	for (int t = 0; t < max_reads && !g_abort; t++) {
+		g_rr_try = t + 1;
+		if (read_cd(lba, 1, g_sec) || (need_edc && check_sector(lba, g_sec))) { streak = 0; continue; }
+		if (streak && !memcmp(prev, g_sec, RAW_SIZE)) streak++;
+		else { streak = 1; memcpy(prev, g_sec, RAW_SIZE); }
+		if (streak == 3) { memcpy(out, prev, RAW_SIZE); return 1; }
+	}
+	return 0;
+}
+
 static int second_pass()
 {
-	if (!g_nhard || g_abort || g_write_failed) return 0;
-	logf("second pass: %u sector(s) at 2x", g_nhard);
-	g_pass2_total = g_nhard; g_pass2_done = 0;
+	uint32_t total = g_nhard + g_nsuspect;
+	if (!total || g_abort || g_write_failed) return 0;
+	logf("second pass: %u failed and %u fixed sector(s) at 2x", g_nhard, g_nsuspect);
+	g_pass2_total = total; g_pass2_done = 0;
 	set_cd_speed(2);
 	uint32_t t1_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
-	int data1 = g_tracks[0].ctrl & 0x4, fixed = 0, tries = g_retries;
+	int data1 = g_tracks[0].ctrl & 0x4, patched = 0, reads = g_retries * 3 + 3;
+	static uint8_t sec[RAW_SIZE] __attribute__((aligned(128)));
 	time_t t0 = time(NULL);
-	for (uint32_t k = 0; k < g_nhard && !g_abort; k++) {
-		uint32_t lba = g_hard[k] & 0x7FFFFFFF;
-		int edc_bad = g_hard[k] >> 31, ok = 0;
-		g_rr_lba = lba; g_rr_max = tries;
-		for (int t = 0; t < tries && !ok && !g_abort; t++) {
-			g_rr_try = t + 1;
-			ok = read_cd(lba, 1, g_sec) == 0 && !(data1 && lba < t1_end && check_sector(lba, g_sec));
-		}
+	for (uint32_t k = 0; k < total && !g_abort; k++) {
+		int suspect = k >= g_nhard;
+		uint32_t lba = suspect ? g_suspect[k - g_nhard] : (g_hard[k] & 0x7FFFFFFF);
+		int edc_bad = !suspect && (g_hard[k] >> 31);
+		int in_data = data1 && lba < t1_end;
+		g_rr_lba = lba; g_rr_max = reads;
+		int ok = confirm_read(lba, in_data, reads, sec);   // check_sector() skips sectors without EDC
 		g_rr_max = 0;
-		if (ok && vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, g_sec, RAW_SIZE) == RAW_SIZE) {
-			fixed++;
+		if (suspect) {
+			if (ok) {
+				g_confirmed++;
+				if (memcmp(sec, g_suspect_data + (k - g_nhard) * RAW_SIZE, RAW_SIZE)) {
+					g_changed++;
+					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) patched++;
+					logf("second pass: sector %u confirmed with different data, image updated", lba);
+				}
+			} else {
+				logf("second pass: sector %u could not be confirmed", lba);
+			}
+		} else if (ok && vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) {
+			patched++;
 			if (edc_bad) g_badsect--; else g_readerrs--;
 			g_recovered++;
-			logf("second pass: sector %u recovered (try %d)", lba, g_rr_try);
+			logf("second pass: sector %u recovered", lba);
 		}
 		g_pass2_done = k + 1;
 	}
 	set_cd_speed(g_speed ? speed_x[g_speed] : 0);
-	logf("second pass: %d of %u recovered in %ld s%s", fixed, g_nhard, (long)(time(NULL) - t0), g_abort ? " (stopped with O)" : "");
+	logf("second pass: %d sector(s) written, %u of %u fixed sectors confirmed (%u changed), %ld s%s",
+	     patched, g_confirmed, g_nsuspect, g_changed, (long)(time(NULL) - t0), g_abort ? " (stopped with O)" : "");
 	g_abort = 0;   // O during the second pass keeps the image from the first pass
-	return fixed;
+	return patched;
 }
 
 // Recomputes the per-track MD5s from the finished image (after the second pass patched it).
@@ -949,8 +1038,9 @@ static void rip_thread(void *arg)
 	for (int t = 0; t < g_ntracks; t++) md5_init(&g_md5[t]);
 	tstart_init();
 	edc_init();
+	ecc_init();
 	g_badsect = 0; g_recovered = 0; g_nhard = 0; g_pass2_total = 0; g_pass2_done = 0;
-	g_unstable = 0; g_secure = 0;
+	g_unstable = 0; g_secure = 0; g_nsuspect = 0; g_confirmed = 0; g_changed = 0;
 	if (!g_vbuf) g_vbuf = (uint8_t *)memalign(128, CHUNK * SECT_Q);
 	g_reader_done = 0; g_write_failed = 0;
 	uint32_t data_end = (g_ntracks > 1) ? g_tracks[1].lba : g_leadout;  // LibCrypt lives in track 1
@@ -1031,6 +1121,7 @@ static void rip_thread(void *arg)
 						}
 						if (g_unstable <= 32) logf("sector %u: reads differ, %s after %d more", lba + i, agreed ? "settled" : "NOT settled", tries);
 						if (!agreed) note_hard(lba + i, 1);
+						else note_suspect(lba + i, sp);
 					}
 				}
 				a = b;
@@ -1051,7 +1142,7 @@ static void rip_thread(void *arg)
 					if (read_cd(lba + i, 1, g_sec) == 0 && !check_sector(lba + i, g_sec)) { memcpy(sp, g_sec, SECT_Q); fixed = 1; }
 				}
 				g_rr_max = 0;
-				if (fixed) { g_recovered++; logf("sector %u: %s, fixed by re-read %d", lba + i, why, tries); }
+				if (fixed) { g_recovered++; note_suspect(lba + i, sp); logf("sector %u: %s, fixed by re-read %d", lba + i, why, tries); }
 				else {
 					note_hard(lba + i, 1);
 					if (++g_badsect <= 32) logf("bad sector %u: %s, still wrong after %d re-reads", lba + i, why, tries);
@@ -2096,6 +2187,10 @@ static int rip_disc_inner(int fresh, int autorip)
 	char lcline[480] = "";
 	if (lcinfo[0]) snprintf(lcline, sizeof(lcline), "\n%s", lcinfo);
 	if (rdinfo[0]) snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), "\n%s", rdinfo);
+	if (g_nsuspect) {
+		snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), "\n");
+		snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), T(STR_CONFIRMED), g_nsuspect, g_confirmed);
+	}
 	if (g_badsect) {
 		snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), "\n");
 		snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), T(STR_BAD_SECTORS), g_badsect);

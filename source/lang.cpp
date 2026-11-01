@@ -97,6 +97,7 @@ static const char *en[STR_COUNT] = {
 	"Saved.",
 	"Back to the screen",
 	"USB %d (exFAT, %u GB free)",
+	"Uncertain sectors: %u, confirmed: %u",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -190,6 +191,7 @@ static const char *sv[STR_COUNT] = {
 	"Sparat.",
 	"Tillbaka till skärmen",
 	"USB %d (exFAT, %u GB ledigt)",
+	"Osäkra sektorer: %u, bekräftade: %u",
 };
 
 static const char **table = en;
