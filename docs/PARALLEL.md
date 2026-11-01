@@ -4,6 +4,24 @@ Goal: rip up to three discs at the same time, from the PS3's own drive and up to
 SuperDrives. Each drive has its own destination; with two SuperDrives connected the USB ports are
 taken, so everything goes to the internal hard disk.
 
+## Status (2026-11-01 20:40)
+
+Done and running on the console: three discs ripped at the same time (PS3 drive + two SuperDrives).
+
+- `usbodd` handles two SuperDrives (per-drive pipes, memory, lock; late completions ignored).
+- Home screen: a card per drive (PS3 drive, USB drives by port; they appear and disappear when
+  plugged in or out). Up/down focus, left/right destination per drive, X rip, square repair,
+  triangle eject, SELECT the drive's own settings (or "standard" from START), O cancels the
+  focused card's rip / exits.
+- Every per-disc variable lives in `struct Ctx` (one per card). A thread working for a card sets
+  the thread-local `t_card`; the old global names are macros for the current thread's context.
+  `OnCard` switches a thread to another card for a moment (the UI reading a card's progress).
+  A start-up self-test checks that thread-local storage works, else one rip at a time.
+- A rip is a job thread per card; the card shows the bar, time left, passes, re-reads and the
+  result afterwards. FatFs (exFAT) and the Redump lookups have locks.
+- Still modal: repair (only when nothing rips). Not yet: per-card event feed, a result view per
+  card, status.json `drives[]`.
+
 ## Where we are (2026-11-01)
 
 - `usbodd.cpp` drives one SuperDrive (05AC:1500) over Bulk-Only Transport: unlock, TEST UNIT

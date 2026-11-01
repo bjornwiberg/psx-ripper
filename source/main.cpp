@@ -3545,7 +3545,7 @@ static void fire_event(const char *event)
 	if (!g_webhook_on || !g_webhook[0] || idx < 0 || !((g_webhook_mask >> idx) & 1)) return;
 	char js[2048];
 	event_json(js, sizeof(js), event);
-	logf("webhook event %s (card %d)", event, g_card);
+	logf("webhook event %s (card %d)", event, cur_card());
 	char hdrs[1024];
 	webhook_headers(hdrs, sizeof(hdrs));
 	webhook_send_async(g_webhook, js, hdrs);
