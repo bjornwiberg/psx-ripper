@@ -3109,7 +3109,11 @@ static void filename_screen()
 				listed_name(fn, ln, sizeof(ln));
 				snprintf(lv, sizeof(lv), T(STR_FN_LISTED), ln);
 				ui_text_fit(UI_BODY, L, y, 0xFFFFFF, fb, R - L - ui_w() / 8);
-				if (dn[0]) ui_text(UI_SMALL, R, y + (lb - ls) / 2, 0x8890A8, dn, UI_RIGHT);
+				if (dn[0]) {   // the drive, with its icon like on the cards
+					int tw = ui_text_width(UI_SMALL, dn), isz = ls * 3 / 4, igap = ls / 3;
+					ui_icon(list[i] ? "usb" : "disc", R - tw - igap - isz, y + (lb - ls) / 2 + (ls - isz) / 2, isz, 0x8890A8);
+					ui_text(UI_SMALL, R, y + (lb - ls) / 2, 0x8890A8, dn, UI_RIGHT);
+				}
 				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, lv, R - L);
 				y += lb + ls + ls / 2;
 				shown++;
