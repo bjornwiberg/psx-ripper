@@ -3622,11 +3622,13 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 {
 	int ls = ui_line(UI_SMALL), L = ui_w() / 8, R = ui_w() * 7 / 8;
 	int pad = ls * 2 / 3, isz = ls * 3 / 4, igap = ls / 3, gap = ls / 2, th = ls * 2;
-	// L1/R1 reminder on the right
-	char keys[32];
-	snprintf(keys, sizeof(keys), "L1  ◂  ▸  R1");
-	int kw = ui_text_width(UI_SMALL, keys);
-	ui_text(UI_SMALL, R, y + (th - ls) / 2, 0x8890A8, keys, UI_RIGHT);
+	// L1/R1 reminder on the right: "L1 ◂ ▸ R1" (the arrows drawn, the small font has no such glyphs)
+	int asz0 = ls / 2, kg = ls / 3, w1 = ui_text_width(UI_SMALL, "L1"), w2 = ui_text_width(UI_SMALL, "R1");
+	int kw = w1 + kg + asz0 + kg + asz0 + kg + w2, kx = R - kw, ky = y + (th - ls) / 2;
+	ui_text(UI_SMALL, kx, ky, 0x8890A8, "L1");
+	ui_icon("left", kx + w1 + kg, ky + (ls - asz0) / 2, asz0, 0x8890A8);
+	ui_icon("right", kx + w1 + kg * 2 + asz0, ky + (ls - asz0) / 2, asz0, 0x8890A8);
+	ui_text(UI_SMALL, kx + kw - w2, ky, 0x8890A8, "R1");
 	int room = R - L - kw - gap * 2;
 	char name[NCARDS][32], stt[NCARDS][24];
 	uint32_t scol[NCARDS];
