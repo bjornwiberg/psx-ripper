@@ -2218,6 +2218,27 @@ static void prev_rip_check()
 	snprintf(bp, sizeof(bp), "%s.bin", g_base);
 	g_prev_rip = vf_exists(bp);
 	g_repair_n = g_prev_rip ? riplog_open_count() : 0;
+	// how that image compared with Redump, from its log ("redump=verified Alundra (Europe)"): the
+	// card's Redump line says it, also for a rip from an earlier session
+	Card &k = g_cards[cur_card()];
+	k.rd_done[0] = 0;
+	if (g_prev_rip) {
+		char lp[320];
+		snprintf(lp, sizeof(lp), "%s.log", g_base);
+		VFile *lf = vf_open(lp, "rb");
+		if (lf) {
+			char b[2048];
+			int n = (int)vf_read(lf, b, sizeof(b) - 1);
+			vf_close(lf);
+			b[n > 0 ? n : 0] = 0;
+			const char *rd = strstr(b, "redump=");
+			char code[16] = "", name[RD_NAME] = "";
+			if (rd && sscanf(rd + 7, "%15[^ \n] %159[^\n]", code, name) >= 1) {
+				if (!strcmp(code, "verified")) { snprintf(k.rd_done, sizeof(k.rd_done), T(STR_RD_CARD_OK), name); k.rd_done_col = 0x7CE0A0; }
+				else if (!strcmp(code, "no_match")) { snprintf(k.rd_done, sizeof(k.rd_done), "%s", T(STR_RD_NOMATCH)); k.rd_done_col = 0xFF8A80; }
+			}
+		}
+	}
 	space_check(g_disc_mb ? g_disc_mb : (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024)));
 }
 
