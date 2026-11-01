@@ -2423,7 +2423,8 @@ static int home_screen()
 		if (!disc_present) { if (g_disc_state != DISC_NONE && !g_ident_busy) g_disc_state = DISC_NONE; inserted = 0; }
 		int st = g_disc_state;
 		if (st != last_state) { last_state = st; g_redraw = 2; }
-		if (st == DISC_READY && inserted && g_autostart) return 2;
+		// automatic rip only for a disc not ripped to this destination yet: never overwrite one
+		if (st == DISC_READY && inserted && g_autostart && !g_prev_rip) return 2;
 		char tname[96], saving[160];
 		target_name(g_outdir, tname, sizeof(tname));
 		snprintf(saving, sizeof(saving), T(STR_HOME_SAVING), tname);
@@ -3160,9 +3161,9 @@ static int own_dialog(const char *msg, int yesno)
 	return 2;
 }
 
-// Own result screen after a rip (instead of the system dialog). Returns 1 when a new disc was
-// inserted and "rip immediately" is on (rip it right away), 0 for O or a new disc otherwise
-// (back to the start screen, which identifies it).
+// Own result screen after a rip (instead of the system dialog). Returns 0 for O or a new disc:
+// the start screen then identifies it (and rips it when "rip immediately" is on and it is not
+// ripped to this destination yet).
 static void eject_disc();
 static int result_screen()
 {
@@ -3202,9 +3203,8 @@ static int result_screen()
 			g_backdrop_shown = 0;
 		}
 		flip_frame();
-		if (disc_inserted) {
-			if (g_autostart) return 1;            // rip it right away
-			g_insert_pending = 1;                 // otherwise: home screen identifies it and waits for X
+		if (disc_inserted) {   // always via the home screen: it identifies the disc, rips it when
+			g_insert_pending = 1;  // "rip immediately" is on and it is not ripped here yet, else waits
 			return 0;
 		}
 		int p = pad_pressed();
