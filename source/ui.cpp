@@ -185,6 +185,16 @@ static bool in_disc(float u, float v)
 	float dx = u - 0.5f, dy = v - 0.5f, d = sqrtf(dx * dx + dy * dy);
 	return d <= 0.48f && d >= 0.13f && !(d > 0.27f && d < 0.31f);   // the disc, its hole and a groove
 }
+// Internal drive: a box with a disc slot and a light.
+static bool in_drive(float u, float v)
+{
+	bool box = u >= 0.04f && u <= 0.96f && v >= 0.26f && v <= 0.74f;
+	bool hole = u >= 0.11f && u <= 0.89f && v >= 0.33f && v <= 0.67f;
+	if (box && !hole) return true;
+	if (u >= 0.2f && u <= 0.62f && v >= 0.47f && v <= 0.53f) return true;   // the slot
+	float dx = u - 0.77f, dy = v - 0.5f;
+	return dx * dx + dy * dy <= 0.045f * 0.045f;                          // the light
+}
 // Medal (verified against Redump): a disc with a ring and two ribbon tails.
 static bool in_medal(float u, float v)
 {
@@ -203,7 +213,7 @@ static bool in_warn(float u, float v)
 }
 void ui_icon(const char *name, int x0, int y0, int size, uint32_t rgb)
 {
-	int kind = !strcmp(name, "usb") ? 1 : !strcmp(name, "medal") ? 2 : !strcmp(name, "warn") ? 3 : !strcmp(name, "question") ? 4 : 0;
+	int kind = !strcmp(name, "usb") ? 1 : !strcmp(name, "medal") ? 2 : !strcmp(name, "warn") ? 3 : !strcmp(name, "question") ? 4 : !strcmp(name, "drive") ? 5 : 0;
 	for (int y = y0; y < y0 + size; y++) {
 		if (y < 0 || y >= (int)display_height) continue;
 		uint32_t *p = fb_row(y);
@@ -215,7 +225,7 @@ void ui_icon(const char *name, int x0, int y0, int size, uint32_t rgb)
 					float u = (x - x0 + (sx + 0.5f) / 4) / size, v = (y - y0 + (sy + 0.5f) / 4) / size;
 					float qd = sqrtf((u - 0.5f) * (u - 0.5f) + (v - 0.5f) * (v - 0.5f));
 					bool in = kind == 1 ? in_usb(u, v) : kind == 2 ? in_medal(u, v) : kind == 3 ? in_warn(u, v)
-					        : kind == 4 ? (qd <= 0.48f && qd >= 0.40f) : in_disc(u, v);
+					        : kind == 4 ? (qd <= 0.48f && qd >= 0.40f) : kind == 5 ? in_drive(u, v) : in_disc(u, v);
 					if (in) n++;
 				}
 			if (n) p[x] = blend(p[x], rgb, n / 16.0f);

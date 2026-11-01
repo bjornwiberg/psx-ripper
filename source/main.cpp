@@ -3138,7 +3138,7 @@ static void filename_screen()
 				ui_text_fit(UI_BODY, L, y, 0xFFFFFF, fb, R - L - ui_w() / 8);
 				if (dn[0]) {   // the drive, with its icon like on the cards
 					int tw = ui_text_width(UI_SMALL, dn), isz = ls * 3 / 4, igap = ls / 3;
-					ui_icon(list[i] ? "usb" : "disc", R - tw - igap - isz, y + (lb - ls) / 2 + (ls - isz) / 2, isz, 0x8890A8);
+					ui_icon(list[i] ? "usb" : "drive", R - tw - igap - isz, y + (lb - ls) / 2 + (ls - isz) / 2, isz, 0x8890A8);
 					ui_text(UI_SMALL, R, y + (lb - ls) / 2, 0x8890A8, dn, UI_RIGHT);
 				}
 				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, lv, R - L);
@@ -3576,22 +3576,38 @@ static int draw_card(int c, int y, int focused, int single)
 	int ax = single ? cx : left, maxw = right - left;   // nothing goes past the card's edges
 	UiAlign al = single ? UI_CENTER : UI_LEFT;
 	int gap = ui_w() / 60;
-	// right column: drive (icon + name), under it serial and size
-	char drive[96], idl[64] = "";
-	source_name(c ? c - 1 : -1, drive, sizeof(drive));
+	// right column: the drive (icon + "USB 0" / "Intern läsare"), under it its model, then the disc
+	// in it (disc icon + ID and size)
+	char drive[96], model[48] = "", idl[64] = "";
+	if (c && usbodd_port(c - 1) >= 0) snprintf(drive, sizeof(drive), T(STR_SRC_USB_PORT), usbodd_port(c - 1));
+	else if (c) snprintf(drive, sizeof(drive), "USB");
+	else snprintf(drive, sizeof(drive), "%s", T(STR_SRC_BD));
+	if (c) snprintf(model, sizeof(model), "%s", usbodd_name(c - 1)[0] ? usbodd_name(c - 1) : "CD/DVD");
 	if (known) snprintf(idl, sizeof(idl), "%s  ·  %u MB", k.serial, k.mb);
 	int isz = ls * 3 / 4, igap = ls / 3, tw = ui_text_width(UI_SMALL, drive);
+	const char *dicon = c ? "usb" : "drive";
 	int rw = 0;   // width the right column takes from the left one
-	if (single) {   // above the title, centred
-		int tx = cx - (tw + isz + igap) / 2 + isz + igap;
-		ui_icon(c ? "usb" : "disc", tx - igap - isz, y - ls + (ls - isz) / 2, isz, 0x8890A8);
-		ui_text(UI_SMALL, tx, y - ls, 0x8890A8, drive);
+	if (single) {   // above the title, centred: the drive and its model on one line
+		char both[160];
+		snprintf(both, sizeof(both), model[0] ? "%s · %s" : "%s", drive, model);
+		int bw = ui_text_width(UI_SMALL, both), tx = cx - (bw + isz + igap) / 2 + isz + igap;
+		ui_icon(dicon, tx - igap - isz, y - ls + (ls - isz) / 2, isz, 0x8890A8);
+		ui_text(UI_SMALL, tx, y - ls, 0x8890A8, both);
 	} else {
-		ui_icon(c ? "usb" : "disc", right - tw - igap - isz, y + (lb - ls) / 2 + (ls - isz) / 2, isz, 0x8890A8);
-		ui_text(UI_SMALL, right - tw, y + (lb - ls) / 2, 0x8890A8, drive);
-		if (idl[0]) ui_text(UI_SMALL, right, y + lb, 0x8890A8, idl, UI_RIGHT);
-		int iw = ui_text_width(UI_SMALL, idl);
-		rw = (tw + isz + igap > iw ? tw + isz + igap : iw) + gap;
+		int ty = y + (lb - ls) / 2;
+		ui_icon(dicon, right - tw - igap - isz, ty + (ls - isz) / 2, isz, 0x8890A8);
+		ui_text(UI_SMALL, right - tw, ty, 0x8890A8, drive);
+		if (model[0]) ui_text(UI_SMALL, right, y + lb, 0x6870A0, model, UI_RIGHT);
+		int iw = 0;
+		if (idl[0]) {
+			iw = ui_text_width(UI_SMALL, idl) + isz + igap;
+			ui_icon("disc", right - iw, y + lb + ls + (ls - isz) / 2, isz, 0x8890A8);
+			ui_text(UI_SMALL, right, y + lb + ls, 0x8890A8, idl, UI_RIGHT);
+		}
+		int mw = ui_text_width(UI_SMALL, model), w = tw + isz + igap;
+		if (mw > w) w = mw;
+		if (iw > w) w = iw;
+		rw = w + gap;
 	}
 	int ly = y;
 	// title, with the Redump icon after it: medal = verified, warning = does not match, ? = not known yet
@@ -3608,7 +3624,12 @@ static int draw_card(int c, int y, int focused, int single)
 		ui_text_fit(UI_BODY, tx, ly, 0xFFFFFF, t, room);
 		ui_icon(icon, tx + w + igap, ly + (lb - bsz) / 2, bsz, icol);
 		ly += lb;
-		if (single) { ui_text(UI_SMALL, cx, ly, 0x8890A8, idl, UI_CENTER); ly += ls; }
+		if (single) {
+			int iw = ui_text_width(UI_SMALL, idl), tx = cx - (iw + isz + igap) / 2 + isz + igap;
+			ui_icon("disc", tx - igap - isz, ly + (ls - isz) / 2, isz, 0x8890A8);
+			ui_text(UI_SMALL, tx, ly, 0x8890A8, idl);
+			ly += ls;
+		}
 	} else {
 		const char *msg = st == DISC_READING ? T(c ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
 		ui_text_fit(UI_BODY, ax, ly, 0xFFFFFF, msg, maxw - rw, al);
@@ -3658,6 +3679,7 @@ static int draw_card(int c, int y, int focused, int single)
 		} else if (st == DISC_READY && k.prev_rip) {   // already ripped here: one line, "known errors" in yellow
 			char p2[96], as[300];
 			if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), k.repair_n);
+			else if (k.rd_state == 1) snprintf(p2, sizeof(p2), "%s", T(STR_HERE_VERIFIED));   // the medal says the rest
 			else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
 			const char *en = strrchr(k.exist, '/');
 			en = en ? en + 1 : k.exist;
