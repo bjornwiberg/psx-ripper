@@ -250,6 +250,9 @@ static const char *en[STR_COUNT] = {
 	"Repair reads only these %d sectors again – clean the disc first.",
 	"Skip re-reads",
 	"Skipping the re-reads – the rip keeps what it has, repair the rest later",
+	"Destination: ",
+	"%u GB free",
+	"File name: ",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -496,6 +499,9 @@ static const char *sv[STR_COUNT] = {
 	"Laga läser om bara de %d sektorerna – rengör skivan först.",
 	"Hoppa över omläsning",
 	"Hoppar över omläsningen – rippen sparas som den är, laga resten senare",
+	"Mål: ",
+	"%u GB ledigt",
+	"Filnamn: ",
 };
 
 static const char **table = en;

@@ -2049,6 +2049,45 @@ static void space_check(uint32_t disc_mb)
 // Destination next to the current one in the list hard disk, USB 0, USB 1, ... (by port; a FAT32
 // drive is mounted by the PS3 as /dev_usbNNN, an exFAT drive is reached through FatFs).
 // dir = +1 forward, -1 back.
+// The destination as "Hårddisk · PSXISO" (drive and folder) and its free space in GB.
+static void dest_parts(const char *dir, char *out, size_t n, unsigned *gb)
+{
+	int port;
+	uint64_t mb = 0;
+	char label[48];
+	const char *folder = strchr(dir + 1, '/');
+	if (sscanf(dir, "exfat%1d:", &port) == 1) {
+		vf_free_mb(dir, &mb);
+		snprintf(label, sizeof(label), T(STR_DEST_EXFAT), port);
+		folder = strchr(dir, '/');
+	} else {
+		char dev[16];
+		snprintf(dev, sizeof(dev), "%.12s", dir);
+		char *sl = strchr(dev + 1, '/');
+		if (sl) *sl = 0;
+		if (disk_free(dev, &mb)) mb = 0;
+		if (sscanf(dir, "/dev_usb%3d", &port) == 1) snprintf(label, sizeof(label), T(STR_DEST_USB), port);
+		else snprintf(label, sizeof(label), "%s", T(STR_DEST_HDD));
+	}
+	snprintf(out, n, "%s · %s", label, folder ? folder + 1 : "");
+	*gb = (unsigned)(mb / 1024);
+}
+
+// A file name that fits maxw in font: whole, or cut in the middle so its end (disc ID, .bin) shows.
+static void fit_middle(UiFont font, const char *in, char *out, size_t n, int maxw)
+{
+	snprintf(out, n, "%s", in);
+	int len = (int)strlen(in), keep = len;
+	while (ui_text_width(font, out) > maxw && keep > 4) {
+		keep--;
+		int head = keep / 2 + keep % 2, tail = keep / 2;
+		while (head > 0 && ((unsigned char)in[head] & 0xC0) == 0x80) head--;   // whole UTF-8 characters
+		int ts = len - tail;
+		while (ts < len && ((unsigned char)in[ts] & 0xC0) == 0x80) ts++;
+		snprintf(out, n, "%.*s…%s", head, in, in + ts);
+	}
+}
+
 // "Mål: Hårddisk · PSXISO/Croc 2 (Europe) [SLES_020.88].bin · 339 GB ledigt" (no file: just the folder)
 static void dest_line(const char *dir, const char *fname, char *out, size_t n, int maxw = 0, const char *wrap = "%s", UiFont font = UI_SMALL)
 {
@@ -3716,11 +3755,29 @@ static void draw_page(int c, int y)
 		ui_text_fit(UI_BODY, L, y, 0xFFFFFF, msg, lw);
 	}
 	y += lb + ls / 2;
-	char dl[420];
+	// the destination: "Mål: Hårddisk · PSXISO" with the free space on the right, under it the file name
+	auto dest_block = [&](int yy, int arrows, uint32_t col) {
+		char dp[120], m[200], gbs[48], fl[260], fn[260];
+		unsigned gb = 0;
+		dest_parts(k.dest[0] ? k.dest : HDD_DIR, dp, sizeof(dp), &gb);
+		snprintf(m, sizeof(m), arrows ? "‹ %s%s ›" : "%s%s", T(STR_DEST_LABEL), dp);   // ←→ where this drive saves
+		snprintf(gbs, sizeof(gbs), T(STR_DEST_FREE), gb);
+		int gw = ui_text_width(UI_BODY, gbs);
+		ui_text(UI_BODY, R, yy, 0x8890A8, gbs, UI_RIGHT);
+		ui_text_fit(UI_BODY, L, yy, col, m, R - L - gw - ui_w() / 40);
+		yy += lb;
+		if (known && k.fname[0]) {
+			snprintf(fl, sizeof(fl), "%s.bin", k.fname);
+			int pw = ui_text_width(UI_SMALL, T(STR_FILE_LABEL));
+			fit_middle(UI_BODY, fl, fn, sizeof(fn), R - L - pw);
+			ui_text(UI_SMALL, L, yy + (lb - ls) / 2, 0x8890A8, T(STR_FILE_LABEL));
+			ui_text(UI_BODY, L + pw, yy, 0xC8D0E0, fn);
+			yy += lb;
+		}
+		return yy;
+	};
 	if (k.job) {
-		dest_line(k.dest[0] ? k.dest : HDD_DIR, k.fname, dl, sizeof(dl), lw);
-		ui_text_fit(UI_SMALL, L, y, 0x8890A8, dl, lw);
-		y += ls * 3;
+		y = dest_block(y, 0, 0x8890A8) + ls;
 		OnCard o(c);
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done, tot = g_total ? g_total : 1;
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / tot);
@@ -3800,9 +3857,7 @@ static void draw_page(int c, int y)
 		y += lb + ls / 3;
 	}
 	y += ls / 2;
-	dest_line(k.dest[0] ? k.dest : HDD_DIR, known ? k.fname : "", dl, sizeof(dl), R - L, "‹ %s ›", UI_BODY);   // ←→ where this drive saves
-	ui_text_fit(UI_BODY, L, y, 0xC8D0E0, dl, R - L);
-	y += lb + ls;
+	y = dest_block(y, 1, 0xC8D0E0) + ls;
 	if (st == DISC_READY && k.prev_rip && k.repair_n) {   // what square does
 		char tip[200];
 		snprintf(tip, sizeof(tip), T(STR_REPAIR_TIP), k.repair_n);
