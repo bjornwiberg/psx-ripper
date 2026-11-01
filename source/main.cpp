@@ -3260,10 +3260,10 @@ static int home_screen()
 				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
 				footer_note(wl);
 			}
-			if (f.job) {   // ripping: O cancels this rip, the other cards go on
-				const char *b[] = {"circle", "select", "start"};
-				const char *l[] = {T(STR_HINT_CANCEL_RIP), T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS)};
-				hint_bar(b, l, 3);
+			if (f.job) {   // ripping: O cancels this rip, the other cards go on; its settings wait until it is done
+				const char *b[] = {"circle", "start"};
+				const char *l[] = {T(STR_HINT_CANCEL_RIP), T(STR_HINT_SETTINGS)};
+				hint_bar(b, l, 2);
 			} else if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
 				const char *b[] = {"cross", "square", "triangle", "select", "start", "circle"};
 				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
@@ -3286,7 +3286,7 @@ static int home_screen()
 		int p = pad_pressed();
 		if ((p & B_UP) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }
 		if ((p & B_DOWN) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }
-		if (f.job) {   // a ripping card: only cancel (and the settings below)
+		if (f.job) {   // a ripping card: only cancel, and the general settings (they apply to the next rips)
 			if (p & B_CIRCLE) {
 				char m[300];
 				snprintf(m, sizeof(m), T(STR_CANCEL_RIP_Q), f.title);
@@ -3295,7 +3295,7 @@ static int home_screen()
 				g_redraw = 2;
 				continue;
 			}
-			p &= B_SELECT | B_START;
+			p &= B_START;   // its own settings were taken when the rip started: not while it runs
 		}
 		if (p & (B_LEFT | B_RIGHT)) {   // where this drive saves
 			char od[64];
