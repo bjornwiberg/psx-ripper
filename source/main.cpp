@@ -2936,6 +2936,11 @@ static void webhook_settings_screen()
 			if (row >= first + VIS) first = row - VIS + 1;
 			int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10;
 			int left = ui_w() / 6, right = ui_w() * 5 / 6;
+			{   // more rows above / below: arrows at the right edge, as in the settings (L2/R2 jump a page)
+				int asz = ui_line(UI_SMALL) * 2 / 3, ax = right + ui_w() / 40;
+				if (first > 0) ui_icon("up", ax, top + (lh * 3 / 4 - asz) / 2 - lh / 8, asz, 0xC8D0E0);
+				if (first + VIS < NROWS) ui_icon("down", ax, top + (VIS - 1) * lh + (lh * 3 / 4 - asz) / 2 - lh / 8, asz, 0xC8D0E0);
+			}
 			for (int r = first; r < NROWS && r < first + VIS; r++) {
 				int y = top + (r - first) * lh;
 				char label[160], val[160];
@@ -2987,6 +2992,8 @@ static void webhook_settings_screen()
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
+		if (p & B_R2) row = row + VIS < NROWS ? row + VIS : NROWS - 1;   // a page down / up
+		if (p & B_L2) row = row >= VIS ? row - VIS : 0;
 		if (p & B_CIRCLE) return;
 		if ((p & B_CROSS) && row == R_ADDR) {
 			char url[512];
@@ -3761,7 +3768,7 @@ static void draw_page(int c, int y)
 		char dp[120], m[200], gbs[48], fl[260], fn[260];
 		unsigned gb = 0;
 		dest_parts(k.dest[0] ? k.dest : HDD_DIR, dp, sizeof(dp), &gb);
-		snprintf(m, sizeof(m), arrows ? "‹ %s%s ›" : "%s%s", T(STR_DEST_LABEL), dp);   // ←→ where this drive saves
+		snprintf(m, sizeof(m), arrows ? "‹ %s%s ›" : "%s%s", arrows ? "" : T(STR_DEST_LABEL), dp);   // ←→ where this drive saves
 		snprintf(gbs, sizeof(gbs), T(STR_DEST_FREE), gb);
 		int gw = ui_text_width(UI_SMALL, gbs);   // the free space: small, on the right
 		ui_text(UI_SMALL, R, yy + (lb - ls) / 2, 0x8890A8, gbs, UI_RIGHT);
@@ -3801,6 +3808,7 @@ static void draw_page(int c, int y)
 		char ph[160];
 		if (g_abort) snprintf(ph, sizeof(ph), "%s", T(STR_CANCELLING));
 		else if (g_skip && (g_phase == 1 || g_phase == 2)) snprintf(ph, sizeof(ph), "%s", T(STR_SKIPPING));
+		else if (g_phase == 4) snprintf(ph, sizeof(ph), T(STR_CHECKING), pos, g_total);
 		else if (g_phase == 3) snprintf(ph, sizeof(ph), "%s", T(STR_FINISHING));
 		else if (g_pass2_total) snprintf(ph, sizeof(ph), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
 		else snprintf(ph, sizeof(ph), T(STR_PROGRESS), pos, g_total);
@@ -3825,31 +3833,41 @@ static void draw_page(int c, int y)
 		}
 		return;
 	}
-	// not ripping
-	if (st == DISC_READY && k.prev_rip) {   // already ripped here
-		char p2[96], as[300], line[400];
-		if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), k.repair_n);
-		else if (k.rd_state == 1) snprintf(p2, sizeof(p2), "%s", T(STR_HERE_VERIFIED));
-		else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
+	// not ripping: the disc here, then where it goes; headed groups with room between them
+	y += ls;
+	y += section_head(L, R, y, T(STR_SEC_DISC));
+	if (st == DISC_READY && k.prev_rip) {   // already ripped here: how it stands, in words
+		char as[300], line[400];
 		const char *en = strrchr(k.exist, '/');
 		en = en ? en + 1 : k.exist;
 		const char *p1 = T(STR_ALREADY_HERE);
 		if (strcmp(en, k.fname)) { snprintf(as, sizeof(as), T(STR_ALREADY_AS), en); p1 = as; }
-		int w1 = ui_text_width(UI_BODY, p1);
+		const char *p2 = k.rd_state == 1 ? T(STR_HERE_VERIFIED) : k.rd_state == 0 ? T(STR_HERE_NOMATCH) : T(STR_HERE_UNCHECKED);
+		uint32_t c2 = k.rd_state == 0 ? 0xFF8A80 : 0x8FA8D8;
 		snprintf(line, sizeof(line), "%s", p1);
-		ui_text_fit(UI_BODY, L, y, 0x8FA8D8, line, lw);
-		if (w1 < lw) ui_text_fit(UI_BODY, L + w1, y, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2, lw - w1);
+		int w1 = ui_text_width(UI_BODY, line);
+		ui_text_fit(UI_BODY, L, y, 0x8FA8D8, line, R - L);
+		if (w1 < R - L) ui_text_fit(UI_BODY, L + w1, y, c2, p2, R - L - w1);
 		y += lb + ls / 3;
-	}
-	if (st == DISC_READY && k.rd_state == 0) {   // Redump said no
-		ui_text_fit(UI_BODY, L, y, 0xFF8A80, T(STR_RD_NOMATCH), R - L);
+		if (k.repair_n) {
+			char e[120];
+			snprintf(e, sizeof(e), T(STR_KNOWN_ERRORS), k.repair_n);
+			ui_text_fit(UI_BODY, L, y, 0xF0C060, e, R - L);
+			y += lb + ls / 3;
+		}
+		if (k.rd_state < 0) {   // what the check does
+			ui_text_fit(UI_SMALL, L, y, 0x8890A8, T(STR_CHECK_TIP), R - L);
+			y += ls + ls / 3;
+		}
+	} else if (st == DISC_READY) {
+		ui_text_fit(UI_BODY, L, y, 0x8FA8D8, T(STR_NOT_RIPPED_HERE), R - L);
 		y += lb + ls / 3;
 	}
 	if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // the last rip on this drive
 		char last[260];
 		snprintf(last, sizeof(last), T(STR_LAST_RIP), k.res);
-		ui_text_fit(UI_SMALL, L, y + (lb - ls) / 2, k.res_col, last, R - L);
-		y += lb + ls / 3;
+		ui_text_fit(UI_SMALL, L, y, k.res_col, last, R - L);
+		y += ls + ls / 3;
 	}
 	if (st == DISC_READY && k.space_short && !k.prev_rip) {
 		char sl[200];
@@ -3857,7 +3875,8 @@ static void draw_page(int c, int y)
 		ui_text_fit(UI_BODY, L, y, 0xFF8A80, sl, R - L);
 		y += lb + ls / 3;
 	}
-	y += ls / 2;
+	y += lb;
+	y += section_head(L, R, y, T(STR_SEC_DEST));
 	y = dest_block(y, 1, 0xC8D0E0) + ls;
 	if (st == DISC_READY && k.prev_rip && k.repair_n) {   // what square does
 		char tip[200];
@@ -3867,6 +3886,7 @@ static void draw_page(int c, int y)
 }
 
 static void rip_job_start(int c, int fresh);
+static void check_job_start(int c);
 
 
 // Home screen: a card per drive. Up/down picks a card; left/right its destination; X, square and
@@ -3974,6 +3994,10 @@ static int home_screen()
 				const char *b[] = {"cross", "square", "triangle", "select"};
 				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
 				hint_bar(b, l, 4);
+			} else if (st == DISC_READY && f.prev_rip && f.rd_state < 0) {   // ripped here, not checked: square checks the file
+				const char *b[] = {"cross", "square", "triangle", "select"};
+				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_CHECK), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
+				hint_bar(b, l, 4);
 			} else if (st == DISC_READY) {
 				const char *b[] = {"cross", "triangle", "select"};
 				const char *l[] = {T(f.prev_rip ? STR_HINT_NEWRIP : STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
@@ -4035,6 +4059,11 @@ static int home_screen()
 			int fr = f.fresh;
 			f.fresh = 0;
 			rip_job_start(sel, fr);   // rip, also over an existing rip (X is always a rip); the card shows it
+			g_redraw = 2;
+			continue;
+		}
+		if ((p & B_SQUARE) && st == DISC_READY && f.prev_rip && !f.repair_n && f.rd_state < 0 && !f.job) {   // check the file
+			check_job_start(sel);
 			g_redraw = 2;
 			continue;
 		}
@@ -4479,6 +4508,130 @@ static int rip_disc(int fresh, int autorip)
 	int ok = rip_disc_inner(fresh, autorip);
 	if (g_use == SRC_BD) lv1_storage_unpatch();
 	return ok;
+}
+
+
+// Checks an earlier rip against Redump from its file, without the disc: MD5 per track (track
+// bounds from its .cue), compared like after a rip; the result goes into its rip log (made if it
+// has none). Runs as the card's job; the tab and the page show its progress.
+static void check_job_thread(void *arg)
+{
+	t_card = (int)(long)arg;
+	Card &k = g_cards[t_card];
+	char base[256], path[320];
+	snprintf(base, sizeof(base), "%s", k.exist);
+	g_phase = 4; g_done = 0; g_total = 0; g_readpos = 0; g_pass2_total = 0;
+	g_rd_result = -1; g_rd_result_name[0] = 0;
+	// track starts (sectors) from the cue: INDEX 00 when there is one (the pregap belongs to the track)
+	uint32_t st[MAX_TRACKS + 1];
+	int nt = 0;
+	snprintf(path, sizeof(path), "%s.cue", base);
+	VFile *cf = vf_open(path, "rb");
+	if (cf) {
+		char cb[8192];
+		int n = (int)vf_read(cf, cb, sizeof(cb) - 1);
+		vf_close(cf);
+		cb[n > 0 ? n : 0] = 0;
+		int i0 = 0;
+		for (char *l = strtok(cb, "\r\n"); l; l = strtok(NULL, "\r\n")) {
+			unsigned idx, m, sec, fr;
+			if (strstr(l, "TRACK ")) { i0 = 0; if (nt < MAX_TRACKS) nt++; continue; }
+			if (nt && sscanf(l, " INDEX %u %u:%u:%u", &idx, &m, &sec, &fr) == 4) {
+				uint32_t lba = (m * 60 + sec) * 75 + fr;
+				if (idx == 0) { st[nt - 1] = lba; i0 = 1; }
+				else if (idx == 1 && !i0) st[nt - 1] = lba;
+			}
+		}
+	}
+	if (!nt) { nt = 1; st[0] = 0; }   // no cue: the whole image as one track
+	st[0] = 0;
+	snprintf(path, sizeof(path), "%s.bin", base);
+	VFile *f = vf_open(path, "rb");
+	uint64_t size = 0;
+	if (f) {   // size: read to the end once is slow; seek-free estimate from the identification
+		size = (uint64_t)k.mb * 1024 * 1024;
+	}
+	g_total = size ? (uint32_t)(size / RAW_SIZE) : 1;
+	Md5 md[MAX_TRACKS + 1];
+	for (int t = 0; t < nt; t++) md5_init(&md[t]);
+	uint8_t *buf = (uint8_t *)malloc(512 * RAW_SIZE);
+	uint32_t lba = 0;
+	int t = 0;
+	while (f && buf && !g_abort) {
+		size_t got = vf_read(f, buf, 512 * RAW_SIZE);
+		uint32_t secs = (uint32_t)(got / RAW_SIZE);
+		for (uint32_t i = 0; i < secs; i++, lba++) {
+			while (t + 1 < nt && lba >= st[t + 1]) t++;
+			md5_update(&md[t], buf + (size_t)i * RAW_SIZE, RAW_SIZE);
+		}
+		g_done = lba;
+		if (lba > g_total) g_total = lba;
+		if (got < 512 * RAW_SIZE) break;
+	}
+	if (f) vf_close(f);
+	free(buf);
+	if (!f) logf("check %s: no image", base);
+	else if (g_abort) logf("check %s: cancelled", base);
+	else {
+		g_total = lba;
+		g_ntracks = nt;
+		for (int i = 0; i < nt; i++) { md5_final(&md[i], g_track_md5bin[i]); md5_hex(g_track_md5bin[i], g_track_md5[i]); }
+		g_phase = 3;
+		char info[RD_NAME + 80];
+		redump_verify(info, sizeof(info));
+		logf("check %s: %d track(s), redump %s %s", base, nt, rd_result_str(), g_rd_result_name);
+		// into its log: replace the redump= line, or make a small log
+		snprintf(path, sizeof(path), "%s.log", base);
+		static char lb2[65536];
+		int n = 0;
+		VFile *lf = vf_open(path, "rb");
+		if (lf) { n = (int)vf_read(lf, lb2, sizeof(lb2) - 1); vf_close(lf); }
+		lb2[n > 0 ? n : 0] = 0;
+		char rdl[RD_NAME + 32];
+		snprintf(rdl, sizeof(rdl), "redump=%s%s%s\n", rd_result_str(), g_rd_result_name[0] ? " " : "", g_rd_result_name);
+		VFile *of = vf_open(path, "wb");
+		if (of) {
+			if (n > 0) {
+				int put = 0;
+				for (char *l = lb2; *l; ) {
+					char *e = strchr(l, '\n');
+					size_t len = e ? (size_t)(e - l + 1) : strlen(l);
+					if (!strncmp(l, "redump=", 7)) { if (!put) { vf_printf(of, "%s", rdl); put = 1; } }
+					else vf_write(of, l, len);
+					l += len;
+				}
+				if (!put) vf_printf(of, "%s", rdl);
+			} else {
+				vf_printf(of, "PSX Ripper rip log\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n", k.title, k.serial);
+				vf_printf(of, "sectors=%u\n", lba);
+				for (int i = 0; i < nt; i++) vf_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], g_track_md5[i]);
+				vf_printf(of, "%s", rdl);
+			}
+			vf_close(of);
+		}
+		fire_event("check_finished");
+	}
+	prev_rip_check();   // the icon and the status follow the log
+	g_state = ST_HOME;
+	g_phase = 0;
+	__sync_synchronize();
+	k.job = 0;
+	g_redraw = 2;
+	sysThreadExit(0);
+}
+
+static void check_job_start(int c)
+{
+	Card &k = g_cards[c];
+	if (k.job || !k.exist[0]) return;
+	k.job = 1;
+	k.res[0] = 0;
+	k.eta_t0 = 0;
+	OnCard o(c);
+	g_state = ST_RIPPING;   // busy (status, deploy); the drive is not used
+	g_abort = 0; g_finished = 0; g_skip = 0;
+	sys_ppu_thread_t t;
+	if (sysThreadCreate(&t, check_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxcheck")) { k.job = 0; g_state = ST_HOME; }
 }
 
 // A rip in the background, for one card: the home screen keeps running and shows it in the card.
