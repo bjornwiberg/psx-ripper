@@ -1304,7 +1304,7 @@ static void fmt_local(time_t t, char *out, size_t n)
 
 // Own progress screen (instead of the system dialog, whose button reads "Back"): title, bar,
 // detail text and "O Cancel". Draws only when called; the caller decides when something changed.
-static void progress_draw(const char *title, const char *detail, uint32_t pct, const char *note = NULL)
+static void progress_draw(const char *title, const char *detail, uint32_t pct, const char *note = NULL, int cancelling = 0)
 {
 	if (pct > 100) pct = 100;
 	draw_backdrop();
@@ -1316,10 +1316,13 @@ static void progress_draw(const char *title, const char *detail, uint32_t pct, c
 	char p[16];
 	snprintf(p, sizeof(p), "%u %%", pct);
 	ui_text(UI_SMALL, ui_w() / 2, y + bh + ui_line(UI_SMALL) / 2, 0xE8E8F0, p, UI_CENTER);
+	if (cancelling) note = T(STR_CANCELLING);   // O was pressed: say what we are waiting for
 	if (note && note[0]) ui_text(UI_SMALL, ui_w() / 2, y + bh + ui_line(UI_SMALL) * 2, 0xF0C060, note, UI_CENTER);
-	const char *b[] = {"circle"};
-	const char *l[] = {T(STR_HINT_CANCEL)};
-	hint_bar(b, l, 1);
+	if (!cancelling) {
+		const char *b[] = {"circle"};
+		const char *l[] = {T(STR_HINT_CANCEL)};
+		hint_bar(b, l, 1);
+	}
 	g_drawn = 2;
 	g_backdrop_shown = 0;   // a system dialog shown afterwards needs its plain backdrop again
 }
@@ -1344,19 +1347,19 @@ static void redump_download_screen()
 	sysThreadCreate(&tid, download_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxredump");
 	pad_pressed();
 	uint32_t shown = 101, shown_kb = ~0u;
-	int last_phase = -1;
+	int last_phase = -1, shown_abort = 0;
 	while (!g_dl_finished) {
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_dl_abort = 1;
 		// each phase runs the bar from 0 to 100 %: first the download (bytes), then the index
 		uint32_t tot = g_dl_total ? g_dl_total : 1;
 		uint32_t pct = g_dl_total ? (uint32_t)((uint64_t)g_dl_done * 100 / tot) : 0;
 		uint32_t kb = g_dl_done / 1024;
-		if (pct != shown || g_dl_phase != last_phase || (!g_dl_phase && kb / 64 != shown_kb / 64)) {
+		if (pct != shown || g_dl_phase != last_phase || (!g_dl_phase && kb / 64 != shown_kb / 64) || g_dl_abort != shown_abort) {
 			char pm[96];
 			if (g_dl_phase) snprintf(pm, sizeof(pm), "%s", T(STR_RD_INDEXING));
 			else snprintf(pm, sizeof(pm), T(STR_RD_DL_PROGRESS), kb, g_dl_total / 1024);
-			progress_draw(T(STR_RD_DOWNLOADING), pm, pct);
-			shown = pct; shown_kb = kb; last_phase = g_dl_phase;
+			progress_draw(T(STR_RD_DOWNLOADING), pm, pct, NULL, g_dl_abort);
+			shown = pct; shown_kb = kb; last_phase = g_dl_phase; shown_abort = g_dl_abort;
 		}
 		flip_frame();
 	}
@@ -1636,7 +1639,7 @@ static int rip_disc_inner(int fresh, int autorip)
 	snprintf(ripmsg, sizeof(ripmsg), T(STR_RIPPING), name, g_serial[0] ? g_serial : T(STR_UNKNOWN));
 	pad_pressed();
 	uint32_t shown = 101, shown_pos = 0, shown_lba = 0;
-	int shown_try = -1;
+	int shown_try = -1, shown_abort = 0;
 	while (!g_finished) {
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
@@ -1644,7 +1647,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		int rmax = g_rr_max, rtry = rmax ? g_rr_try : 0;
 		uint32_t rlba = g_rr_lba;
 		// redraw on a new percentage, every 256 sectors, or when the re-read state changes
-		if (pct != shown || pos / 256 != shown_pos / 256 || rtry != shown_try || (rmax && rlba != shown_lba)) {
+		if (pct != shown || pos / 256 != shown_pos / 256 || rtry != shown_try || (rmax && rlba != shown_lba) || g_abort != shown_abort) {
 			char pm[96], note[200] = "";
 			snprintf(pm, sizeof(pm), T(STR_PROGRESS), pos, g_total);
 			if (rmax) snprintf(note, sizeof(note), T(STR_REREAD), rlba, rtry, rmax);
@@ -1652,8 +1655,8 @@ static int rip_disc_inner(int fresh, int autorip)
 				size_t o = strlen(note);
 				snprintf(note + o, sizeof(note) - o, T(STR_READ_STATS), o ? " · " : "", g_readerrs, g_recovered);
 			}
-			progress_draw(ripmsg, pm, pct, note);
-			shown = pct; shown_pos = pos; shown_try = rtry; shown_lba = rlba;
+			progress_draw(ripmsg, pm, pct, note, g_abort);
+			shown = pct; shown_pos = pos; shown_try = rtry; shown_lba = rlba; shown_abort = g_abort;
 		}
 		flip_frame();
 	}
