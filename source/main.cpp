@@ -3716,8 +3716,9 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 			OnCard o(list[i]);
 			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
 			int bw = g_total ? (int)((uint64_t)w[i] * (pos > g_total ? g_total : pos) / g_total) : 0;
-			ui_rect(x, y + th - 4, w[i], 4, 0x50FFFFFF);
-			ui_rect(x, y + th - 4, bw, 4, 0xFFC8E05A);
+			int bh = ui_line(UI_SMALL) / 5;   // subtle: about 6 px at 1080p
+			ui_rect(x, y + th - bh, w[i], bh, 0x40FFFFFF);
+			ui_rect(x, y + th - bh, bw, bh, 0xFFC8E05A);
 		}
 		x += w[i] + gap;
 		last = i;
