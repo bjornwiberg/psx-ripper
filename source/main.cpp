@@ -651,6 +651,17 @@ static volatile uint32_t g_readpos = 0;   // reader position inside a slow (dama
 // sector being re-read right now (shown on the progress screen); g_rr_max = 0 when not re-reading
 static volatile uint32_t g_rr_lba = 0;
 static volatile int g_rr_try = 0, g_rr_max = 0;
+// Sectors that failed in the first pass (unreadable, or bit 31 set: wrong EDC). They get a second
+// pass at low speed once the whole disc has been read, the way data recovery tools work.
+#define MAX_HARD 8192
+static uint32_t g_hard[MAX_HARD];
+static uint32_t g_nhard = 0;
+static volatile uint32_t g_pass2_total = 0, g_pass2_done = 0;
+
+static void note_hard(uint32_t lba, int edc_bad)
+{
+	if (g_nhard < MAX_HARD) g_hard[g_nhard++] = lba | (edc_bad ? 0x80000000u : 0);
+}
 static volatile int g_abort = 0, g_finished = 0, g_result = 0;
 static volatile uint32_t g_readerrs = 0;
 static int g_ripped = 0;    // discs ripped this session
@@ -770,6 +781,77 @@ static void writer_thread(void *arg)
 	sysThreadExit(0);
 }
 
+static void set_cd_speed(int x)   // x = 0: maximum, otherwise the CD speed factor
+{
+	uint16_t kbs = x ? (uint16_t)(176 * x) : 0xFFFF;
+	uint8_t cdb[12] = {0xBB, 0, (uint8_t)(kbs >> 8), (uint8_t)kbs, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0};
+	logf("set cd speed %u KB/s -> 0x%x", kbs, atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
+}
+
+// Second pass over the sectors that failed: low speed (2x), twice the configured tries. A sector
+// that reads (with a correct EDC on the data track) is written into the image at its place.
+// Returns the number of sectors fixed.
+static int second_pass()
+{
+	if (!g_nhard || g_abort || g_write_failed) return 0;
+	logf("second pass: %u sector(s) at 2x", g_nhard);
+	g_pass2_total = g_nhard; g_pass2_done = 0;
+	set_cd_speed(2);
+	uint32_t t1_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
+	int data1 = g_tracks[0].ctrl & 0x4, fixed = 0, tries = g_retries * 2;
+	time_t t0 = time(NULL);
+	for (uint32_t k = 0; k < g_nhard && !g_abort; k++) {
+		uint32_t lba = g_hard[k] & 0x7FFFFFFF;
+		int edc_bad = g_hard[k] >> 31, ok = 0;
+		g_rr_lba = lba; g_rr_max = tries;
+		for (int t = 0; t < tries && !ok && !g_abort; t++) {
+			g_rr_try = t + 1;
+			ok = read_cd(lba, 1, g_sec) == 0 && !(data1 && lba < t1_end && check_sector(lba, g_sec));
+		}
+		g_rr_max = 0;
+		if (ok && fseek(g_out, (long)lba * RAW_SIZE, SEEK_SET) == 0 && fwrite(g_sec, RAW_SIZE, 1, g_out) == 1) {
+			fixed++;
+			if (edc_bad) g_badsect--; else g_readerrs--;
+			g_recovered++;
+			logf("second pass: sector %u recovered (try %d)", lba, g_rr_try);
+		}
+		g_pass2_done = k + 1;
+	}
+	set_cd_speed(g_speed ? speed_x[g_speed] : 0);
+	logf("second pass: %d of %u recovered in %ld s", fixed, g_nhard, (long)(time(NULL) - t0));
+	return fixed;
+}
+
+// Recomputes the per-track MD5s from the finished image (after the second pass patched it).
+static void md5_from_file(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	if (!f) return;
+	uint8_t *b = (uint8_t *)malloc(256 * RAW_SIZE);
+	uint32_t lba = 0;
+	int t = 0;
+	md5_init(&g_md5[0]);
+	while (b && lba < g_leadout) {
+		uint32_t n = g_leadout - lba < 256 ? g_leadout - lba : 256;
+		if (fread(b, RAW_SIZE, n, f) != n) break;
+		for (uint32_t i = 0; i < n;) {
+			while (t + 1 < g_ntracks && lba + i >= g_tstart[t + 1]) {
+				md5_final(&g_md5[t], g_track_md5bin[t]);
+				md5_init(&g_md5[++t]);
+			}
+			uint32_t end = (t + 1 < g_ntracks) ? g_tstart[t + 1] : g_leadout, cnt = end - (lba + i);
+			if (cnt > n - i) cnt = n - i;
+			md5_update(&g_md5[t], b + i * RAW_SIZE, cnt * RAW_SIZE);
+			i += cnt;
+		}
+		lba += n;
+	}
+	while (t < g_ntracks) { md5_final(&g_md5[t], g_track_md5bin[t]); if (++t < g_ntracks) md5_init(&g_md5[t]); }
+	free(b);
+	fclose(f);
+	logf("md5 recomputed from %s", path);
+}
+
 static void rip_thread(void *arg)
 {
 	char path[300];
@@ -784,7 +866,7 @@ static void rip_thread(void *arg)
 	for (int t = 0; t < g_ntracks; t++) md5_init(&g_md5[t]);
 	tstart_init();
 	edc_init();
-	g_badsect = 0; g_recovered = 0;
+	g_badsect = 0; g_recovered = 0; g_nhard = 0; g_pass2_total = 0; g_pass2_done = 0;
 	g_reader_done = 0; g_write_failed = 0;
 	uint32_t data_end = (g_ntracks > 1) ? g_tracks[1].lba : g_leadout;  // LibCrypt lives in track 1
 
@@ -828,6 +910,7 @@ static void rip_thread(void *arg)
 					g_rr_max = 0;
 					if (r) {
 						memset(sp, 0, SECT_Q); dead[i] = 1; g_readerrs++; last_bad = lba + i;
+						note_hard(lba + i, 0);
 						if (g_readerrs <= 64 || g_readerrs % 100 == 0) logf("unreadable sector %u (0x%x, %d tries, %u so far)", lba + i, r, tries, g_readerrs);
 					}
 				}
@@ -849,7 +932,10 @@ static void rip_thread(void *arg)
 				}
 				g_rr_max = 0;
 				if (fixed) { g_recovered++; logf("sector %u: %s, fixed by re-read %d", lba + i, why, tries); }
-				else if (++g_badsect <= 32) logf("bad sector %u: %s, still wrong after %d re-reads", lba + i, why, tries);
+				else {
+					note_hard(lba + i, 1);
+					if (++g_badsect <= 32) logf("bad sector %u: %s, still wrong after %d re-reads", lba + i, why, tries);
+				}
 			}
 		}
 		// check Q first, then pack the 2352-byte sectors in place for a single write
@@ -867,9 +953,11 @@ static void rip_thread(void *arg)
 	g_reader_done = 1;
 	u64 rv;
 	sysThreadJoin(wtid, &rv);
+	int patched = second_pass();
 	fclose(g_out);
+	if (patched) md5_from_file(path);   // the streamed MD5s no longer match the patched file
 	for (int t = 0; t < g_ntracks; t++) {
-		md5_final(&g_md5[t], g_track_md5bin[t]);
+		if (!patched) md5_final(&g_md5[t], g_track_md5bin[t]);
 		md5_hex(g_track_md5bin[t], g_track_md5[t]);
 		logf("track %d start %u (index 01 %u) md5 %s", g_tracks[t].num, g_tstart[t], g_tracks[t].lba, g_track_md5[t]);
 	}
@@ -1660,7 +1748,8 @@ static int rip_disc_inner(int fresh, int autorip)
 		if (pct != shown || pos / 256 != shown_pos / 256 || rtry != shown_try || (rmax && rlba != shown_lba) || g_abort != shown_abort) {
 			char pm[96], note[200] = "";
 			snprintf(pm, sizeof(pm), T(STR_PROGRESS), pos, g_total);
-			if (rmax) snprintf(note, sizeof(note), T(STR_REREAD), rlba, rtry, rmax);
+			if (g_pass2_total) snprintf(note, sizeof(note), T(STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
+			if (rmax) snprintf(note + strlen(note), sizeof(note) - strlen(note), T(STR_REREAD), rlba, rtry, rmax);
 			if (g_readerrs || g_recovered) {
 				size_t o = strlen(note);
 				snprintf(note + o, sizeof(note) - o, T(STR_READ_STATS), o ? " · " : "", g_readerrs, g_recovered);

@@ -82,6 +82,7 @@ static const char *en[STR_COUNT] = {
 	"Re-reading sector %u – try %d of %d",
 	"%sUnreadable so far: %u · fixed: %u",
 	"Cancelling… waiting for the drive to finish",
+	"Second pass at low speed (%u of %u): ",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -160,6 +161,7 @@ static const char *sv[STR_COUNT] = {
 	"Läser om sektor %u – försök %d av %d",
 	"%sOläsbara hittills: %u · lagade: %u",
 	"Avbryter … väntar på att läsaren blir klar",
+	"Andra genomgång, låg hastighet (%u av %u): ",
 };
 
 static const char **table = en;
