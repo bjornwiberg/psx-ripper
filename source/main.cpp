@@ -903,6 +903,20 @@ static int unverifiable(const uint8_t *s)
 }
 static volatile uint32_t g_unstable = 0, g_secure = 0;   // sectors that read differently / sectors compared
 static uint8_t *g_vbuf;                                   // second read of a run, CHUNK sectors
+// The first pass only records a fingerprint of each sector without EDC; a verify pass after it
+// re-reads them in long runs at full speed (no seeking back and forth while ripping).
+#define MAX_UV (256 * 1024)
+static uint32_t *g_uv_lba;
+static uint64_t *g_uv_hash;
+static uint32_t g_nuv = 0;
+static volatile int g_phase = 0;   // 0 reading, 1 verify pass, 2 second pass
+
+static uint64_t fnv64(const uint8_t *p, int n)
+{
+	uint64_t h = 1469598103934665603ULL;
+	while (n--) { h ^= *p++; h *= 1099511628211ULL; }
+	return h;
+}
 
 static void writer_thread(void *arg)
 {
@@ -956,12 +970,52 @@ static int confirm_read(uint32_t lba, int need_edc, int max_reads, uint8_t *out)
 	return 0;
 }
 
+// Verify pass (bit-perfect mode): re-reads the sectors without EDC in long runs at full speed and
+// compares them with their first-pass fingerprint. A sector that differs is read until three reads
+// agree and written into the image. Returns the number of sectors written.
+static int verify_pass()
+{
+	if (!g_nuv || g_abort || g_write_failed) return 0;
+	g_phase = 1;
+	g_pass2_total = g_nuv; g_pass2_done = 0;
+	uint64_t t0 = now_ms();
+	int patched = 0, reads = g_retries * 3 + 3;
+	static uint8_t sec[RAW_SIZE] __attribute__((aligned(128)));
+	for (uint32_t k = 0; k < g_nuv && !g_abort; ) {
+		uint32_t a = g_uv_lba[k], m = 1;   // sectors within one window of CHUNK, read as one run
+		while (k + m < g_nuv && g_uv_lba[k + m] - a < CHUNK) m++;
+		uint32_t span = g_uv_lba[k + m - 1] - a + 1;
+		g_readpos = a;
+		if (read_cd(a, span, g_vbuf) == 0) {
+			for (uint32_t j = 0; j < m; j++) {
+				uint32_t lba = g_uv_lba[k + j];
+				g_secure++;
+				if (fnv64(g_vbuf + (lba - a) * SECT_Q, RAW_SIZE) == g_uv_hash[k + j]) continue;
+				g_unstable++;
+				g_rr_lba = lba; g_rr_max = reads;
+				int ok = confirm_read(lba, 0, reads, sec);
+				g_rr_max = 0;
+				if (ok && fnv64(sec, RAW_SIZE) != g_uv_hash[k + j]) {
+					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; g_changed++; }
+				}
+				if (!ok) note_hard(lba, 1);
+				if (g_unstable <= 32) logf("verify: sector %u read differently, %s", lba, ok ? (fnv64(sec, RAW_SIZE) != g_uv_hash[k + j] ? "confirmed new data" : "first read confirmed") : "NOT confirmed");
+			}
+		}
+		k += m;
+		g_pass2_done = k;
+	}
+	logf("verify pass: %u sectors without EDC re-read, %u differed, %d written, %u ms", g_secure, g_unstable, patched, (unsigned)(now_ms() - t0));
+	return patched;
+}
+
 static int second_pass()
 {
 	if (g_check != CHECK_BITPERFECT) g_nsuspect = 0;   // confirmation only in bit-perfect mode
 	uint32_t total = g_nhard + g_nsuspect;
 	if (!total || g_abort || g_write_failed) return 0;
 	logf("second pass: %u failed and %u fixed sector(s) at 2x", g_nhard, g_nsuspect);
+	g_phase = 2;
 	g_pass2_total = total; g_pass2_done = 0;
 	set_cd_speed(2);
 	uint32_t t1_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
@@ -1052,6 +1106,8 @@ static void rip_thread(void *arg)
 	g_badsect = 0; g_recovered = 0; g_nhard = 0; g_pass2_total = 0; g_pass2_done = 0;
 	g_unstable = 0; g_secure = 0; g_nsuspect = 0; g_confirmed = 0; g_changed = 0;
 	if (!g_vbuf) g_vbuf = (uint8_t *)memalign(128, CHUNK * SECT_Q);
+	if (!g_uv_lba) { g_uv_lba = (uint32_t *)malloc(MAX_UV * 4); g_uv_hash = (uint64_t *)malloc(MAX_UV * 8); }
+	g_nuv = 0; g_phase = 0;
 	g_reader_done = 0; g_write_failed = 0;
 	uint32_t data_end = (g_ntracks > 1) ? g_tracks[1].lba : g_leadout;  // LibCrypt lives in track 1
 
@@ -1109,33 +1165,13 @@ static void rip_thread(void *arg)
 		}
 		// data track 1: sectors without EDC are read a second time and compared; a sector that
 		// differs is read until two reads in a row agree
-		if (g_check == CHECK_BITPERFECT && (g_tracks[0].ctrl & 0x4) && g_vbuf) {
+		if (g_check == CHECK_BITPERFECT && (g_tracks[0].ctrl & 0x4) && g_uv_lba) {
 			uint32_t t1_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
-			for (uint32_t a = 0; a < n && lba + a < t1_end && !g_abort; ) {
-				if (dead[a] || !unverifiable(buf + a * SECT_Q)) { a++; continue; }
-				uint32_t b = a + 1;
-				while (b < n && lba + b < t1_end && !dead[b] && unverifiable(buf + b * SECT_Q)) b++;
-				g_secure += b - a;
-				if (read_cd(lba + a, b - a, g_vbuf) == 0) {
-					for (uint32_t i = a; i < b; i++) {
-						uint8_t *sp = buf + i * SECT_Q, *v = g_vbuf + (i - a) * SECT_Q;
-						if (!memcmp(sp, v, RAW_SIZE)) continue;
-						// two reads disagree: read again until a new read matches one of the earlier ones
-						g_unstable++;
-						int agreed = 0, tries = 0;
-						while (!agreed && tries < g_retries * 2 && !g_abort) {
-							tries++;
-							if (read_cd(lba + i, 1, g_sec)) continue;
-							if (!memcmp(g_sec, v, RAW_SIZE) || !memcmp(g_sec, sp, RAW_SIZE)) { memcpy(sp, g_sec, SECT_Q); agreed = 1; }
-							else memcpy(v, g_sec, SECT_Q);
-						}
-						if (g_unstable <= 32) logf("sector %u: reads differ, %s after %d more", lba + i, agreed ? "settled" : "NOT settled", tries);
-						if (!agreed) note_hard(lba + i, 1);
-						else note_suspect(lba + i, sp);
-					}
+			for (uint32_t i = 0; i < n && lba + i < t1_end; i++)
+				if (!dead[i] && unverifiable(buf + i * SECT_Q) && g_nuv < MAX_UV) {
+					g_uv_lba[g_nuv] = lba + i;
+					g_uv_hash[g_nuv++] = fnv64(buf + i * SECT_Q, RAW_SIZE);
 				}
-				a = b;
-			}
 		}
 		// data track 1: re-read sectors whose sync, address, EDC or ECC is wrong
 		if (g_check != CHECK_OFF && (g_tracks[0].ctrl & 0x4)) {
@@ -1174,8 +1210,10 @@ static void rip_thread(void *arg)
 	g_reader_done = 1;
 	u64 rv;
 	sysThreadJoin(wtid, &rv);
+	int patched = verify_pass();
 	if (g_er_valid) er_set_retries(-1);   // the drive's own retries back for the second pass
-	int patched = second_pass();
+	g_phase = 2;
+	patched += second_pass();
 	vf_close(g_out);
 	if (patched) md5_from_file(path);   // the streamed MD5s no longer match the patched file
 	for (int t = 0; t < g_ntracks; t++) {
@@ -2231,7 +2269,7 @@ static int rip_disc_inner(int fresh, int autorip)
 			shown_ms = now_ms();
 			char pm[96], note[200] = "";
 			snprintf(pm, sizeof(pm), T(STR_PROGRESS), pos, g_total);
-			if (g_pass2_total) snprintf(note, sizeof(note), T(STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
+			if (g_pass2_total) snprintf(note, sizeof(note), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
 			if (rmax) snprintf(note + strlen(note), sizeof(note) - strlen(note), T(STR_REREAD), rlba, rtry, rmax);
 			if (g_readerrs || g_recovered) {
 				size_t o = strlen(note);
@@ -2350,6 +2388,7 @@ static int rip_disc_inner(int fresh, int autorip)
 	snprintf(g_res_path, sizeof(g_res_path), "%s.bin", g_base);
 	if (rdinfo[0]) res_add(g_rd_result == 1 ? 0x7CE0A0 : g_rd_result == 0 ? 0xFF8A80 : 0xA8B0C8, "%s", rdinfo);
 	if (lcinfo[0]) res_add(0xE8E8F0, "%s", lcinfo);
+	if (g_secure) res_add(g_unstable ? 0xF0C060 : 0xA8B0C8, T(STR_VERIFY_RESULT), g_secure, g_unstable);
 	if (g_nsuspect) res_add(g_confirmed == g_nsuspect ? 0x7CE0A0 : 0xF0C060, T(STR_CONFIRMED), g_nsuspect, g_confirmed);
 	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
 	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);

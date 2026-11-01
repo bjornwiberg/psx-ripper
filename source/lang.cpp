@@ -115,6 +115,8 @@ static const char *en[STR_COUNT] = {
 	"Time %s",
 	"Time %s · about %s left · %u.%u MB/s",
 	"Time: %s",
+	"Checking sectors without EDC (%u of %u) ",
+	"Sectors without EDC: %u checked, %u read differently (corrected)",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -226,6 +228,8 @@ static const char *sv[STR_COUNT] = {
 	"Tid %s",
 	"Tid %s · kvar ca %s · %u,%u MB/s",
 	"Tid: %s",
+	"Kontrollerar sektorer utan EDC (%u av %u) ",
+	"Sektorer utan EDC: %u kontrollerade, %u lästes olika (rättade)",
 };
 
 static const char **table = en;
