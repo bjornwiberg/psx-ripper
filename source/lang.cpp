@@ -166,6 +166,7 @@ static const char *en[STR_COUNT] = {
 	"Show",
 	"%s · sent to %s",
 	"Change them at http://%s:%d/webhook",
+	"Progress every %d %%",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -328,6 +329,7 @@ static const char *sv[STR_COUNT] = {
 	"Visa",
 	"%s · skickas till %s",
 	"Ändra dem på http://%s:%d/webhook",
+	"Framsteg var %d:e %%",
 };
 
 static const char **table = en;

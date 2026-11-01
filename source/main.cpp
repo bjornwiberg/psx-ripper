@@ -1921,7 +1921,7 @@ static void webhook_info_screen(int on)
 			for (int i = 0; i < WH_COUNT; i++) {
 				int sel = (g_webhook_mask >> i) & 1;
 				// small font: • chosen, – not chosen
-				if (i == WH_RIP_PROGRESS && sel) snprintf(line, sizeof(line), "•  %s (%d %%)", T(wh_label(i)), g_webhook_step);
+				if (i == WH_RIP_PROGRESS) { char pl[64]; snprintf(pl, sizeof(pl), T(STR_WH_PROGRESS_N), g_webhook_step); snprintf(line, sizeof(line), "%s  %s", sel ? "•" : "–", pl); }
 				else snprintf(line, sizeof(line), "%s  %s", sel ? "•" : "–", T(wh_label(i)));
 				ui_text(UI_SMALL, ui_w() / 3, y, sel ? 0x7CE0A0 : 0x6870A0, line);
 				y += ls * 12 / 10;
