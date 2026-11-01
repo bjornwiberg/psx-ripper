@@ -827,6 +827,15 @@ static const char *check_sector(uint32_t lba, const uint8_t *s)
 	return stored == calc ? 0 : "EDC";
 }
 
+// Form 2 sectors (video, XA audio) may have no EDC (stored as 0): a read error there cannot be
+// detected from the sector itself. Such sectors are read twice and compared ("secure read").
+static int unverifiable(const uint8_t *s)
+{
+	return s[15] == 2 && (s[18] & 0x20) && !(s[2348] | s[2349] | s[2350] | s[2351]);
+}
+static volatile uint32_t g_unstable = 0, g_secure = 0;   // sectors that read differently / sectors compared
+static uint8_t *g_vbuf;                                   // second read of a run, CHUNK sectors
+
 static void writer_thread(void *arg)
 {
 	for (int k = 0;; k ^= 1) {
@@ -941,6 +950,8 @@ static void rip_thread(void *arg)
 	tstart_init();
 	edc_init();
 	g_badsect = 0; g_recovered = 0; g_nhard = 0; g_pass2_total = 0; g_pass2_done = 0;
+	g_unstable = 0; g_secure = 0;
+	if (!g_vbuf) g_vbuf = (uint8_t *)memalign(128, CHUNK * SECT_Q);
 	g_reader_done = 0; g_write_failed = 0;
 	uint32_t data_end = (g_ntracks > 1) ? g_tracks[1].lba : g_leadout;  // LibCrypt lives in track 1
 
@@ -994,6 +1005,35 @@ static void rip_thread(void *arg)
 							logf("unreadable sector %u (0x%x, %d tries, %u ms, %u so far)", lba + i, r, tries, (unsigned)(now_ms() - t0), g_readerrs);
 					}
 				}
+			}
+		}
+		// data track 1: sectors without EDC are read a second time and compared; a sector that
+		// differs is read until two reads in a row agree
+		if ((g_tracks[0].ctrl & 0x4) && g_vbuf) {
+			uint32_t t1_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
+			for (uint32_t a = 0; a < n && lba + a < t1_end && !g_abort; ) {
+				if (dead[a] || !unverifiable(buf + a * SECT_Q)) { a++; continue; }
+				uint32_t b = a + 1;
+				while (b < n && lba + b < t1_end && !dead[b] && unverifiable(buf + b * SECT_Q)) b++;
+				g_secure += b - a;
+				if (read_cd(lba + a, b - a, g_vbuf) == 0) {
+					for (uint32_t i = a; i < b; i++) {
+						uint8_t *sp = buf + i * SECT_Q, *v = g_vbuf + (i - a) * SECT_Q;
+						if (!memcmp(sp, v, RAW_SIZE)) continue;
+						// two reads disagree: read again until a new read matches one of the earlier ones
+						g_unstable++;
+						int agreed = 0, tries = 0;
+						while (!agreed && tries < g_retries * 2 && !g_abort) {
+							tries++;
+							if (read_cd(lba + i, 1, g_sec)) continue;
+							if (!memcmp(g_sec, v, RAW_SIZE) || !memcmp(g_sec, sp, RAW_SIZE)) { memcpy(sp, g_sec, SECT_Q); agreed = 1; }
+							else memcpy(v, g_sec, SECT_Q);
+						}
+						if (g_unstable <= 32) logf("sector %u: reads differ, %s after %d more", lba + i, agreed ? "settled" : "NOT settled", tries);
+						if (!agreed) note_hard(lba + i, 1);
+					}
+				}
+				a = b;
 			}
 		}
 		// data track 1: re-read sectors whose sync, address or EDC is wrong
@@ -2050,7 +2090,8 @@ static int rip_disc_inner(int fresh, int autorip)
 		snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), "\n");
 		snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), T(STR_BAD_SECTORS), g_badsect);
 	}
-	logf("sector check: %u bad, %u fixed by re-reading", g_badsect, g_recovered);
+	logf("sector check: %u bad, %u fixed by re-reading; %u sectors without EDC compared, %u read differently",
+	     g_badsect, g_recovered, g_secure, g_unstable);
 	snprintf(msg, sizeof(msg), T(STR_DONE),
 	         g_base, lcline, g_readerrs);
 	logf("done: %s errs=%u", g_base, g_readerrs);
