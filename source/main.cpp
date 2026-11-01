@@ -2283,7 +2283,11 @@ static int rip_disc_inner(int fresh, int autorip)
 				snprintf(note + o, sizeof(note) - o, T(STR_READ_STATS), o ? " · " : "", g_readerrs, g_recovered);
 			}
 			char tl[96];
-			eta_line(&eta, g_pass2_total ? g_leadout : pos, g_total, tl, sizeof(tl));
+			// during the double-check and the slow re-reads the estimate follows that phase
+			static int eta_phase = 0;
+			if (g_phase != eta_phase) { eta_phase = g_phase; uint64_t t0 = eta.t0; eta_start(&eta); eta.t0 = t0; }
+			if (g_pass2_total && g_phase) eta_line(&eta, g_pass2_done, g_pass2_total, tl, sizeof(tl));
+			else eta_line(&eta, pos, g_total, tl, sizeof(tl));
 			progress_draw(ripmsg, pm, pct, note, g_abort, tl);
 			shown = pct; shown_pos = pos; shown_try = rtry; shown_lba = rlba; shown_abort = g_abort;
 		}
