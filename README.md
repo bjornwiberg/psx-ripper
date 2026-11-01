@@ -15,9 +15,10 @@ straight to the internal hard disk, ready to play with webMAN MOD / Cobra.
 - Detects disc insertion while the app is open
 - Automatic mode: after a rip the disc is ejected, and the next disc you insert is ripped
   without asking. Press O to leave automatic mode
-- Settings (No on the start screen → Settings): destination (internal HDD or a connected USB
-  drive), re-reads on read errors, read speed (Max/8×/4×/2×) and eject on/off, saved in
-  `/dev_hdd0/tmp/psxrip.cfg`
+- Own on-screen UI: start screen (✕ rip · △ settings · ○ exit) and a settings menu
+  (↑↓ select, ←→ change, ✕ save, ○ back) with destination (internal HDD or a connected USB
+  drive), re-reads on read errors, read speed (Max/8×/4×/2×), eject on/off and "rip
+  immediately when a disc is inserted", saved in `/dev_hdd0/tmp/psxrip.cfg`
 - English and Swedish UI, picked from the PS3 system language
 - Works fully offline once installed
 
@@ -94,6 +95,7 @@ This produces `psxripper.pkg`. To regenerate the title table after updating
 python3 tools/gen_titles.py db/PSX.titles.json source/titles.inc
 python3 tools/gen_libcrypt.py db/libcrypt_serials.txt source/libcrypt.inc
 python3 tools/make_icon.py pkgfiles/ICON0.PNG
+python3 tools/gen_font.py fonts source/font.inc
 ```
 
 ## Credits
@@ -105,6 +107,7 @@ python3 tools/make_icon.py pkgfiles/ICON0.PNG
   structures, PS3MAPI calls and the LibCrypt `.sbi` handling this app writes for
 - [GameDB-PSX](https://github.com/niemasd/GameDB-PSX) (GPL-3.0): serial → title database
 - [PSL1GHT](https://github.com/ps3dev/PSL1GHT) and bucanero's prebuilt toolchain
+- [DejaVu fonts](https://dejavu-fonts.github.io/) (see `fonts/DejaVu-LICENSE`) for the on-screen UI
 
 ## License
 

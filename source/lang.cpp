@@ -39,6 +39,21 @@ static const char *en[STR_COUNT] = {
 	"Off",
 	"PSX Ripper\n\nYes = Settings\nNo = Exit",
 	"Done. Remove the disc and insert the next one and it will be ripped automatically.\n○ stops automatic ripping.",
+	"Insert a PS1 disc - it is detected automatically.",
+	"Saving to: %s",
+	"Rip the disc in the drive",
+	"Settings",
+	"Exit",
+	"Settings",
+	"Save to",
+	"Re-reads on read errors",
+	"Read speed",
+	"Eject the disc when done",
+	"Select",
+	"Change",
+	"Save",
+	"Back",
+	"Rip immediately when a disc is inserted",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -74,6 +89,21 @@ static const char *sv[STR_COUNT] = {
 	"Av",
 	"PSX Ripper\n\nJa = Inställningar\nNej = Avsluta",
 	"Klart. Ta ut skivan och sätt i nästa så rippas den automatiskt.\n○ avslutar den automatiska rippningen.",
+	"Sätt i en PS1-skiva – den upptäcks automatiskt.",
+	"Sparas till: %s",
+	"Rippa skivan i läsaren",
+	"Inställningar",
+	"Avsluta",
+	"Inställningar",
+	"Spara till",
+	"Omläsningar vid läsfel",
+	"Läshastighet",
+	"Mata ut skivan när den är klar",
+	"Välj",
+	"Ändra",
+	"Spara",
+	"Tillbaka",
+	"Rippa direkt när en skiva sätts i",
 };
 
 static const char **table = en;

@@ -24,6 +24,7 @@
 #include "rsxutil.h"
 #include "storage.h"
 #include "lang.h"
+#include "ui.h"
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
 // Output locations; the mount test redirects both so a mounted image is never overwritten
@@ -37,6 +38,7 @@ static char g_outdir[64] = "/dev_hdd0/PSXISO";
 static int g_retries = 4;          // attempts per READ CD before falling back / giving up
 static int g_speed = 0;            // 0 = max, 1 = 8x, 2 = 4x, 3 = 2x
 static int g_eject = 1;            // eject the disc after a successful rip
+static int g_autostart = 0;        // rip an inserted disc without the confirmation
 static const int speed_x[4] = {0, 8, 4, 2};
 
 static void cfg_load()
@@ -50,6 +52,7 @@ static void cfg_load()
 		else if (!strncmp(line, "retries=", 8)) { int r = atoi(line + 8); if (r >= 1 && r <= 64) g_retries = r; }
 		else if (!strncmp(line, "speed=", 6)) { int v = atoi(line + 6); if (v >= 0 && v <= 3) g_speed = v; }
 		else if (!strncmp(line, "eject=", 6)) g_eject = atoi(line + 6) ? 1 : 0;
+		else if (!strncmp(line, "autostart=", 10)) g_autostart = atoi(line + 10) ? 1 : 0;
 	}
 	fclose(f);
 }
@@ -58,7 +61,7 @@ static void cfg_save()
 {
 	FILE *f = fopen(CFG_PATH, "w");
 	if (!f) return;
-	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\n", g_outdir, g_retries, g_speed, g_eject);
+	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\n", g_outdir, g_retries, g_speed, g_eject, g_autostart);
 	fclose(f);
 }
 
@@ -113,9 +116,46 @@ static void program_exit_callback()
 }
 }
 
+// Development aid: if /dev_hdd0/tmp/psxrip.shot exists, the next frame is saved as a BMP.
+static void maybe_screenshot()
+{
+	static int frame = 0;
+	if (++frame % 30) return;
+	struct stat st;
+	if (stat("/dev_hdd0/tmp/psxrip.shot", &st)) return;
+	unlink("/dev_hdd0/tmp/psxrip.shot");
+	FILE *f = fopen("/dev_hdd0/tmp/psxrip_screen.bmp", "wb");
+	if (!f) return;
+	int w = ui_w(), h = ui_h(), rowb = w * 3, pad = (4 - rowb % 4) % 4;
+	uint32_t size = 54 + (rowb + pad) * h;
+	uint8_t hd[54] = {'B', 'M'};
+	memcpy(hd + 2, &size, 4);          // little-endian fields, written byte by byte below
+	auto le32 = [&](int o, uint32_t v) { hd[o] = v; hd[o + 1] = v >> 8; hd[o + 2] = v >> 16; hd[o + 3] = v >> 24; };
+	le32(2, size); le32(10, 54); le32(14, 40); le32(18, w); le32(22, h);
+	hd[26] = 1; hd[28] = 24;
+	fwrite(hd, 1, 54, f);
+	uint8_t *row = (uint8_t *)malloc(rowb + pad);
+	memset(row, 0, rowb + pad);
+	for (int y = h - 1; y >= 0; y--) {
+		const uint32_t *src = color_buffer[curr_fb] + y * (color_pitch / 4);
+		for (int x = 0; x < w; x++) { uint32_t c = src[x]; row[x * 3] = c; row[x * 3 + 1] = c >> 8; row[x * 3 + 2] = c >> 16; }
+		fwrite(row, 1, rowb + pad, f);
+	}
+	free(row);
+	fclose(f);
+}
+
+static void draw_backdrop()
+{
+	ui_background();
+	ui_text(UI_TITLE, ui_w() / 2, ui_h() / 10, 0xFFFFFF, "PSX Ripper", UI_CENTER);
+}
+
 static void do_flip()
 {
 	sysUtilCheckCallback();
+	draw_backdrop();
+	maybe_screenshot();
 	flip();
 }
 
@@ -855,39 +895,145 @@ static void next_target()
 	snprintf(g_outdir, sizeof(g_outdir), "%s", cands[(cur + 1) % nc]);
 }
 
-static void settings_menu()
+// ---------------------------------------------------------------- own screens (home, settings)
+enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT = 32, B_RIGHT = 64, B_START = 128 };
+
+// Buttons newly pressed since the last call, over all connected pads.
+static int pad_pressed()
 {
-	char msg[512], name[96];
-	for (;;) {
-		target_name(g_outdir, name, sizeof(name));
-		snprintf(msg, sizeof(msg), T(STR_SET_TARGET), name);
-		if (!ask_yesno(msg)) break;
-		next_target();
+	static int last = 0;
+	padInfo info;
+	int now = 0;
+	if (ioPadGetInfo(&info) == 0) {
+		for (int i = 0; i < 7; i++) {
+			if (!info.status[i]) continue;
+			padData pd;
+			if (ioPadGetData(i, &pd) || pd.len <= 0) { now |= last; continue; }
+			if (pd.BTN_CROSS) now |= B_CROSS;
+			if (pd.BTN_CIRCLE) now |= B_CIRCLE;
+			if (pd.BTN_TRIANGLE) now |= B_TRIANGLE;
+			if (pd.BTN_UP) now |= B_UP;
+			if (pd.BTN_DOWN) now |= B_DOWN;
+			if (pd.BTN_LEFT) now |= B_LEFT;
+			if (pd.BTN_RIGHT) now |= B_RIGHT;
+			if (pd.BTN_START) now |= B_START;
+		}
 	}
-	static const int steps[] = {1, 2, 4, 8, 16, 32};
-	for (;;) {
-		snprintf(msg, sizeof(msg), T(STR_SET_RETRIES), g_retries);
-		if (!ask_yesno(msg)) break;
-		int k = 0;
-		while (k < 6 && steps[k] <= g_retries) k++;
-		g_retries = steps[k % 6];
-	}
-	for (;;) {
-		char sp[16];
-		if (g_speed) snprintf(sp, sizeof(sp), "%d\xC3\x97", speed_x[g_speed]); else snprintf(sp, sizeof(sp), "%s", T(STR_SPEED_MAX));
-		snprintf(msg, sizeof(msg), T(STR_SET_SPEED), sp);
-		if (!ask_yesno(msg)) break;
-		g_speed = (g_speed + 1) % 4;
-	}
-	for (;;) {
-		snprintf(msg, sizeof(msg), T(STR_SET_EJECT), g_eject ? T(STR_ON) : T(STR_OFF));
-		if (!ask_yesno(msg)) break;
-		g_eject = !g_eject;
-	}
-	cfg_save();
-	logf("settings: outdir=%s retries=%d speed=%d eject=%d", g_outdir, g_retries, g_speed, g_eject);
+	int pressed = now & ~last;
+	last = now;
+	return pressed;
 }
 
+static void hint_bar(const char *const *buttons, const char *const *labels, int n)
+{
+	int total = 0, gap = ui_w() / 24;
+	for (int i = 0; i < n; i++) total += ui_hint_width(buttons[i], labels[i]) + (i ? gap : 0);
+	int x = (ui_w() - total) / 2, y = ui_h() - ui_h() / 8;
+	for (int i = 0; i < n; i++) x += ui_hint(x, y, buttons[i], labels[i]) + gap;
+}
+
+static void flip_frame()
+{
+	sysUtilCheckCallback();
+	maybe_screenshot();
+	flip();
+}
+
+static void settings_screen()
+{
+	// edit a copy; X saves, O discards
+	char outdir[64];
+	snprintf(outdir, sizeof(outdir), "%s", g_outdir);
+	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, row = 0;
+	const int NROWS = 5;
+	static const int steps[] = {1, 2, 4, 8, 16, 32};
+	pad_pressed();
+	while (!exit_requested) {
+		draw_backdrop();
+		ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_SETTINGS_TITLE), UI_CENTER);
+		char vals[5][96];
+		char save_dir[64]; snprintf(save_dir, sizeof(save_dir), "%s", g_outdir);
+		snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
+		target_name(outdir, vals[0], sizeof(vals[0]));
+		snprintf(g_outdir, sizeof(g_outdir), "%s", save_dir);
+		snprintf(vals[1], sizeof(vals[1]), "%d", retries);
+		if (speed) snprintf(vals[2], sizeof(vals[2]), "%d\xC3\x97", speed_x[speed]); else snprintf(vals[2], sizeof(vals[2]), "%s", T(STR_SPEED_MAX));
+		snprintf(vals[3], sizeof(vals[3]), "%s", eject ? T(STR_ON) : T(STR_OFF));
+		snprintf(vals[4], sizeof(vals[4]), "%s", autostart ? T(STR_ON) : T(STR_OFF));
+		const char *labels[5] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART)};
+		int top = ui_h() / 3, lh = ui_line(UI_BODY) * 2, left = ui_w() / 6, right = ui_w() * 5 / 6;
+		for (int r = 0; r < NROWS; r++) {
+			int y = top + r * lh;
+			if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
+			ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
+			char v[128];
+			snprintf(v, sizeof(v), r == row ? "‹ %s ›" : "%s", vals[r]);
+			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
+		}
+		const char *b[] = {"updown", "leftright", "cross", "circle"};
+		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_SAVE), T(STR_HINT_BACK)};
+		hint_bar(b, l, 4);
+		flip_frame();
+		int p = pad_pressed();
+		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
+		if (p & B_DOWN) row = (row + 1) % NROWS;
+		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
+		if (d) {
+			if (row == 0) {
+				char save_dir2[64]; snprintf(save_dir2, sizeof(save_dir2), "%s", g_outdir);
+				snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
+				next_target();                                    // only forward through the list
+				snprintf(outdir, sizeof(outdir), "%s", g_outdir);
+				snprintf(g_outdir, sizeof(g_outdir), "%s", save_dir2);
+			} else if (row == 1) {
+				int k = 0; while (k < 6 && steps[k] != retries) k++;
+				retries = steps[(k + (d > 0 ? 1 : 5)) % 6];
+			} else if (row == 2) {
+				speed = (speed + (d > 0 ? 1 : 3)) % 4;
+			} else if (row == 3) {
+				eject = !eject;
+			} else {
+				autostart = !autostart;
+			}
+		}
+		if (p & B_CROSS) {
+			snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
+			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart;
+			OUT_DIR = g_outdir;
+			cfg_save();
+			logf("settings saved: outdir=%s retries=%d speed=%d eject=%d autostart=%d", g_outdir, g_retries, g_speed, g_eject, g_autostart);
+			return;
+		}
+		if (p & B_CIRCLE) { logf("settings: cancelled"); return; }
+	}
+}
+
+
+// Home screen. Returns 1 = rip the disc in the drive, 2 = a disc was inserted, 0 = exit.
+static int home_screen()
+{
+	disc_inserted = 0;
+	pad_pressed();   // swallow buttons still held from a previous screen
+	while (!exit_requested) {
+		char tname[96], saving[160];
+		target_name(g_outdir, tname, sizeof(tname));
+		snprintf(saving, sizeof(saving), T(STR_HOME_SAVING), tname);
+		draw_backdrop();
+		int y = ui_h() * 2 / 5;
+		ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, T(STR_HOME_INSERT), UI_CENTER);
+		ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_BODY) * 2, 0xA8B0C8, saving, UI_CENTER);
+		const char *b[] = {"cross", "triangle", "circle"};
+		const char *l[] = {T(STR_HINT_RIP), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+		hint_bar(b, l, 3);
+		flip_frame();
+		if (disc_inserted) return 2;
+		int p = pad_pressed();
+		if (p & B_CROSS) return 1;
+		if (p & (B_TRIANGLE | B_START)) settings_screen();
+		if (p & B_CIRCLE) return 0;
+	}
+	return 0;
+}
 
 // ---------------------------------------------------------------- one disc
 static char g_done_msg[512];   // summary of the last successful rip
@@ -1077,6 +1223,7 @@ int main(int argc, char *argv[])
 {
 	void *host_addr = memalign(1024 * 1024, HOST_SIZE);
 	init_screen(host_addr, HOST_SIZE);
+	ui_init();
 	ioPadInit(7);
 	atexit(program_exit_callback);
 	sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, sysutil_callback, NULL);
@@ -1116,30 +1263,16 @@ int main(int argc, char *argv[])
 		if (autorip) {
 			fresh = 1;
 		} else {
-			// wait for a disc to be inserted, or for the user to confirm one is already in
-			disc_inserted = 0;
-			dialog_action = 0;
-			char welcome[512], tname[96];
-			target_name(g_outdir, tname, sizeof(tname));
-			snprintf(welcome, sizeof(welcome), T(STR_WELCOME), tname);
-			msgDialogOpen2((msgType)(MSG_DIALOG_NORMAL | MSG_DIALOG_BTN_TYPE_YESNO | MSG_DIALOG_DISABLE_CANCEL_ON),
-			               welcome, dialog_handler, NULL, NULL);
-			while (!dialog_action && !disc_inserted && !exit_requested) do_flip();
-			msgDialogAbort();
-			if (exit_requested) break;
-			if (dialog_action == 2 && !disc_inserted) {
-				// No: Settings or Exit
-				if (ask_yesno(T(STR_MENU))) { settings_menu(); continue; }
-				break;
-			}
-			fresh = disc_inserted;
+			int a = home_screen();
+			if (exit_requested || a == 0) break;
+			fresh = (a == 2);
 		}
 		logf("start rip (%s%s)", fresh ? "disc inserted" : "disc already in drive", autorip ? ", auto" : "");
 		if (fresh) {
 			// give the drive a moment to spin up before we talk to it
 			for (int i = 0; i < 120 && !exit_requested; i++) do_flip();
 		}
-		int ok = rip_disc(fresh, autorip);
+		int ok = rip_disc(fresh, autorip || (fresh && g_autostart));
 		autorip = 0;
 		if (!ok) continue;
 
