@@ -41,5 +41,41 @@ for name, fname, size in FONTS:
         out.write("\t{%d, %d, %d, %d, %d, %d, %d},\n" % g)
     out.write("};\n")
     out.write("static const Font %s = {%s_glyphs, %d, %s_data, %d};\n\n" % (name, name, len(glyphs), name, ascent + descent))
+# Button symbols, each rendered at the size where its height equals the body font's cap height,
+# so they line up with capital letters (top and baseline) in the hint bar.
+for name, body in (("f1080_sym", 36), ("f720_sym", 24)):
+    bodyfont = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), body)
+    cap = bodyfont.getbbox("E")
+    cap_top, cap_h = cap[1], cap[3] - cap[1]
+    data = bytearray()
+    glyphs = []
+    for ch in "△○✕□↑↓←→":
+        size = body
+        for _ in range(40):   # find the size whose glyph height matches the cap height
+            f = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), size)
+            b = f.getbbox(ch)
+            if abs((b[3] - b[1]) - cap_h) <= 0 or size < 6:
+                break
+            size = max(6, int(round(size * cap_h / (b[3] - b[1]))))
+            f2 = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), size)
+            if abs((f2.getbbox(ch)[3] - f2.getbbox(ch)[1]) - cap_h) <= 1:
+                f, b = f2, f2.getbbox(ch)
+                break
+        x0, y0, x1, y1 = b
+        w, h = x1 - x0, y1 - y0
+        img = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(img).text((-x0, -y0), ch, font=f, fill=255)
+        if h != cap_h:   # snap to the exact cap height
+            img = img.resize((w, cap_h), Image.LANCZOS)
+            h = cap_h
+        # yoff = cap top, so the symbol's top sits where a capital letter's top sits
+        glyphs.append((ord(ch), w, h, x0, cap_top, int(round(f.getlength(ch))), len(data)))
+        data += img.tobytes()
+    out.write("static const uint8_t %s_data[] = {%s};\n" % (name, ",".join(str(b) for b in data)))
+    out.write("static const Glyph %s_glyphs[] = {\n" % name)
+    for gl in glyphs:
+        out.write("\t{%d, %d, %d, %d, %d, %d, %d},\n" % gl)
+    out.write("};\n")
+    out.write("static const Font %s = {%s_glyphs, %d, %s_data, %d};\n\n" % (name, name, len(glyphs), name, 0))
 out.close()
 print("wrote", dst)

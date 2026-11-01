@@ -6,7 +6,7 @@ struct Glyph { uint32_t cp; int16_t w, h, xoff, yoff, adv; uint32_t off; };
 struct Font { const Glyph *glyphs; int count; const uint8_t *data; int height; };
 #include "font.inc"
 
-static const Font *fonts[3];
+static const Font *fonts[4];
 static uint32_t *row_bg;   // one precomputed background colour per scanline
 static uint32_t *canvas;   // the UI is drawn here (cached RAM), never read back from VRAM
 
@@ -16,6 +16,7 @@ void ui_init()
 	fonts[UI_SMALL] = hd ? &f1080_small : &f720_small;
 	fonts[UI_BODY]  = hd ? &f1080_body  : &f720_body;
 	fonts[UI_TITLE] = hd ? &f1080_title : &f720_title;
+	fonts[UI_SYM]   = hd ? &f1080_sym   : &f720_sym;
 	row_bg = new uint32_t[display_height];
 	canvas = new uint32_t[display_width * display_height];
 	for (u32 y = 0; y < display_height; y++) {
@@ -141,24 +142,15 @@ static const char *hint_symbol(const char *button, uint32_t *col)
 int ui_hint_width(const char *button, const char *label)
 {
 	uint32_t col;
-	return ui_text_width(UI_BODY, hint_symbol(button, &col)) + ui_text_width(UI_BODY, " ") + ui_text_width(UI_BODY, label);
-}
-
-// Vertical centre of the first glyph of `s` relative to the text top.
-static int glyph_mid(UiFont fi, const char *s)
-{
-	const Glyph *g = find_glyph(fonts[fi], next_cp(&s));
-	return g ? g->yoff + g->h / 2 : 0;
+	return ui_text_width(UI_SYM, hint_symbol(button, &col)) + ui_text_width(UI_BODY, " ") + ui_text_width(UI_BODY, label);
 }
 
 int ui_hint(int x, int y, const char *button, const char *label)
 {
 	uint32_t col;
 	const char *sym = hint_symbol(button, &col);
-	// centre the symbol on the label's cap height so both line up visually
-	// labels are mostly lowercase: aim between cap-height and x-height centres
-	int dy = (glyph_mid(UI_BODY, "E") + glyph_mid(UI_BODY, "x")) / 2 - glyph_mid(UI_BODY, sym);
-	int w = ui_text(UI_BODY, x, y + dy, col, sym);
+	// symbols are rasterised at cap height with their top at the cap line: same y as the label
+	int w = ui_text(UI_SYM, x, y, col, sym);
 	w += ui_text_width(UI_BODY, " ");
 	w += ui_text(UI_BODY, x + w, y, 0xE8E8F0, label);
 	return w;
