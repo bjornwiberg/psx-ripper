@@ -2335,40 +2335,6 @@ static void eject_disc()
 	g_disc_state = DISC_NONE;
 }
 
-// The disc has been ripped to this destination before: X repair (re-read only the sectors its log
-// lists; done at once when there are none), square new rip, triangle eject, O back.
-// Returns 1 = repair, 2 = new rip, 3 = eject, 0 = back.
-static int already_ripped_screen()
-{
-	pad_pressed();
-	g_redraw = 2;
-	while (!exit_requested) {
-		if (g_redraw > 0) {
-			g_redraw = 0;
-			draw_backdrop();
-			int y = ui_h() * 2 / 5 - ui_line(UI_BODY);
-			ui_text(UI_TITLE, ui_w() / 2, y - ui_line(UI_TITLE), 0xFFFFFF, g_disc_title, UI_CENTER);
-			ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_BODY), 0xE8E8F0, T(STR_ALREADY_RIPPED), UI_CENTER);
-			char rl[128];
-			if (g_repair_n) snprintf(rl, sizeof(rl), T(STR_REPAIR_AVAIL), g_repair_n);
-			else snprintf(rl, sizeof(rl), "%s", T(STR_PREV_CLEAN));
-			ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_BODY) * 5 / 2, g_repair_n ? 0xF0C060 : 0x7CE0A0, rl, UI_CENTER);
-			const char *b[] = {"cross", "square", "triangle", "circle"};
-			const char *l[] = {T(STR_HINT_REPAIR), T(STR_HINT_NEWRIP), T(STR_HINT_EJECT), T(STR_HINT_BACK)};
-			hint_bar(b, l, 4);
-			g_drawn = 2;
-			g_backdrop_shown = 0;
-		}
-		flip_frame();
-		int p = pad_pressed();
-		if (p & B_CROSS) return 1;
-		if (p & B_SQUARE) return 2;
-		if (p & B_TRIANGLE) return 3;
-		if (p & B_CIRCLE) return 0;
-	}
-	return 0;
-}
-
 // Home screen. Returns 1 = rip the disc in the drive, 2 = rip a freshly inserted disc, 0 = exit.
 static int home_screen()
 {
@@ -2409,15 +2375,26 @@ static int home_screen()
 				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
 				footer_note(wl);
 			}
-			if (st == DISC_READY && g_repair_n) {
+			// under the title: Redump line, whether the disc is already ripped here, the destination
+			int ls = ui_line(UI_SMALL), ly = y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 3 / 2 - ls / 2;
+			if (st == DISC_READY && g_disc_rd[0]) { ui_text(UI_SMALL, ui_w() / 2, ly, 0x9AD0A8, g_disc_rd, UI_CENTER); ly += ls * 13 / 10; }
+			if (st == DISC_READY && g_prev_rip) {
+				ui_text(UI_SMALL, ui_w() / 2, ly, 0xE8E8F0, T(STR_ALREADY_RIPPED), UI_CENTER);
+				ly += ls * 13 / 10;
 				char rl[128];
-				snprintf(rl, sizeof(rl), T(STR_REPAIR_AVAIL), g_repair_n);
-				ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 3 + ui_line(UI_SMALL) * 3 / 2, 0xF0C060, rl, UI_CENTER);
+				if (g_repair_n) snprintf(rl, sizeof(rl), T(STR_REPAIR_AVAIL), g_repair_n);
+				else snprintf(rl, sizeof(rl), "%s", T(STR_PREV_CLEAN));
+				ui_text(UI_SMALL, ui_w() / 2, ly, g_repair_n ? 0xF0C060 : 0x7CE0A0, rl, UI_CENTER);
+				ly += ls * 13 / 10;
 			}
-			if (st == DISC_READY && g_disc_rd[0])
-				ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 3 / 2 - ui_line(UI_SMALL) / 2, 0x9AD0A8, g_disc_rd, UI_CENTER);
-			ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2 + (st == DISC_READY && g_disc_rd[0] ? ui_line(UI_SMALL) : 0), 0x8890A8, saving, UI_CENTER);
-			if (st == DISC_READY) {
+			int sy = y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2;
+			if (ly + ls / 2 > sy) sy = ly + ls / 2;
+			ui_text(UI_SMALL, ui_w() / 2, sy, 0x8890A8, saving, UI_CENTER);
+			if (st == DISC_READY && g_prev_rip) {   // already ripped here: X repairs, square rips again
+				const char *b[] = {"cross", "square", "triangle", "start", "circle"};
+				const char *l[] = {T(STR_HINT_REPAIR), T(STR_HINT_NEWRIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				hint_bar(b, l, 5);
+			} else if (st == DISC_READY) {
 				const char *b[] = {"cross", "triangle", "start", "circle"};
 				const char *l[] = {T(STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
 				hint_bar(b, l, 4);
@@ -2434,14 +2411,13 @@ static int home_screen()
 		flip_frame();
 		int p = pad_pressed();
 		if ((p & B_CROSS) && st == DISC_READY) {
+			int shown_prev = g_prev_rip;
 			prev_rip_check();   // the destination may have changed since the disc was identified
-			if (!g_prev_rip) return inserted ? 2 : 1;
-			int c = already_ripped_screen();   // X repair, square new rip, triangle eject, O back
-			if (c == 1) return 3;
-			if (c == 2) return inserted ? 2 : 1;
-			if (c == 3) eject_disc();
-			g_redraw = 2;
+			if (g_prev_rip != shown_prev) { g_redraw = 2; continue; }   // the screen was out of date: show it first
+			if (g_prev_rip) return 3;                                    // repair
+			return inserted ? 2 : 1;                                      // rip
 		}
+		if ((p & B_SQUARE) && st == DISC_READY && g_prev_rip) return inserted ? 2 : 1;   // new rip over the old one
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
 		if (p & B_START) {
 			int old = g_redump;
