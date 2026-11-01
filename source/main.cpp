@@ -3784,11 +3784,12 @@ static void draw_page(int c, int y)
 		yy += lb;
 		if (known && k.fname[0]) {
 			snprintf(fl, sizeof(fl), "%s.bin", k.fname);
-			int pw = ui_text_width(UI_BODY, T(STR_FILE_LABEL));   // same size as "Mål:" above it
-			fit_middle(UI_BODY, fl, fn, sizeof(fn), R - L - pw);
-			ui_text(UI_BODY, L, yy, col, T(STR_FILE_LABEL));
-			ui_text(UI_BODY, L + pw, yy, 0xC8D0E0, fn);
-			yy += lb;
+			// small, the label grey and the name light so it stands out
+			int pw = ui_text_width(UI_SMALL, T(STR_FILE_LABEL));
+			fit_middle(UI_SMALL, fl, fn, sizeof(fn), R - L - pw);
+			ui_text(UI_SMALL, L, yy, 0x8890A8, T(STR_FILE_LABEL));
+			ui_text(UI_SMALL, L + pw, yy, 0xE8ECF8, fn);
+			yy += ls + ls / 3;
 		}
 		return yy;
 	};
