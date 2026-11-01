@@ -1615,7 +1615,13 @@ static void identify_thread(void *arg)
 		g_repair_n = g_prev_rip ? riplog_open_count() : 0;
 		snprintf(g_state_title, sizeof(g_state_title), "%s", g_name);
 		snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
-		fire_event("disc_identified");
+		// only for a disc that was just inserted, or one not reported yet (not when the home screen
+		// identifies the same disc again after a rip or a repair)
+		static char reported[16];
+		if ((long)arg || strcmp(reported, g_serial)) {
+			snprintf(reported, sizeof(reported), "%s", g_serial);
+			fire_event("disc_identified");
+		}
 		if (g_repair_n) logf("previous rip has %d sector(s) to repair", g_repair_n);
 		__sync_synchronize();
 		g_disc_state = DISC_READY;
