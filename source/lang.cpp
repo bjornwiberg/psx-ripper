@@ -186,6 +186,12 @@ static const char *en[STR_COUNT] = {
 	"Already ripped to this destination",
 	", without known errors.",
 	", with known errors (%d sectors).",
+	"Drive",
+	"PS3 drive",
+	"USB · Apple SuperDrive",
+	"USB · no SuperDrive connected",
+	"Reads from: %s",
+	"The SuperDrive is spinning up the disc (up to a minute) …",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -368,6 +374,12 @@ static const char *sv[STR_COUNT] = {
 	"Skivan är redan rippad till den här platsen",
 	", utan kända fel.",
 	", med kända fel (%d sektorer).",
+	"Läsare",
+	"PS3:ans läsare",
+	"USB · Apple SuperDrive",
+	"USB · ingen SuperDrive ansluten",
+	"Läses från: %s",
+	"SuperDriven varvar upp skivan (upp till en minut) …",
 };
 
 static const char **table = en;

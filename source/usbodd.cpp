@@ -1,7 +1,8 @@
 // USB optical drives through an own USB driver (PSL1GHT usbd): the PS3 system lists USB drives as
 // storage but does not pass SCSI commands to them, so a SuperDrive cannot even be unlocked that
 // way. This driver claims the drive by vendor/product id and talks USB Mass Storage Bulk-Only
-// Transport itself: CBW (command), data, CSW (status). Development stage: used from /dbg.
+// Transport itself: CBW (command), data, CSW (status). The ripper uses it as an alternative drive
+// (setting "Läsare"); /dbg can send single commands for diagnosis.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +13,7 @@
 extern "C" {   // usb.h has no C++ guard
 #include <usb/usb.h>
 }
+#include <sys/mutex.h>
 #include <sysmodule/sysmodule.h>
 #include "usbodd.h"
 
@@ -33,6 +35,7 @@ static uint8_t g_ep_in, g_ep_out, g_ifnum;
 static volatile int g_attached = 0, g_probes = 0, g_attaches = 0;
 static int g_init_rc = 1, g_reg_rc = 1;
 static unsigned g_tag = 1;
+static sys_mutex_t g_lock;   // one command at a time (rip thread, presence poll, /dbg)
 
 static volatile int g_done;
 static volatile s32 g_res, g_cnt;
@@ -118,6 +121,9 @@ int usbodd_init()
 	int m = sysModuleLoad(SYSMODULE_USB);
 	g_init_rc = usbInit();
 	// Apple USB SuperDrive
+	sys_mutex_attr_t ma;
+	sysMutexAttrInitialize(ma);
+	sysMutexCreate(&g_lock, &ma);
 	g_reg_rc = usbRegisterExtraLdd(&g_ops, 0x05AC, 0x1500);
 	ulog("usbodd: module 0x%x, usbInit 0x%x, register 0x%x", m, g_init_rc, g_reg_rc);
 	return g_init_rc;
@@ -164,19 +170,30 @@ static uint32_t get_le32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 1
 
 // One SCSI command over Bulk-Only Transport. Returns 0 when the CSW arrived; *status = CSW status
 // (0 good, 1 failed, 2 phase error), *got = data bytes moved.
+static int scsi_locked(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_in, int *status, int *got, char *log, int logn);
 int usbodd_scsi(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_in, int *status, int *got, char *log, int logn)
 {
+	static char dummy[1024];   // the step trace fits (callers that want it pass 600 bytes)
+	if (!log) { log = dummy; logn = sizeof(dummy); }
 	if (!g_attached) { snprintf(log, logn, "not attached\n"); return -1; }
+	sysMutexLock(g_lock, 0);
+	int r = scsi_locked(cdb, cdblen, data, len, dir_in, status, got, log, logn);
+	sysMutexUnlock(g_lock);
+	return r;
+}
+
+static int scsi_locked(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_in, int *status, int *got, char *log, int logn)
+{
 	static void *cbw, *csw, *buf;
 	if (!cbw) {
 		ulog("usbodd: allocating transfer memory");
-		s32 a1 = usbAllocateMemory(&cbw, 64), a2 = usbAllocateMemory(&csw, 64), a3 = usbAllocateMemory(&buf, 65536);
+		s32 a1 = usbAllocateMemory(&cbw, 64), a2 = usbAllocateMemory(&csw, 64), a3 = usbAllocateMemory(&buf, USBODD_MAX);
 		// the library stores a 32-bit address in the 64-bit pointer: on this big-endian CPU it lands
 		// in the upper half (0x200a000000000000 for 0x200a0000)
 		cbw = (void *)((uintptr_t)cbw >> 32); csw = (void *)((uintptr_t)csw >> 32); buf = (void *)((uintptr_t)buf >> 32);
 		ulog("usbodd: allocate -> 0x%x 0x%x 0x%x (%p %p %p)", a1, a2, a3, cbw, csw, buf);
 	}
-	if (!cbw || !csw || !buf || len > 65536) { snprintf(log, logn, "no USB memory\n"); return -2; }
+	if (!cbw || !csw || !buf || len > USBODD_MAX) { snprintf(log, logn, "no USB memory\n"); return -2; }
 	uint8_t *c = (uint8_t *)cbw;
 	memset(c, 0, 31);
 	c[0] = 'U'; c[1] = 'S'; c[2] = 'B'; c[3] = 'C';
@@ -188,11 +205,8 @@ int usbodd_scsi(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_
 	memcpy(c + 15, cdb, cdblen);
 	size_t o = 0;
 	g_done = 0;
-	ulog("usbodd: CBW submit (out pipe %d)", g_out);
 	s32 r = usbBulkTransfer(g_out, cbw, 31, done_cb, NULL);
-	ulog("usbodd: CBW submitted -> 0x%x", r);
 	int w = wait_done(3000);
-	ulog("usbodd: CBW wait -> %d (res 0x%x cnt %d)", w, g_res, g_cnt);
 	o += snprintf(log + o, logn - o, "CBW -> 0x%x, done %d res 0x%x cnt %d\n", r, !w, g_res, g_cnt);
 	if (r || w || g_res) { int rr = usbodd_reset(); o += snprintf(log + o, logn - o, "CBW failed: reset -> 0x%x\n", rr); return -3; }
 	*got = 0;
@@ -200,7 +214,7 @@ int usbodd_scsi(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_
 		if (!dir_in) memcpy(buf, data, len);
 		g_done = 0;
 		r = usbBulkTransfer(dir_in ? g_in : g_out, buf, len, done_cb, NULL);
-		w = wait_done(10000);
+		w = wait_done(20000);   // a scratched sector can keep the drive retrying for a while
 		o += snprintf(log + o, logn - o, "data -> 0x%x, done %d res 0x%x cnt %d\n", r, !w, g_res, g_cnt);
 		if (!r && !w && !g_res) { *got = g_cnt; if (dir_in && g_cnt > 0) memcpy(data, buf, g_cnt < len ? g_cnt : len); }
 		else if (!r && !w && g_res) {   // the device stalled the data phase: clear it, then the CSW tells why
@@ -221,4 +235,58 @@ int usbodd_scsi(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_
 	}
 	*status = s[12];
 	return 0;
+}
+
+int usbodd_attached() { return g_attached; }
+
+// A command with no transfer log. Returns 0 on success, -1 when the transport failed, otherwise
+// 0x8D000000 | sense key << 16 | ASC << 8 | ASCQ from REQUEST SENSE.
+int usbodd_cmd(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_in)
+{
+	int st = -1, got = 0;
+	if (usbodd_scsi(cdb, cdblen, data, len, dir_in, &st, &got, NULL, 0)) return -1;
+	if (st == 0) return (dir_in && got < len) ? -1 : 0;
+	static uint8_t sense[18];
+	const uint8_t rs[6] = {0x03, 0, 0, 0, sizeof(sense), 0};
+	memset(sense, 0, sizeof(sense));
+	if (usbodd_scsi(rs, 6, sense, sizeof(sense), 1, &st, &got, NULL, 0) || st) return 0x8D000000;
+	return 0x8D000000 | (sense[2] & 0x0F) << 16 | sense[12] << 8 | sense[13];
+}
+
+// Apple's vendor command that lets the SuperDrive take a disc (without it the slot stays shut).
+int usbodd_unlock()
+{
+	const uint8_t cdb[12] = {0xEA, 0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0};
+	int r = usbodd_cmd(cdb, 12, NULL, 0, 0);
+	ulog("usbodd: unlock -> 0x%x", r);
+	return r;
+}
+
+// TEST UNIT READY until the drive is ready. After a disc goes in the drive spins up for up to
+// a minute on bus power (06/29, 02/04/01, 06/28 on the way). Returns 0 = ready, 1 = no disc,
+// -1 = not attached / no answer / timeout.
+int usbodd_ready(int timeout_ms)
+{
+	const uint8_t tur[6] = {0};
+	uint64_t end = ms_now() + timeout_ms;
+	for (;;) {
+		if (!g_attached) return -1;
+		int r = usbodd_cmd(tur, 6, NULL, 0, 0);
+		if (r == 0) return 0;
+		if (r == -1) return -1;
+		int key = r >> 16 & 0x0F, asc = r >> 8 & 0xFF;
+		if (key == 0x02 && asc == 0x3A) return 1;     // medium not present
+		if (ms_now() >= end) return -1;
+		usleep(key == 0x06 ? 50000 : 500000);         // unit attention: ask again at once
+	}
+}
+
+// START STOP UNIT with LoEj: the slot-loading drive pushes the disc out (it has no button).
+int usbodd_eject()
+{
+	const uint8_t allow[6] = {0x1E, 0, 0, 0, 0, 0}, ej[6] = {0x1B, 0, 0, 0, 0x02, 0};
+	usbodd_cmd(allow, 6, NULL, 0, 0);
+	int r = usbodd_cmd(ej, 6, NULL, 0, 0);
+	ulog("usbodd: eject -> 0x%x", r);
+	return r;
 }

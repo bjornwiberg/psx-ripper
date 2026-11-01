@@ -59,6 +59,8 @@ static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
 #define WH_HEADERS 3
 static char g_webhook_hdr[WH_HEADERS][256];    // extra headers "Name: value" (often a secret: never logged or shown)
 static int g_webhook_hdr_on = 0;               // send them (off keeps them stored)
+enum { SRC_BD, SRC_USB };
+static int g_src = SRC_BD;                     // drive to rip from: the PS3's own or a USB SuperDrive (usbodd)
 
 // "Name: value" cleaned of CR/LF, so a header can never add lines to the request
 static void clean_header(char *h)
@@ -105,6 +107,7 @@ static int cfg_load()
 			snprintf(g_webhook_hdr[line[14] - '1'], sizeof(g_webhook_hdr[0]), "%s", line + 16);
 			clean_header(g_webhook_hdr[line[14] - '1']);
 		}
+		else if (!strncmp(line, "source=", 7)) g_src = !strcmp(line + 7, "usb") ? SRC_USB : SRC_BD;
 		else if (!strncmp(line, "webhook_step=", 13)) { int v = atoi(line + 13); for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
 	}
 	fclose(f);
@@ -117,6 +120,7 @@ static void cfg_save()
 	if (!f) return;
 	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\nwebhook_step=%d\n",
 	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook, g_check, g_webhook_mask, g_webhook_step);
+	fprintf(f, "source=%s\n", g_src == SRC_USB ? "usb" : "bd");
 	fprintf(f, "webhook_headers_on=%d\n", g_webhook_hdr_on);
 	for (int i = 0; i < WH_HEADERS; i++) fprintf(f, "webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
 	fclose(f);
@@ -165,8 +169,9 @@ static void sysutil_callback(u64 status, u64 param, void *usrdata)
 }
 
 static volatile int disc_inserted = 0, disc_present = 1;   // assume a disc until the drive says otherwise
-static void disc_eject_cb(void) { disc_inserted = 0; disc_present = 0; }
-static void disc_insert_cb(u32 type, char *title) { disc_inserted = 1; disc_present = 1; }
+static int g_src_cb_ignore();   // the system's disc callbacks are about the PS3 drive only
+static void disc_eject_cb(void) { if (g_src_cb_ignore()) return; disc_inserted = 0; disc_present = 0; }
+static void disc_insert_cb(u32 type, char *title) { if (g_src_cb_ignore()) return; disc_inserted = 1; disc_present = 1; }
 
 static void lv1_storage_unpatch();
 static void program_exit_callback()
@@ -262,8 +267,12 @@ static uint32_t g_sc = 616;        // atapi syscall that worked
 static uint8_t *g_cmdbuf;          // aligned command transfer buffer
 static uint8_t *g_sec;   // 128-byte aligned, allocated in main()
 
+// ATAPI packets are SCSI commands: with the USB drive selected they go over our own USB driver.
+static int cdb_len(const uint8_t *cdb) { return cdb[0] < 0x20 ? 6 : cdb[0] < 0xA0 ? 10 : 12; }
+
 static int atapi(const uint8_t *cdb, uint8_t *buf, uint32_t len, uint32_t proto)
 {
+	if (g_src == SRC_USB) return usbodd_cmd(cdb, cdb_len(cdb), buf, len, 1);
 	struct lv2_atapi_cmnd_block cmd;
 	atapi_init(&cmd, len, proto, len ? ATAPI_DIR_READ : ATAPI_DIR_WRITE);
 	if (!len) cmd.proto = ATAPI_NON_DATA_PROTO;
@@ -451,6 +460,7 @@ static int debug_cmd(const char *q, char *out, int n)
 // Data-out command (MODE SELECT).
 static int atapi_out(const uint8_t *cdb, uint8_t *buf, uint32_t len)
 {
+	if (g_src == SRC_USB) return usbodd_cmd(cdb, cdb_len(cdb), buf, len, 0);
 	struct lv2_atapi_cmnd_block cmd;
 	atapi_init(&cmd, len, ATAPI_PIO_DATA_OUT_PROTO, ATAPI_DIR_WRITE);
 	memcpy(cmd.pkt, cdb, 12);
@@ -530,7 +540,8 @@ static int read_toc()
 	// probe which syscall/proto combination the drive accepts
 	const uint32_t scs[2] = {616, 604};
 	const uint32_t protos[2] = {ATAPI_PIO_DATA_IN_PROTO, ATAPI_DMA_PROTO};
-	for (int s = 0; s < 2 && ret; s++)
+	if (g_src == SRC_USB) { ret = atapi(cdb, g_cmdbuf, 0x324, 0); logf("READ TOC (USB) -> 0x%x", ret); }
+	for (int s = 0; s < 2 && ret && g_src == SRC_BD; s++)
 		for (int p = 0; p < 2 && ret; p++) {
 			g_sc = scs[s];
 			ret = atapi(cdb, g_cmdbuf, 0x324, protos[p]);
@@ -564,6 +575,18 @@ static int g_read_mode = 0;   // 0 = syscall 604/6 args, 1 = syscall 616/7 args
 // READ CD with a chosen subchannel selection: 0 = none, 1 = raw P-W (96 bytes), 2 = formatted Q (16 bytes)
 static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, uint32_t blk)
 {
+	if (g_src == SRC_USB) {   // one USB command moves at most USBODD_MAX bytes: split the read
+		uint32_t per = USBODD_MAX / blk;
+		for (uint32_t done = 0; done < count; ) {
+			uint32_t n = count - done < per ? count - done : per, l = lba + done;
+			uint8_t c[12] = {0xBE, 0, (uint8_t)(l >> 24), (uint8_t)(l >> 16), (uint8_t)(l >> 8), (uint8_t)l,
+			                 (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n, 0xF8, sub, 0};
+			int r = usbodd_cmd(c, 12, buf + (size_t)done * blk, n * blk, 1);
+			if (r) return r;
+			done += n;
+		}
+		return 0;
+	}
 	struct lv2_atapi_cmnd_block cmd;
 	memset(&cmd, 0, sizeof(cmd));
 	cmd.pkt[0] = 0xBE;
@@ -635,6 +658,12 @@ static void bd_auth()
 
 static int probe_read()
 {
+	if (g_src == SRC_USB) {
+		memset(g_sec, 0, 4096);
+		int r = read_cd(16, 1, g_sec);
+		logf("READ CD probe (USB) -> 0x%x [%02x %02x .. %02x %02x]", r, g_sec[0], g_sec[1], g_sec[15], g_sec[24]);
+		return r;
+	}
 	int ret = -1;
 	for (int m = 0; m < 2 && ret; m++) {
 		g_read_mode = m;
@@ -2414,8 +2443,8 @@ static void settings_screen()
 	char outdir[64];
 	snprintf(outdir, sizeof(outdir), "%s", g_outdir);
 	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, redump = g_redump, row = 0;
-	int remote = g_remote, webhook_on = g_webhook_on, check = g_check, whstep = g_webhook_step;
-	const int NROWS = 10, VIS = 9;   // the list scrolls when it is longer than VIS rows
+	int src = g_src, remote = g_remote, webhook_on = g_webhook_on, check = g_check, whstep = g_webhook_step;
+	const int NROWS = 11, VIS = 9;   // the list scrolls when it is longer than VIS rows
 	int first = 0;
 	char rdver[64] = "";
 	time_t rdwhen = 0;
@@ -2429,46 +2458,47 @@ static void settings_screen()
 		g_drawn = 2;
 		draw_backdrop();
 		ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_SETTINGS_TITLE), UI_CENTER);
-		char vals[11][96];
+		char vals[13][96];
 		char save_dir[64]; snprintf(save_dir, sizeof(save_dir), "%s", g_outdir);
 		snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
-		target_name(outdir, vals[0], sizeof(vals[0]));
+		target_name(outdir, vals[1], sizeof(vals[1]));
 		if (g_disc_state == DISC_READY && g_disc_mb && dest_free_mb(outdir) && dest_free_mb(outdir) < (uint64_t)g_disc_mb + 2) {
 			char t[96];
-			snprintf(t, sizeof(t), "(!) %s", vals[0]);   // the disc in the drive does not fit here
-			snprintf(vals[0], sizeof(vals[0]), "%s", t);
+			snprintf(t, sizeof(t), "(!) %s", vals[1]);   // the disc in the drive does not fit here
+			snprintf(vals[1], sizeof(vals[1]), "%s", t);
 		}
 		snprintf(g_outdir, sizeof(g_outdir), "%s", save_dir);
-		snprintf(vals[1], sizeof(vals[1]), "%d", retries);
-		if (speed) snprintf(vals[2], sizeof(vals[2]), "%d\xC3\x97", speed_x[speed]); else snprintf(vals[2], sizeof(vals[2]), "%s", T(STR_SPEED_MAX));
-		snprintf(vals[3], sizeof(vals[3]), "%s", eject ? T(STR_ON) : T(STR_OFF));
-		snprintf(vals[4], sizeof(vals[4]), "%s", autostart ? T(STR_ON) : T(STR_OFF));
-		snprintf(vals[5], sizeof(vals[5]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
+		snprintf(vals[0], sizeof(vals[0]), "%s", src == SRC_BD ? T(STR_SRC_BD) : usbodd_attached() ? T(STR_SRC_USB) : T(STR_SRC_USB_NONE));
+		snprintf(vals[2], sizeof(vals[2]), "%d", retries);
+		if (speed) snprintf(vals[3], sizeof(vals[3]), "%d\xC3\x97", speed_x[speed]); else snprintf(vals[3], sizeof(vals[3]), "%s", T(STR_SPEED_MAX));
+		snprintf(vals[4], sizeof(vals[4]), "%s", eject ? T(STR_ON) : T(STR_OFF));
+		snprintf(vals[5], sizeof(vals[5]), "%s", autostart ? T(STR_ON) : T(STR_OFF));
+		snprintf(vals[6], sizeof(vals[6]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
 		if (rdcount > 0) {
 			// Redump's version (date) and when this copy was downloaded (date and time)
 			char date[16], ver[24], when[32];
 			snprintf(date, sizeof(date), "%.10s", rdver);
 			fmt_rd_version(date, ver, sizeof(ver));
 			fmt_local(rdwhen, when, sizeof(when));
-			snprintf(vals[6], sizeof(vals[6]), T(STR_RD_COPY_VALUE), ver, when);
+			snprintf(vals[7], sizeof(vals[7]), T(STR_RD_COPY_VALUE), ver, when);
 		} else {
-			snprintf(vals[6], sizeof(vals[6]), "%s", T(STR_RD_MISSING));
+			snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_RD_MISSING));
 		}
 		char ip[20];
 		remote_ip(ip, sizeof(ip));
-		if (remote) snprintf(vals[7], sizeof(vals[7]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
-		else snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_OFF));
-		if (!webhook_on) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
-		else if (!g_webhook[0]) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_WEBHOOK_NOURL));
+		if (remote) snprintf(vals[8], sizeof(vals[8]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
+		else snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
+		if (!webhook_on) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_OFF));
+		else if (!g_webhook[0]) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_WEBHOOK_NOURL));
 		else {
 			char host[96];
 			webhook_host(g_webhook, host, sizeof(host));
 			int ne = 0;
 			for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
-			snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON_N), host, ne);
+			snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
 		}
-		snprintf(vals[9], sizeof(vals[9]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
-		const char *labels[10] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
+		snprintf(vals[10], sizeof(vals[10]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
+		const char *labels[11] = {T(STR_L_SOURCE), T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
 		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK)};
 		if (row < first) first = row;
 		if (row >= first + VIS) first = row - VIS + 1;
@@ -2479,7 +2509,7 @@ static void settings_screen()
 			if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
 			ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
 			char v[128];
-			snprintf(v, sizeof(v), r == row && r != 6 ? "‹ %s ›" : "%s", vals[r]);   // row 6 is an action
+			snprintf(v, sizeof(v), r == row && r != 7 ? "‹ %s ›" : "%s", vals[r]);   // row 7 is an action
 			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 		}
 		{   // all settings live in one file that can also be edited over FTP
@@ -2487,13 +2517,13 @@ static void settings_screen()
 			snprintf(foot, sizeof(foot), T(STR_WH_CFG_PATH), CFG_PATH);
 			footer_note(foot);
 		}
-		if (row == 8) {
+		if (row == 9) {
 			const char *b[] = {"updown", "leftright", "cross", "triangle", "circle"};
 			const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 			hint_bar(b, l, 5);
 		} else {
-			const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "triangle", "circle"};
-			const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+			const char *b[] = {"updown", row == 7 ? "cross" : "leftright", "triangle", "circle"};
+			const char *l[] = {T(STR_HINT_SELECT), row == 7 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 			hint_bar(b, l, 4);
 		}
 		}
@@ -2502,13 +2532,13 @@ static void settings_screen()
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
-		if ((p & B_CROSS) && row == 8) {
+		if ((p & B_CROSS) && row == 9) {
 			webhook_settings_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 6) {
+		if ((p & B_CROSS) && row == 7) {
 			redump_download_screen();
 			rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
 			pad_pressed();
@@ -2516,7 +2546,7 @@ static void settings_screen()
 			continue;
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (row == 6) d = 0;
+		if (row == 7) d = 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) {
 			reset = own_dialog(T(STR_RESET_Q), 1) == 1;
@@ -2524,49 +2554,51 @@ static void settings_screen()
 			g_redraw = 2;
 			if (reset) {   // defaults; the webhook address and the Redump copy are kept
 				snprintf(outdir, sizeof(outdir), "/dev_hdd0/PSXISO");
-				retries = 4; speed = 0; eject = 1; autostart = 0; redump = RD_OFF;
+				src = SRC_BD; retries = 4; speed = 0; eject = 1; autostart = 0; redump = RD_OFF;
 				if (remote) remote_set(0);
 				remote = 0; webhook_on = 0; check = CHECK_BITPERFECT; whstep = 5;   // step: web page only
 			}
 		}
 		if (d && !reset) {
 			if (row == 0) {
+				src = !src;
+			} else if (row == 1) {
 				char save_dir2[64]; snprintf(save_dir2, sizeof(save_dir2), "%s", g_outdir);
 				snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
 				next_target(d);
 				snprintf(outdir, sizeof(outdir), "%s", g_outdir);
 				snprintf(g_outdir, sizeof(g_outdir), "%s", save_dir2);
-			} else if (row == 1) {
+			} else if (row == 2) {
 				int k = 0; while (k < 6 && steps[k] != retries) k++;
 				retries = steps[(k + (d > 0 ? 1 : 5)) % 6];
-			} else if (row == 2) {
+			} else if (row == 3) {
 				// right = faster: 2x, 4x, 8x, max (index 3 ... 0)
 				if (d > 0 && speed > 0) speed--;
 				if (d < 0 && speed < 3) speed++;
-			} else if (row == 3) {
-				eject = !eject;
 			} else if (row == 4) {
-				autostart = !autostart;
+				eject = !eject;
 			} else if (row == 5) {
+				autostart = !autostart;
+			} else if (row == 6) {
 				redump = (redump + (d > 0 ? 1 : 2)) % 3;
-			} else if (row == 7) {
+			} else if (row == 8) {
 				remote = !remote;
 				remote_set(remote);
 				if (remote) notify_url(STR_REMOTE_HELP, "");
-			} else if (row == 8) {
-				webhook_on = !webhook_on;
 			} else if (row == 9) {
+				webhook_on = !webhook_on;
+			} else if (row == 10) {
 				check = (check + (d > 0 ? 1 : 2)) % 3;
 			}
 		}
 		if (d || reset) {
 			// every change is applied and saved immediately
 			snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
-			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on; g_check = check; g_webhook_step = whstep;
+			g_src = src; g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on; g_check = check; g_webhook_step = whstep;
 			OUT_DIR = g_outdir;
 			cfg_save();
-			logf("settings saved: outdir=%s retries=%d speed=%d eject=%d autostart=%d redump=%d remote=%d webhook=%d",
-			     g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on);
+			logf("settings saved: source=%d outdir=%s retries=%d speed=%d eject=%d autostart=%d redump=%d remote=%d webhook=%d",
+			     g_src, g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on);
 		}
 		if (p & B_CIRCLE) return;
 	}
@@ -2577,12 +2609,41 @@ static void settings_screen()
 static void eject_disc()
 {
 	while (g_ident_busy) usleep(10000);
+	if (g_src == SRC_USB) {
+		usbodd_eject();
+		fire_event("disc_ejected");
+		g_disc_state = DISC_NONE;
+		disc_present = 0;
+		return;
+	}
 	if (sys_storage_open(BD_DEVICE, &g_fd)) return;
 	uint8_t cdb[12] = {0x1B, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0, 0};
 	logf("eject (home) -> 0x%x", atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
 	fire_event("disc_ejected");
 	sys_storage_close(g_fd);
 	g_disc_state = DISC_NONE;
+}
+
+// The system reports discs only for its own drive: with the USB drive selected a thread asks the
+// drive (TEST UNIT READY) every two seconds whenever the app is not using it.
+static int g_src_cb_ignore() { return g_src == SRC_USB; }
+static void usb_presence_thread(void *arg)
+{
+	int was = -1;   // unknown
+	while (!exit_requested) {
+		usleep(2000 * 1000);
+		if (g_src != SRC_USB || g_state_busy()) { was = -1; continue; }
+		const uint8_t tur[6] = {0};
+		int r = usbodd_attached() ? usbodd_cmd(tur, 6, NULL, 0, 0) : -1;
+		// a disc that is still spinning up (not ready, unit attention) counts as present
+		int now = r == 0 || (r != -1 && !((r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A));
+		if (!now && was != 0 && usbodd_attached()) usbodd_unlock();   // lets the slot take the next disc
+		if (was == 0 && now) { disc_present = 1; disc_inserted = 1; logf("usb drive: disc inserted"); }
+		if (was == 1 && !now) { disc_present = 0; disc_inserted = 0; logf("usb drive: disc removed"); }
+		if (was == -1) disc_present = now;
+		was = now;
+	}
+	sysThreadExit(0);
 }
 
 // Home screen. Returns 1 = rip the disc in the drive, 2 = rip a freshly inserted disc, 0 = exit.
@@ -2619,7 +2680,7 @@ static int home_screen()
 				ui_text(UI_TITLE, ui_w() / 2, y - ui_line(UI_BODY), 0xFFFFFF, g_disc_title, UI_CENTER);
 				ui_text(UI_BODY, ui_w() / 2, y - ui_line(UI_BODY) + ui_line(UI_TITLE) * 9 / 10, 0xA8B0C8, info, UI_CENTER);
 			} else {
-				const char *msg = st == DISC_READING ? T(STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
+				const char *msg = st == DISC_READING ? T(g_src == SRC_USB ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
 				ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, msg, UI_CENTER);
 			}
 			if (g_webhook_on && g_webhook[0]) {   // just a hint that webhooks are on; details in the settings
@@ -2644,8 +2705,14 @@ static int home_screen()
 				ui_text(UI_SMALL, x0 + w1, ly, g_repair_n ? 0xF0C060 : 0x8FA8D8, p2);
 				ly += ls;
 			}
-			// group 3: where it goes
+			// group 3: where it comes from (only when it is not the PS3's own drive) and where it goes
 			int sy = ly + lb;
+			if (g_src == SRC_USB) {
+				char from[96];
+				snprintf(from, sizeof(from), T(STR_SRC_LINE), T(STR_SRC_USB));
+				ui_text(UI_SMALL, ui_w() / 2, sy, 0x8890A8, from, UI_CENTER);
+				sy += ls;
+			}
 			ui_text(UI_SMALL, ui_w() / 2, sy, 0x8890A8, saving, UI_CENTER);
 			if (st == DISC_READY && g_space_short && !g_prev_rip) {   // will not fit (a re-rip replaces the old image)
 				char sl[200];
@@ -2698,8 +2765,16 @@ static int home_screen()
 		}
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
 		if (p & B_START) {
-			int old = g_redump;
+			int old = g_redump, old_src = g_src;
 			settings_screen();
+			if (g_src != old_src) {   // another drive: forget the disc and identify what is in the new one
+				while (g_ident_busy) usleep(10000);
+				disc_present = 1;
+				g_disc_state = DISC_NONE;
+				identify_start(0);
+				g_redraw = 2;
+				continue;
+			}
 			if (g_redump != old && g_disc_state == DISC_READY && !g_ident_busy) lookup_start();
 			if (g_disc_state == DISC_READY && !g_ident_busy) prev_rip_check();   // destination may have changed
 			g_redraw = 2;
@@ -2737,15 +2812,25 @@ static int prepare_disc(int *err, int *code)
 	g_qoff = 0; g_qcal_done = 0; memset(g_qhist, 0, sizeof(g_qhist));
 	if (!g_mounttest) webman_unmount();
 
-	int ret = sys_storage_open(BD_DEVICE, &g_fd);
-	logf("storage_open -> 0x%x fd=%d", ret, g_fd);
-	if (ret) { *err = STR_OPEN_FAILED; *code = ret; return -1; }
+	int ret;
+	if (g_src == SRC_USB) {   // no lv2 device and no lv1 patch: our own driver talks to the drive
+		g_fd = -1;
+		if (!usbodd_attached()) { *err = STR_OPEN_FAILED; *code = -1; return -2; }
+		usbodd_unlock();          // harmless when it is already unlocked; lets the slot take a disc
+		ret = usbodd_ready(90000);
+		logf("usb drive ready -> %d", ret);
+		if (ret) { *err = STR_TOC_FAILED; *code = ret; return -2; }
+	} else {
+		ret = sys_storage_open(BD_DEVICE, &g_fd);
+		logf("storage_open -> 0x%x fd=%d", ret, g_fd);
+		if (ret) { *err = STR_OPEN_FAILED; *code = ret; return -1; }
+	}
 
 	ret = read_toc();
 	if (ret) { sys_storage_close(g_fd); *err = STR_TOC_FAILED; *code = ret; return -2; }   // -2: no (readable) disc
 
 	ret = probe_read();
-	if (ret && lv1_storage_patch() == 0) {
+	if (ret && g_src == SRC_BD && lv1_storage_patch() == 0) {
 		bd_auth();
 		ret = probe_read();
 	}
@@ -3461,7 +3546,10 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 	if (warn[0]) own_dialog(warn, 0);   // what the start-up checks found and fixed
-	{ struct stat ds; g_debug_on = stat("/dev_hdd0/tmp/psxrip.debug", &ds) == 0; if (g_debug_on) { logf("debug commands on (/dbg)"); usbodd_init(); } }
+	{ struct stat ds; g_debug_on = stat("/dev_hdd0/tmp/psxrip.debug", &ds) == 0; if (g_debug_on) logf("debug commands on (/dbg)"); }
+	usbodd_init();   // USB SuperDrive (setting "Läsare")
+	if (g_src == SRC_USB) for (int i = 0; i < 30 && !usbodd_attached(); i++) usleep(100 * 1000);   // let it attach first
+	{ sys_ppu_thread_t t; sysThreadCreate(&t, usb_presence_thread, NULL, 1500, 0x4000, 0, (char *)"psxusbpoll"); }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
 	int autorip = 0;   // set after a successful rip: the next inserted disc is ripped without asking
