@@ -2328,12 +2328,13 @@ static int rip_disc_inner(int fresh, int autorip)
 	Eta eta;
 	eta_start(&eta);
 	uint64_t shown_ms = 0;
-	int shown_ev = -1, quarter = 0;
+	int shown_ev = -1;
+	uint32_t sent_pct = 0;   // last percentage sent as rip_progress
 	while (!g_finished) {
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / (g_total ? g_total : 1));
-		if (quarter < 3 && pct >= (uint32_t)(25 * (quarter + 1)) && !g_phase) { quarter++; fire_event("rip_progress"); }
+		if (pct > sent_pct && pct < 100 && !g_phase) { sent_pct = pct; fire_event("rip_progress"); }   // every percent
 		int rmax = g_rr_max, rtry = rmax ? g_rr_try : 0;
 		uint32_t rlba = g_rr_lba;
 		// redraw on a new percentage, every 256 sectors, or when the re-read state changes
