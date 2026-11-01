@@ -105,9 +105,9 @@ static void sysutil_callback(u64 status, u64 param, void *usrdata)
 	if (status == SYSUTIL_EXIT_GAME) exit_requested = 1;
 }
 
-static volatile int disc_inserted = 0;
-static void disc_eject_cb(void) { disc_inserted = 0; }
-static void disc_insert_cb(u32 type, char *title) { disc_inserted = 1; }
+static volatile int disc_inserted = 0, disc_present = 1;   // assume a disc until the drive says otherwise
+static void disc_eject_cb(void) { disc_inserted = 0; disc_present = 0; }
+static void disc_insert_cb(u32 type, char *title) { disc_inserted = 1; disc_present = 1; }
 
 static void program_exit_callback()
 {
@@ -912,8 +912,46 @@ static void next_target()
 	snprintf(g_outdir, sizeof(g_outdir), "%s", cands[(cur + 1) % nc]);
 }
 
+// ---------------------------------------------------------------- disc identification for the home screen
+static char g_name[128];   // title (or volume id) of the disc in the drive
+static int prepare_disc(int *err, int *code);
+enum { DISC_NONE, DISC_READING, DISC_READY, DISC_ERROR };
+static volatile int g_disc_state = DISC_NONE;
+static volatile int g_ident_busy = 0;
+static char g_disc_title[128], g_disc_serial[16];
+static uint32_t g_disc_mb;
+
+static void identify_thread(void *arg)
+{
+	if ((long)arg) usleep(2000 * 1000);   // freshly inserted: let the drive spin up
+	int err = 0, code = 0;
+	int r = prepare_disc(&err, &code);
+	if (r == 0) {
+		sys_storage_close(g_fd);
+		snprintf(g_disc_title, sizeof(g_disc_title), "%s", g_name);
+		snprintf(g_disc_serial, sizeof(g_disc_serial), "%s", g_serial[0] ? g_serial : T(STR_UNKNOWN));
+		g_disc_mb = (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024));
+		__sync_synchronize();
+		g_disc_state = DISC_READY;
+	} else {
+		g_disc_state = (r == -2) ? DISC_NONE : DISC_ERROR;
+	}
+	logf("identify -> %d (state %d)", r, g_disc_state);
+	g_ident_busy = 0;
+	sysThreadExit(0);
+}
+
+static void identify_start(int fresh)
+{
+	if (g_ident_busy) return;
+	g_ident_busy = 1;
+	g_disc_state = DISC_READING;
+	sys_ppu_thread_t t;
+	sysThreadCreate(&t, identify_thread, (void *)(long)fresh, 1000, 0x10000, 0, (char *)"psxident");
+}
+
 // ---------------------------------------------------------------- own screens (home, settings)
-enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT = 32, B_RIGHT = 64, B_START = 128 };
+enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT = 32, B_RIGHT = 64, B_START = 128, B_SQUARE = 256 };
 
 // Buttons newly pressed since the last call, over all connected pads. Each pad keeps its own
 // last state: ioPadGetData only reports changes, so a quiet pad must not resurrect another pad's buttons.
@@ -937,6 +975,7 @@ static int pad_pressed()
 				if (pd.BTN_LEFT) b |= B_LEFT;
 				if (pd.BTN_RIGHT) b |= B_RIGHT;
 				if (pd.BTN_START) b |= B_START;
+				if (pd.BTN_SQUARE) b |= B_SQUARE;
 				pad_state[i] = b;
 			}
 			now |= pad_state[i];
@@ -1043,33 +1082,69 @@ static void settings_screen()
 }
 
 
-// Home screen. Returns 1 = rip the disc in the drive, 2 = a disc was inserted, 0 = exit.
+// Ejects the disc (START STOP UNIT with LoEj).
+static void eject_disc()
+{
+	while (g_ident_busy) usleep(10000);
+	if (sys_storage_open(BD_DEVICE, &g_fd)) return;
+	uint8_t cdb[12] = {0x1B, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0, 0};
+	logf("eject (home) -> 0x%x", atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
+	sys_storage_close(g_fd);
+	g_disc_state = DISC_NONE;
+}
+
+// Home screen. Returns 1 = rip the disc in the drive, 2 = rip a freshly inserted disc, 0 = exit.
 static int home_screen()
 {
 	disc_inserted = 0;
 	g_redraw = 2;
 	pad_pressed();   // swallow buttons still held from a previous screen
+	if (g_disc_state != DISC_READY && !g_ident_busy) identify_start(0);
+	int last_state = -1, inserted = 0;
 	while (!exit_requested) {
+		if (disc_inserted) { disc_inserted = 0; inserted = 1; while (g_ident_busy) usleep(10000); identify_start(1); }
+		if (!disc_present) { if (g_disc_state != DISC_NONE && !g_ident_busy) g_disc_state = DISC_NONE; inserted = 0; }
+		int st = g_disc_state;
+		if (st != last_state) { last_state = st; g_redraw = 2; }
+		if (st == DISC_READY && inserted && g_autostart) return 2;
 		char tname[96], saving[160];
 		target_name(g_outdir, tname, sizeof(tname));
 		snprintf(saving, sizeof(saving), T(STR_HOME_SAVING), tname);
 		g_backdrop_shown = 0;   // a dialog opened later must redraw its backdrop
 		if (g_redraw > 0) {
-		g_redraw = 0;
-		g_drawn = 2;
-		draw_backdrop();
-		int y = ui_h() * 2 / 5;
-		ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, T(STR_HOME_INSERT), UI_CENTER);
-		ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_BODY) * 2, 0xA8B0C8, saving, UI_CENTER);
-		const char *b[] = {"cross", "triangle", "circle"};
-		const char *l[] = {T(STR_HINT_RIP), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
-		hint_bar(b, l, 3);
+			g_redraw = 0;
+			g_drawn = 2;
+			draw_backdrop();
+			int y = ui_h() * 2 / 5;
+			if (st == DISC_READY) {
+				char info[96];
+				snprintf(info, sizeof(info), "%s  ·  %u MB", g_disc_serial, g_disc_mb);
+				ui_text(UI_TITLE, ui_w() / 2, y - ui_line(UI_BODY), 0xFFFFFF, g_disc_title, UI_CENTER);
+				ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_TITLE) - ui_line(UI_BODY) / 2, 0xA8B0C8, info, UI_CENTER);
+			} else {
+				const char *msg = st == DISC_READING ? T(STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
+				ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, msg, UI_CENTER);
+			}
+			ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, 0x8890A8, saving, UI_CENTER);
+			if (st == DISC_READY) {
+				const char *b[] = {"cross", "triangle", "square", "circle"};
+				const char *l[] = {T(STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				hint_bar(b, l, 4);
+			} else if (st == DISC_ERROR) {
+				const char *b[] = {"triangle", "square", "circle"};
+				const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				hint_bar(b, l, 3);
+			} else {
+				const char *b[] = {"square", "circle"};
+				const char *l[] = {T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				hint_bar(b, l, 2);
+			}
 		}
 		flip_frame();
-		if (disc_inserted) return 2;
 		int p = pad_pressed();
-		if (p & B_CROSS) return 1;
-		if (p & (B_TRIANGLE | B_START)) { settings_screen(); g_redraw = 2; }
+		if ((p & B_CROSS) && st == DISC_READY) return inserted ? 2 : 1;
+		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
+		if (p & (B_SQUARE | B_START)) { settings_screen(); g_redraw = 2; }
 		if (p & B_CIRCLE) return 0;
 	}
 	return 0;
@@ -1079,57 +1154,45 @@ static int home_screen()
 static char g_done_msg[512];   // summary of the last successful rip
 
 // Returns 1 when the disc was ripped successfully. `autorip` skips the confirmation.
-static int rip_disc_inner(int fresh, int autorip)
+// Opens the drive, unlocks raw reads, reads the TOC and identifies the disc (g_serial, g_name, g_base).
+// Leaves g_fd open on success (returns 0). On failure g_fd is closed and *err/*code describe why;
+// -2 means no readable disc.
+static int prepare_disc(int *err, int *code)
 {
-	char msg[512];
+	char *name = g_name;
 	g_ntracks = 0; g_leadout = 0; g_nlc = 0; g_qzero = 0; g_qchecked = 0; g_readerrs = 0;
 	g_qoff = 0; g_qcal_done = 0; memset(g_qhist, 0, sizeof(g_qhist));
 	if (!g_mounttest) webman_unmount();
 
 	int ret = sys_storage_open(BD_DEVICE, &g_fd);
 	logf("storage_open -> 0x%x fd=%d", ret, g_fd);
-	if (ret) { snprintf(msg, sizeof(msg), T(STR_OPEN_FAILED), ret); tell(msg); return 0; }
+	if (ret) { *err = STR_OPEN_FAILED; *code = ret; return -1; }
 
 	ret = read_toc();
-	if (ret) {
-		sys_storage_close(g_fd);
-		snprintf(msg, sizeof(msg), T(STR_TOC_FAILED), ret, LOG_PATH);
-		tell(msg);
-		return 0;
-	}
+	if (ret) { sys_storage_close(g_fd); *err = STR_TOC_FAILED; *code = ret; return -2; }   // -2: no (readable) disc
 
 	ret = probe_read();
 	if (ret && lv1_storage_patch() == 0) {
 		bd_auth();
 		ret = probe_read();
 	}
-	if (ret) {
-		sys_storage_close(g_fd);
-		snprintf(msg, sizeof(msg), T(STR_READCD_FAILED), ret, LOG_PATH);
-		tell(msg);
-		return 0;
-	}
+	if (ret) { sys_storage_close(g_fd); *err = STR_READCD_FAILED; *code = ret; return -1; }
 
 	// the TOC read before authentication can be incomplete (seen on multi-track discs): read it again
 	logf("re-reading TOC after auth");
-	if (read_toc()) {
-		sys_storage_close(g_fd);
-		snprintf(msg, sizeof(msg), T(STR_TOC_FAILED), -3, LOG_PATH);
-		tell(msg);
-		return 0;
-	}
+	if (read_toc()) { sys_storage_close(g_fd); *err = STR_TOC_FAILED; *code = -3; return -1; }
 
 	struct stat dst;
 	if (stat("/dev_hdd0/tmp/psxrip.diag", &dst) == 0) {
 		subq_diag();
 		sys_storage_close(g_fd);
-		return 0;
+		*err = STR_UNKNOWN; *code = 0;
+		return -1;
 	}
 
 	detect_disc_id();
-	char name[128];
 	const char *title = g_serial[0] ? lookup_title(g_serial) : NULL;
-	snprintf(name, sizeof(name), "%s", title ? title : (g_volid[0] ? g_volid : "PSX DISC"));
+	snprintf(name, sizeof(g_name), "%s", title ? title : (g_volid[0] ? g_volid : "PSX DISC"));
 	logf("title=%s", title ? title : "(not in database)");
 	sanitize(name);
 	if (g_serial[0])
@@ -1138,6 +1201,21 @@ static int rip_disc_inner(int fresh, int autorip)
 		snprintf(g_base, sizeof(g_base), "%s/%s %lu", OUT_DIR, name, (unsigned long)time(NULL));
 
 	g_is_pal = g_serial[0] && g_serial[2] == 'E';   // SLES/SCES/SLED/SCED
+	return 0;
+}
+
+static int rip_disc_inner(int fresh, int autorip)
+{
+	char msg[512];
+	int err = 0, code = 0;
+	if (prepare_disc(&err, &code)) {
+		if (err == STR_OPEN_FAILED) snprintf(msg, sizeof(msg), T(STR_OPEN_FAILED), code);
+		else if (err == STR_UNKNOWN) return 0;   // diag run
+		else snprintf(msg, sizeof(msg), T((StrId)err), code, LOG_PATH);
+		tell(msg);
+		return 0;
+	}
+	const char *name = g_name;
 	uint32_t mb = (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024));
 	snprintf(msg, sizeof(msg), T(STR_FOUND),
 	         name, g_serial[0] ? g_serial : T(STR_UNKNOWN), g_ntracks, mb, OUT_DIR);
@@ -1313,7 +1391,8 @@ int main(int argc, char *argv[])
 			// give the drive a moment to spin up before we talk to it
 			for (int i = 0; i < 120 && !exit_requested; i++) do_flip();
 		}
-		int ok = rip_disc(fresh, autorip || (fresh && g_autostart));
+		int ok = rip_disc(fresh, 1);   // the home screen already shows what will be ripped
+		g_disc_state = DISC_NONE;     // ejected (or ripped): identify again on the next home screen
 		autorip = 0;
 		if (!ok) continue;
 
