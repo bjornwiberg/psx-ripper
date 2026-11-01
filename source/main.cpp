@@ -1770,6 +1770,12 @@ static int pad_pressed()
 // Top of the button hint bar: low on the screen (inside the TV safe area), so lists above it get room.
 static int hint_y() { return ui_h() - ui_h() * 4 / 100 - ui_line(UI_BODY); }
 
+// Small grey note just above the hint bar, at the same place on every screen.
+static void footer_note(const char *text)
+{
+	ui_text(UI_SMALL, ui_w() / 2, hint_y() - ui_line(UI_SMALL) * 2, 0x6870A0, text, UI_CENTER);
+}
+
 static void hint_bar(const char *const *buttons, const char *const *labels, int n)
 {
 	int total = 0, gap = ui_w() / 24;
@@ -2229,7 +2235,7 @@ static void settings_screen()
 		{   // all settings live in one file that can also be edited over FTP
 			char foot[200];
 			snprintf(foot, sizeof(foot), T(STR_WH_CFG_PATH), CFG_PATH);
-			ui_text(UI_SMALL, ui_w() / 2, top + VIS * lh - lh / 4, 0x8890A8, foot, UI_CENTER);
+			footer_note(foot);
 		}
 		if (row == 8) {
 			const char *b[] = {"updown", "leftright", "cross", "triangle", "circle"};
@@ -2401,7 +2407,7 @@ static int home_screen()
 				for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
 				char wl[64];
 				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
-				ui_text(UI_SMALL, ui_w() / 2, hint_y() - ui_line(UI_SMALL) * 2, 0x6870A0, wl, UI_CENTER);
+				footer_note(wl);
 			}
 			if (st == DISC_READY && g_repair_n) {
 				char rl[128];
