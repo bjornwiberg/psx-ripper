@@ -200,6 +200,9 @@ static const char *en[STR_COUNT] = {
 	"Cancel the rip of %s? The unfinished file is removed.",
 	"Rips are running. Cancel them and exit?",
 	"A repair uses the whole screen: wait until the rips are done.",
+	"The rip was cancelled",
+	" · the earlier rip is still there, without known errors.",
+	" · the earlier rip is still there, with known errors (%d sectors).",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -396,6 +399,9 @@ static const char *sv[STR_COUNT] = {
 	"Avbryta rippningen av %s? Den ofullständiga filen tas bort.",
 	"Rippningar pågår. Avbryta dem och avsluta?",
 	"En lagning använder hela skärmen: vänta tills rippningarna är klara.",
+	"Rippningen avbröts",
+	" · den tidigare rippen finns kvar, utan kända fel.",
+	" · den tidigare rippen finns kvar, med kända fel (%d sektorer).",
 };
 
 static const char **table = en;

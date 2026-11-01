@@ -106,6 +106,7 @@ struct Card {
 	volatile int job;                 // a rip runs on this card (its own thread)
 	char res[200];                    // last rip: one line, coloured res_col
 	uint32_t res_col;
+	int res_failed;                   // it was cancelled or failed: an earlier rip there is untouched
 	uint64_t eta_t0, eta_tw; uint32_t eta_pw; double eta_rate;   // time left of the running rip
 	int eta_phase;
 };
@@ -3149,7 +3150,15 @@ static int draw_card(int c, int y, int focused, int single)
 	} else {
 		if (st == DISC_READY && k.rd[0]) ui_text(UI_SMALL, ax, ly, 0x9AD0A8, k.rd, al);
 		ly += ls;
-		if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // how the last rip on this drive went
+		if (k.res[0] && k.res_failed && st == DISC_READY && k.prev_rip) {
+			// cancelled or failed over an earlier rip: that one is still there, say so on the same line
+			char p2[160];
+			if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_PREV_KEPT_ERRORS), k.repair_n);
+			else snprintf(p2, sizeof(p2), "%s", T(STR_PREV_KEPT));
+			int w1 = ui_text_width(UI_SMALL, k.res), w2 = ui_text_width(UI_SMALL, p2), x0 = single ? (ui_w() - w1 - w2) / 2 : left;
+			ui_text(UI_SMALL, x0, ly, k.res_col, k.res);
+			ui_text(UI_SMALL, x0 + w1, ly, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2);
+		} else if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // how the last rip on this drive went
 			ui_text(UI_SMALL, ax, ly, k.res_col, k.res, al);
 		} else if (st == DISC_READY && k.prev_rip) {   // already ripped here: one line, "known errors" in yellow
 			char p2[96];
@@ -3564,6 +3573,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		Card &k = g_cards[cur_card()];
 		snprintf(k.res, sizeof(k.res), "%s", msg);
 		k.res_col = 0xFF8A80;
+		k.res_failed = 1;
 		return 0;
 	}
 	const char *name = g_name;
@@ -3627,8 +3637,9 @@ static int rip_disc_inner(int fresh, int autorip)
 		g_state = ST_HOME;
 		fire_event(g_result == 1 ? "rip_cancelled" : "rip_failed");
 		Card &k = g_cards[cur_card()];
-		snprintf(k.res, sizeof(k.res), "%s", g_result == 1 ? T(STR_ABORTED) : T(STR_CREATE_FAILED));
+		snprintf(k.res, sizeof(k.res), "%s", g_result == 1 ? T(STR_CARD_CANCELLED) : T(STR_CREATE_FAILED));
 		k.res_col = g_result == 1 ? 0xF0C060 : 0xFF8A80;
+		k.res_failed = 1;
 		return 0;
 	}
 
@@ -3733,6 +3744,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		const char *first = g_nres ? g_res[0].text : "";
 		snprintf(k.res, sizeof(k.res), T(STR_CARD_DONE), first, d);
 		k.res_col = g_nres ? g_res[0].col : 0x7CE0A0;
+		k.res_failed = 0;
 	}
 	g_state = ST_HOME;
 	fire_event("rip_finished");
