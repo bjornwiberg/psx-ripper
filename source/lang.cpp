@@ -235,7 +235,7 @@ static const char *en[STR_COUNT] = {
 	"Save the new file name pattern?",
 	"Move",
 	"USB %d",
-	" and verified.",
+	" and verified against Redump.",
 	"Already ripped here",
 };
 
@@ -468,7 +468,7 @@ static const char *sv[STR_COUNT] = {
 	"Spara det nya filnamnsmönstret?",
 	"Flytta",
 	"USB %d",
-	" och verifierad.",
+	" och verifierad mot Redump.",
 	"Redan rippad hit",
 };
 
