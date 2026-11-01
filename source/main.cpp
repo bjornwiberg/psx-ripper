@@ -701,10 +701,10 @@ static volatile uint32_t g_buf_end[2];   // lba after the last sector in buffer
 static volatile int g_reader_done = 0, g_write_failed = 0;
 static FILE *g_out;
 
-// Sector check (data track 1): sync pattern, header address and EDC. Run by the writer thread,
-// so a rip that differs from Redump can be traced to damaged or misplaced sectors.
+// Sector check (data track 1): sync pattern, header address and EDC. The drive can hand out a
+// sector with uncorrected errors and still report success, so the reader re-reads such sectors.
 static uint32_t g_edc_tab[256];
-static volatile uint32_t g_badsect = 0;
+static volatile uint32_t g_badsect = 0, g_recovered = 0;
 
 static void edc_init()
 {
@@ -759,12 +759,6 @@ static void writer_thread(void *arg)
 			md5_update(&g_md5[t], g_bufs[k] + i * RAW_SIZE, cnt * RAW_SIZE);
 			i += cnt;
 		}
-		uint32_t data_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
-		if (g_ntracks && (g_tracks[0].ctrl & 0x4))
-			for (uint32_t i = 0; i < n && first + i < data_end; i++) {
-				const char *why = check_sector(first + i, g_bufs[k] + i * RAW_SIZE);
-				if (why && ++g_badsect <= 32) logf("bad sector %u: %s", first + i, why);
-			}
 		g_done = g_buf_end[k];
 		g_buf_len[k] = 0;
 	}
@@ -785,7 +779,7 @@ static void rip_thread(void *arg)
 	for (int t = 0; t < g_ntracks; t++) md5_init(&g_md5[t]);
 	tstart_init();
 	edc_init();
-	g_badsect = 0;
+	g_badsect = 0; g_recovered = 0;
 	g_reader_done = 0; g_write_failed = 0;
 	uint32_t data_end = (g_ntracks > 1) ? g_tracks[1].lba : g_leadout;  // LibCrypt lives in track 1
 
@@ -804,6 +798,8 @@ static void rip_thread(void *arg)
 		if (lba + n > g_leadout) n = g_leadout - lba;
 
 		int ret = -1;
+		static uint8_t dead[CHUNK];   // sectors the drive could not read at all (zero-filled)
+		memset(dead, 0, n);
 		for (int tries = 0; tries < g_retries && ret; tries++) ret = read_cd(lba, n, buf);
 		if (ret) {
 			// fall back to single sectors so one bad sector doesn't zero the whole chunk
@@ -811,7 +807,23 @@ static void rip_thread(void *arg)
 				uint8_t *sp = buf + i * SECT_Q;
 				int r = -1;
 				for (int tries = 0; tries < g_retries && r; tries++) r = read_cd(lba + i, 1, sp);
-				if (r) { memset(sp, 0, SECT_Q); g_readerrs++; logf("unreadable sector %u (0x%x)", lba + i, r); }
+				if (r) { memset(sp, 0, SECT_Q); dead[i] = 1; g_readerrs++; logf("unreadable sector %u (0x%x)", lba + i, r); }
+			}
+		}
+		// data track 1: re-read sectors whose sync, address or EDC is wrong
+		if (g_tracks[0].ctrl & 0x4) {
+			uint32_t t1_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
+			for (uint32_t i = 0; i < n && lba + i < t1_end; i++) {
+				uint8_t *sp = buf + i * SECT_Q;
+				const char *why = dead[i] ? 0 : check_sector(lba + i, sp);
+				if (!why) continue;
+				int fixed = 0, tries = 0;
+				while (!fixed && tries < g_retries) {
+					tries++;
+					if (read_cd(lba + i, 1, g_sec) == 0 && !check_sector(lba + i, g_sec)) { memcpy(sp, g_sec, SECT_Q); fixed = 1; }
+				}
+				if (fixed) { g_recovered++; logf("sector %u: %s, fixed by re-read %d", lba + i, why, tries); }
+				else if (++g_badsect <= 32) logf("bad sector %u: %s, still wrong after %d re-reads", lba + i, why, tries);
 			}
 		}
 		// check Q first, then pack the 2352-byte sectors in place for a single write
@@ -1704,7 +1716,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), "\n");
 		snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), T(STR_BAD_SECTORS), g_badsect);
 	}
-	logf("sector check: %u bad sector(s)", g_badsect);
+	logf("sector check: %u bad, %u fixed by re-reading", g_badsect, g_recovered);
 	snprintf(msg, sizeof(msg), T(STR_DONE),
 	         g_base, lcline, g_readerrs);
 	logf("done: %s errs=%u", g_base, g_readerrs);
