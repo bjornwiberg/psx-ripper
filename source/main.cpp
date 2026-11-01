@@ -54,6 +54,9 @@ static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
 #define WH_HEADERS 3
 static char g_webhook_hdr[WH_HEADERS][256];    // extra headers "Name: value" (often a secret: never logged or shown)
 static int g_webhook_hdr_on = 0;               // send them (off keeps them stored)
+// File name of a rip: %T title (Redump's name without the language list, else the app's title),
+// %R region, %D disc ID, %N Redump's whole name. Text in [ ] does not show in webMAN's game list.
+static char g_name_pat[96] = "%T [%D]";
 enum { SRC_BD, SRC_USB };
 static char g_outdir_usb[8][64];               // destination per USB drive, by its port ("" = the hard disk)
 // Drive settings: the standard (Settings, START) and a drive's own values (SELECT on its card),
@@ -107,8 +110,12 @@ struct Card {
 	char res[200];                    // last rip: one line, coloured res_col
 	uint32_t res_col;
 	int res_failed;                   // it was cancelled or failed: an earlier rip there is untouched
-	char rd_done[160];                // Redump line after this rip (verified / no match), shown instead of rd
+	char rd_done[160];                // Redump result as text (verified / no match), for the log and webhooks
 	uint32_t rd_done_col;
+	char rd_name[RD_NAME];            // Redump's name of the disc ("Alundra (Europe)"), "" = not one known
+	char fname[200];                  // file name a rip gets (pattern), without .bin
+	char exist[256];                  // an earlier rip of this disc at the destination (base path), "" = none
+	int rd_state;                     // the image here vs Redump: 1 verified, 0 no match, -1 not known (not ripped)
 	uint64_t eta_t0, eta_tw; uint32_t eta_pw; double eta_rate;   // time left of the running rip
 	int eta_phase;
 };
@@ -165,6 +172,7 @@ static int cfg_load()
 				if (line[6] == 'b') g_bdcfg = c; else g_usbcfg[line[9] - '0'] = c;
 			}
 		}
+		else if (!strncmp(line, "name_pattern=", 13) && line[13]) snprintf(g_name_pat, sizeof(g_name_pat), "%s", line + 13);
 		else if (!strncmp(line, "webhook_step=", 13)) { int v = atoi(line + 13); for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
 	}
 	fclose(f);
@@ -184,6 +192,7 @@ static void cfg_save()
 	for (int i = 0; i < 8; i++)
 		if (g_usbcfg[i].set)
 			fprintf(f, "drive_usb%d=%d,%d,%d,%d,%d\n", i, g_usbcfg[i].retries, g_usbcfg[i].speed, g_usbcfg[i].eject, g_usbcfg[i].autostart, g_usbcfg[i].check);
+	fprintf(f, "name_pattern=%s\n", g_name_pat);
 	fprintf(f, "webhook_headers_on=%d\n", g_webhook_hdr_on);
 	for (int i = 0; i < WH_HEADERS; i++) fprintf(f, "webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
 	fclose(f);
@@ -2049,6 +2058,33 @@ static void target_name(const char *dir, char *out, size_t n)
 // Destination next to the current one in the list hard disk, USB 0, USB 1, ... (by port; a FAT32
 // drive is mounted by the PS3 as /dev_usbNNN, an exFAT drive is reached through FatFs).
 // dir = +1 forward, -1 back.
+// "Mål: Hårddisk · PSXISO/Croc 2 (Europe) [SLES_020.88].bin · 339 GB ledigt" (no file: just the folder)
+static void dest_line(const char *dir, const char *fname, char *out, size_t n)
+{
+	int port;
+	uint64_t mb = 0;
+	char label[48];
+	const char *folder = strchr(dir + 1, '/');   // after the drive: "/dev_hdd0/PSXISO" -> "PSXISO"
+	if (sscanf(dir, "exfat%1d:", &port) == 1) {
+		vf_free_mb(dir, &mb);
+		snprintf(label, sizeof(label), T(STR_DEST_EXFAT), port);
+		folder = strchr(dir, '/');
+	} else {
+		char dev[16];
+		snprintf(dev, sizeof(dev), "%.12s", dir);
+		char *sl = strchr(dev + 1, '/');
+		if (sl) *sl = 0;
+		if (disk_free(dev, &mb)) mb = 0;
+		if (sscanf(dir, "/dev_usb%3d", &port) == 1) snprintf(label, sizeof(label), T(STR_DEST_USB), port);
+		else snprintf(label, sizeof(label), "%s", T(STR_DEST_HDD));
+	}
+	char path[300];
+	folder = folder ? folder + 1 : "";
+	if (fname && fname[0]) snprintf(path, sizeof(path), "%s/%s.bin", folder, fname);
+	else snprintf(path, sizeof(path), "%s", folder);
+	snprintf(out, n, T(STR_DEST_LINE), label, path, (unsigned)(mb / 1024));
+}
+
 static void next_target(char *outdir, int dir)
 {
 	char cands[9][32];
@@ -2080,6 +2116,167 @@ static volatile int g_repairing = 0;   // a repair reads the drive
 #define g_disc_mb (g_cards[cur_card()].mb)
 #define g_repair_n (g_cards[cur_card()].repair_n)   // sectors a previous rip of this disc still has wrong (from its log)
 #define g_prev_rip (g_cards[cur_card()].prev_rip)   // the destination already has <name>.bin for this disc
+
+// Region of a disc: from Redump's name ("Croc 2 (Europe) (En,Fr)" -> "Europe"), else from the
+// disc ID's prefix.
+static void region_of(const char *rdname, const char *serial, char *out, size_t n)
+{
+	out[0] = 0;
+	const char *a = rdname ? strchr(rdname, '(') : NULL, *b = a ? strchr(a, ')') : NULL;
+	if (a && b && b > a + 1) { snprintf(out, n, "%.*s", (int)(b - a - 1), a + 1); return; }
+	if (!serial || strlen(serial) < 4) return;
+	if (serial[2] == 'E') snprintf(out, n, "Europe");                       // SLES, SCES, SLED, SCED
+	else if (serial[2] == 'U') snprintf(out, n, "USA");                     // SLUS, SCUS
+	else if (serial[2] == 'P' || serial[0] == 'S' && serial[1] == 'I') snprintf(out, n, "Japan");   // SLPS, SCPS, SLPM, SIPS
+}
+
+// The file name for a pattern; illegal characters replaced, empty brackets and double spaces gone.
+static void name_from(const char *pat, const char *rdname, const char *title, const char *serial, char *out, size_t n)
+{
+	char t[160], r[64], b[300];
+	if (rdname && rdname[0]) {   // Redump's name up to its first bracket: the title
+		const char *q = strstr(rdname, " (");
+		snprintf(t, sizeof(t), "%.*s", q ? (int)(q - rdname) : (int)strlen(rdname), rdname);
+	} else snprintf(t, sizeof(t), "%s", title);
+	region_of(rdname, serial, r, sizeof(r));
+	size_t o = 0;
+	for (const char *p = pat; *p && o < sizeof(b) - 1; p++) {
+		const char *ins = NULL;
+		if (*p == '%' && p[1]) {
+			p++;
+			ins = *p == 'T' ? t : *p == 'R' ? r : *p == 'D' ? serial : *p == 'N' ? (rdname && rdname[0] ? rdname : title) : *p == '%' ? "%" : "";
+		}
+		if (ins) o += snprintf(b + o, sizeof(b) - o, "%s", ins);
+		else b[o++] = *p;
+		if (o >= sizeof(b)) o = sizeof(b) - 1;
+	}
+	b[o] = 0;
+	// "()" / "[]" left over from a missing region or ID, then spaces
+	for (char *e; (e = strstr(b, "()")) || (e = strstr(b, "[]")); ) memmove(e, e + 2, strlen(e + 2) + 1);
+	o = 0;
+	for (size_t i = 0; b[i]; i++) {
+		if (b[i] == ' ' && (o == 0 || b[o - 1] == ' ')) continue;
+		b[o++] = b[i];
+	}
+	while (o && b[o - 1] == ' ') o--;
+	b[o] = 0;
+	if (!b[0]) snprintf(b, sizeof(b), "%s", title[0] ? title : "PSX DISC");
+	sanitize(b);
+	snprintf(out, n, "%s", b);
+}
+
+// How webMAN shows a file in its game list: without the text in [ ] (and the spaces around it).
+static void listed_name(const char *fname, char *out, size_t n)
+{
+	size_t o = 0;
+	int depth = 0;
+	for (const char *p = fname; *p && o < n - 1; p++) {
+		if (*p == '[') { depth++; continue; }
+		if (*p == ']') { if (depth) depth--; continue; }
+		if (!depth) out[o++] = *p;
+	}
+	out[o] = 0;
+	char *w = out;   // spaces: single, none at the ends
+	for (char *r = out; *r; r++) if (!(*r == ' ' && (w == out || w[-1] == ' '))) *w++ = *r;
+	while (w > out && w[-1] == ' ') w--;
+	*w = 0;
+}
+
+// Disc ID inside an image: ISO 9660 primary volume descriptor -> root directory -> SYSTEM.CNF ->
+// "BOOT = cdrom:\SLES_020.88;1". For images without a rip log (older rips, other tools).
+static int bin_serial(const char *path, char *serial, size_t n)
+{
+	VFile *f = vf_open(path, "rb");
+	if (!f) return -1;
+	uint8_t sec[RAW_SIZE];
+	int ok = -1;
+	auto user = [&](uint32_t lba) -> const uint8_t * {   // a sector's 2048 user bytes
+		if (vf_seek(f, (uint64_t)lba * RAW_SIZE) || vf_read(f, sec, RAW_SIZE) != RAW_SIZE) return NULL;
+		return sec + (sec[15] == 2 ? 24 : 16);
+	};
+	const uint8_t *pvd = user(16);
+	if (pvd && !memcmp(pvd + 1, "CD001", 5)) {
+		uint32_t root = pvd[158] | pvd[159] << 8 | pvd[160] << 16 | (uint32_t)pvd[161] << 24;
+		const uint8_t *d = user(root);
+		uint32_t cnf = 0;
+		for (int o = 0; d && o < 2048 && d[o]; o += d[o]) {
+			int nl = d[o + 32];
+			if (nl >= 10 && !memcmp(d + o + 33, "SYSTEM.CNF", 10)) { cnf = d[o + 2] | d[o + 3] << 8 | d[o + 4] << 16 | (uint32_t)d[o + 5] << 24; break; }
+		}
+		const uint8_t *c = cnf ? user(cnf) : NULL;
+		if (c) {
+			char txt[2049];
+			memcpy(txt, c, 2048); txt[2048] = 0;
+			char *bt = strstr(txt, "BOOT");
+			char *semi = bt ? strchr(bt, ';') : NULL;
+			if (bt && semi) {
+				char *st = semi;
+				while (st > bt && st[-1] != '\\' && st[-1] != ':' && st[-1] != ' ' && st[-1] != '=') st--;
+				if (semi - st >= 9 && semi - st < (long)n) { snprintf(serial, n, "%.*s", (int)(semi - st), st); ok = 0; }
+			}
+		}
+	}
+	vf_close(f);
+	return ok;
+}
+
+// Earlier rips at a destination by disc ID, so one is found whatever its file name: the rip log
+// says serial=, an image without a log is read. Built once per destination, again after a rip.
+#define IDX_MAX 400
+struct RipIdx { char dir[64]; int n, stale; struct { char serial[16]; char name[200]; } e[IDX_MAX]; };
+static RipIdx g_idx[2];
+static sys_mutex_t g_idx_mx;
+static void idx_add(const char *name, void *ctx)
+{
+	RipIdx *x = (RipIdx *)ctx;
+	size_t l = strlen(name);
+	if (l < 5 || strcasecmp(name + l - 4, ".bin") || x->n >= IDX_MAX) return;
+	char base[200], path[320], serial[16] = "";
+	snprintf(base, sizeof(base), "%.*s", (int)(l - 4), name);
+	snprintf(path, sizeof(path), "%s/%s.log", x->dir, base);
+	VFile *f = vf_open(path, "rb");
+	if (f) {
+		char b[1024];
+		int k = (int)vf_read(f, b, sizeof(b) - 1);
+		vf_close(f);
+		b[k > 0 ? k : 0] = 0;
+		const char *sv = strstr(b, "\nserial=");
+		if (sv) sscanf(sv + 8, "%15[^\n]", serial);
+	}
+	if (!serial[0]) {
+		snprintf(path, sizeof(path), "%s/%s", x->dir, name);
+		bin_serial(path, serial, sizeof(serial));
+	}
+	if (!serial[0]) return;
+	snprintf(x->e[x->n].serial, sizeof(x->e[0].serial), "%s", serial);
+	snprintf(x->e[x->n].name, sizeof(x->e[0].name), "%s", base);
+	x->n++;
+}
+static void idx_stale() { for (int i = 0; i < 2; i++) g_idx[i].stale = 1; }
+// Base path (dir/name) of an earlier rip of serial in dir, "" when there is none.
+static void idx_find(const char *dir, const char *serial, char *out, size_t n)
+{
+	out[0] = 0;
+	sysMutexLock(g_idx_mx, 0);
+	RipIdx *x = !strcmp(g_idx[0].dir, dir) ? &g_idx[0] : !strcmp(g_idx[1].dir, dir) ? &g_idx[1] : NULL;
+	if (!x || x->stale) {
+		if (!x) { x = &g_idx[1]; g_idx[1] = g_idx[0]; x = &g_idx[0]; }   // keep the last two destinations
+		snprintf(x->dir, sizeof(x->dir), "%s", dir);
+		x->n = 0; x->stale = 0;
+		if (vf_list(dir, idx_add, x) < 0) {   // a path the PS3 serves itself
+			DIR *d = opendir(dir);
+			if (d) {
+				struct dirent *de;
+				while ((de = readdir(d))) if (de->d_name[0] != '.') idx_add(de->d_name, x);
+				closedir(d);
+			}
+		}
+		logf("rip index %s: %d image(s)", dir, x->n);
+	}
+	for (int i = 0; i < x->n; i++)
+		if (!strcmp(x->e[i].serial, serial)) { snprintf(out, n, "%s/%s", dir, x->e[i].name); break; }
+	sysMutexUnlock(g_idx_mx);
+}
 
 // Counts the sectors in <g_base>.log that are still wrong (unreadable, bad, unconfirmed).
 static int riplog_open_count()
@@ -2121,6 +2318,8 @@ static void rd_guess_names(int hits, char (*names)[RD_NAME])
 	if (hits <= 0) snprintf(line, sizeof(line), "%s", T(STR_RD_GUESS_NONE));
 	else if (hits == 1) snprintf(line, sizeof(line), T(STR_RD_GUESS), names[0]);
 	else snprintf(line, sizeof(line), T(STR_RD_GUESS_MORE), names[0], hits - 1);
+	Card &k = g_cards[cur_card()];   // one disc it can be: its Redump name is the card's title
+	if (hits == 1 && !k.rd_name[0]) snprintf(k.rd_name, sizeof(k.rd_name), "%s", names[0]);
 	rd_set(line);
 }
 
@@ -2207,21 +2406,32 @@ static void redump_verify(char *out, size_t n)
 // file name; its directory follows OUT_DIR, which the settings may have changed since.
 static void prev_rip_check()
 {
-	const char *slash = strrchr(g_base, '/');
-	if (slash) {
-		char name[200];
-		snprintf(name, sizeof(name), "%s", slash + 1);
-		snprintf(g_base, sizeof(g_base), "%s/%s", OUT_DIR, name);
+	Card &k = g_cards[cur_card()];
+	// the file a rip gets: the name pattern at this card's destination
+	if (g_serial[0]) {
+		name_from(g_name_pat, k.rd_name, g_name, g_serial, k.fname, sizeof(k.fname));
+		snprintf(g_base, sizeof(g_base), "%s/%s", OUT_DIR, k.fname);
+	} else {
+		const char *slash = strrchr(g_base, '/');
+		snprintf(k.fname, sizeof(k.fname), "%s", slash ? slash + 1 : g_name);
+		snprintf(g_base, sizeof(g_base), "%s/%s", OUT_DIR, k.fname);
 	}
 	if (!strncmp(OUT_DIR, "exfat", 5)) { VfVolume v[8]; vf_scan(v, 8); }   // mounted before looking
+	// an earlier rip of this disc here: under this name, or under another one (found by disc ID)
 	char bp[320];
 	snprintf(bp, sizeof(bp), "%s.bin", g_base);
-	g_prev_rip = vf_exists(bp);
+	k.exist[0] = 0;
+	if (vf_exists(bp)) snprintf(k.exist, sizeof(k.exist), "%s", g_base);
+	else if (g_serial[0]) idx_find(OUT_DIR, g_serial, k.exist, sizeof(k.exist));
+	g_prev_rip = k.exist[0] != 0;
+	char keep[256];
+	snprintf(keep, sizeof(keep), "%s", g_base);
+	if (g_prev_rip) snprintf(g_base, sizeof(g_base), "%s", k.exist);   // its log
 	g_repair_n = g_prev_rip ? riplog_open_count() : 0;
 	// how that image compared with Redump, from its log ("redump=verified Alundra (Europe)"): the
-	// card's Redump line says it, also for a rip from an earlier session
-	Card &k = g_cards[cur_card()];
+	// card's title icon says it, also for a rip from an earlier session
 	k.rd_done[0] = 0;
+	k.rd_state = -1;
 	if (g_prev_rip) {
 		char lp[320];
 		snprintf(lp, sizeof(lp), "%s.log", g_base);
@@ -2234,11 +2444,21 @@ static void prev_rip_check()
 			const char *rd = strstr(b, "redump=");
 			char code[16] = "", name[RD_NAME] = "";
 			if (rd && sscanf(rd + 7, "%15[^ \n] %159[^\n]", code, name) >= 1) {
-				if (!strcmp(code, "verified")) { snprintf(k.rd_done, sizeof(k.rd_done), T(STR_RD_CARD_OK), name); k.rd_done_col = 0x7CE0A0; }
-				else if (!strcmp(code, "no_match")) { snprintf(k.rd_done, sizeof(k.rd_done), "%s", T(STR_RD_NOMATCH)); k.rd_done_col = 0xFF8A80; }
+				if (!strcmp(code, "verified")) {
+					snprintf(k.rd_done, sizeof(k.rd_done), T(STR_RD_CARD_OK), name); k.rd_done_col = 0x7CE0A0;
+					k.rd_state = 1;
+					if (name[0]) snprintf(k.rd_name, sizeof(k.rd_name), "%s", name);   // the verified name
+				}
+				else if (!strcmp(code, "no_match")) { snprintf(k.rd_done, sizeof(k.rd_done), "%s", T(STR_RD_NOMATCH)); k.rd_done_col = 0xFF8A80; k.rd_state = 0; }
 			}
 		}
 	}
+	if (g_prev_rip && k.rd_state == 1 && strcmp(keep, g_base)) {
+		// a verified rip under another name: Redump's verified name may change the new name
+		name_from(g_name_pat, k.rd_name, g_name, g_serial, k.fname, sizeof(k.fname));
+		snprintf(keep, sizeof(keep), "%s/%s", OUT_DIR, k.fname);
+	}
+	snprintf(g_base, sizeof(g_base), "%s", keep);   // a new rip writes the pattern's name
 	space_check(g_disc_mb ? g_disc_mb : (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024)));
 }
 
@@ -2246,6 +2466,7 @@ static void fire_event(const char *event);
 static void identify_thread(void *arg)
 {
 	t_card = (int)((long)arg >> 8);
+	g_cards[t_card].rd_name[0] = 0;
 	long fresh = (long)arg & 0xFF;
 	if (fresh) usleep(2000 * 1000);   // freshly inserted: let the drive spin up
 	int err = 0, code = 0;
@@ -2282,6 +2503,7 @@ static void identify_thread(void *arg)
 	g_id_ntracks = g_ntracks;
 	// the lookup writes this card's Redump line: the next identification (another card) waits for it
 	if (r == 0 && g_redump != RD_OFF) redump_lookup(g_id_serial, g_id_total, g_id_ntracks);
+	if (r == 0) { prev_rip_check(); snprintf(g_cards[t_card].base, sizeof(g_cards[0].base), "%s", g_base); }   // Redump's name
 	g_ident_busy = 0;
 	sysThreadExit(0);
 }
@@ -2790,6 +3012,143 @@ static int step_opt(int cur, const int *opts, int n, int d)
 }
 
 
+static int card_list(int *out);
+static void ui_text_fit(UiFont f, int x, int y, uint32_t col, const char *text, int maxw, UiAlign al = UI_LEFT);
+
+// File name patterns ready to pick; anything else is the own pattern.
+static const char *FN_PRESETS[] = {"%T [%D]", "%T (%R)", "%T (%R) [%D]", "%N"};
+static char g_name_own[96] = "";   // the last own pattern, kept while a ready-made one is picked
+static void fn_label(const char *pat, char *out, size_t n)
+{
+	static const StrId lbl[] = {STR_FN_P1, STR_FN_P2, STR_FN_P3, STR_FN_P4};
+	for (int i = 0; i < 4; i++) if (!strcmp(pat, FN_PRESETS[i])) { snprintf(out, n, "%s", T(lbl[i])); return; }
+	snprintf(out, n, T(STR_FN_OWN), pat);
+}
+static void fn_step(int d)
+{
+	int cur = 4;
+	for (int i = 0; i < 4; i++) if (!strcmp(g_name_pat, FN_PRESETS[i])) cur = i;
+	if (cur == 4) snprintf(g_name_own, sizeof(g_name_own), "%s", g_name_pat);
+	int nx = (cur + (d > 0 ? 1 : 4)) % 5;
+	if (nx == 4 && !g_name_own[0]) nx = d > 0 ? 0 : 3;   // no own pattern yet: X on the row makes one
+	snprintf(g_name_pat, sizeof(g_name_pat), "%s", nx < 4 ? FN_PRESETS[nx] : g_name_own);
+}
+
+// The file name view: the pattern as parts, a preview for the discs in the drives (file name and
+// how webMAN lists it), parts to add with X, square removes the last one, triangle types freely.
+static void filename_screen()
+{
+	char pat[96];
+	snprintf(pat, sizeof(pat), "%s", g_name_pat);
+	static const char *parts[] = {"%T", "%R", "%D", "%N", " ", "(", ")", "[", "]", "-"};
+	static const StrId plbl[] = {STR_FN_B_TITLE, STR_FN_B_REGION, STR_FN_B_ID, STR_FN_B_NAME, STR_FN_B_SPACE};
+	const int NP = 10;
+	int sel = 0;
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			g_drawn = 2;
+			draw_backdrop();
+			int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL), L = ui_w() / 6, R = ui_w() * 5 / 6;
+			ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + lb / 2, 0xA8B0C8, T(STR_L_FILENAME), UI_CENTER);
+			int y = ui_h() / 10 + ui_line(UI_TITLE) + lb * 2;
+			// the pattern: variables as blue chips, other characters as they are (a space as a dot)
+			ui_text(UI_SMALL, L, y, 0x8890A8, T(STR_FN_PATTERN));
+			y += ls + ls / 3;
+			int x = L, pad = ui_w() / 120;
+			for (const char *q = pat; *q; q++) {
+				if (*q == '%' && q[1]) {
+					q++;
+					int k = *q == 'T' ? 0 : *q == 'R' ? 1 : *q == 'D' ? 2 : *q == 'N' ? 3 : -1;
+					const char *w = k >= 0 ? T(plbl[k]) : "%";
+					int tw = ui_text_width(UI_BODY, w);
+					ui_rect(x, y - lb / 8, tw + pad * 2, lb + lb / 4, 0xFF3D6FD9);
+					ui_text(UI_BODY, x + pad, y, 0xFFFFFF, w);
+					x += tw + pad * 3;
+				} else {
+					char c[2] = {*q == ' ' ? (char)0 : *q, 0};
+					const char *w = *q == ' ' ? "·" : c;
+					x += ui_text(UI_BODY, x, y, 0xC8D0E0, w) + pad;
+				}
+			}
+			ui_rect(x + 2, y, 3, lb, 0xFFFFFFFF);   // where the next part goes
+			y += lb + ls / 2;
+			ui_text(UI_SMALL, L, y, 0x8890A8, pat);
+			y += ls * 2;
+			// preview: each disc in a drive, else an example
+			ui_text(UI_SMALL, L, y, 0x8890A8, T(STR_FN_PREVIEW));
+			y += ls + ls / 3;
+			int list[NCARDS], nc = card_list(list), shown = 0;
+			for (int i = 0; i <= nc; i++) {
+				const char *rn, *tt, *sr, *dn = "";
+				char drv[96];
+				if (i < nc) {
+					Card &k = g_cards[list[i]];
+					if (k.state != DISC_READY) continue;
+					rn = k.rd_name; tt = k.title; sr = k.serial;
+					source_name(list[i] ? list[i] - 1 : -1, drv, sizeof(drv));
+					dn = drv;
+				} else {
+					if (shown) break;
+					rn = "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)"; tt = "Croc 2"; sr = "SLES_020.88";
+				}
+				char fn[200], fb[220], ln[200], lv[260];
+				name_from(pat, rn, tt, sr, fn, sizeof(fn));
+				snprintf(fb, sizeof(fb), "%s.bin", fn);
+				listed_name(fn, ln, sizeof(ln));
+				snprintf(lv, sizeof(lv), T(STR_FN_LISTED), ln);
+				ui_text_fit(UI_BODY, L, y, 0xFFFFFF, fb, R - L - ui_w() / 8);
+				if (dn[0]) ui_text(UI_SMALL, R, y + (lb - ls) / 2, 0x8890A8, dn, UI_RIGHT);
+				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, lv, R - L);
+				y += lb + ls + ls / 2;
+				shown++;
+			}
+			// parts to add
+			y += ls / 2;
+			ui_text(UI_SMALL, L, y, 0x8890A8, T(STR_FN_ADD));
+			y += ls + ls / 3;
+			x = L;
+			for (int i = 0; i < NP; i++) {
+				const char *w = i < 5 ? T(plbl[i]) : parts[i];
+				int tw = ui_text_width(UI_SMALL, w);
+				ui_rect(x, y - ls / 8, tw + pad * 3, ls + ls / 4, i == sel ? 0xFF3D6FD9 : 0xFF404668);
+				ui_text(UI_SMALL, x + pad * 3 / 2, y, i == sel ? 0xFFFFFF : 0xC8D0E0, w);
+				x += tw + pad * 4;
+			}
+			y += ls * 2;
+			ui_text_fit(UI_SMALL, L, y, 0x8FA8D8, T(STR_FN_NOTE), R - L);
+			const char *b[] = {"leftright", "cross", "square", "triangle", "circle"};
+			const char *l[] = {T(STR_HINT_PICK_PART), T(STR_HINT_ADD), T(STR_HINT_DEL_LAST), T(STR_HINT_TYPE), T(STR_HINT_SAVE)};
+			hint_bar(b, l, 5);
+		}
+		flip_frame();
+		int p = pad_pressed();
+		if (p) g_redraw = 2;
+		if (p & B_RIGHT) sel = (sel + 1) % NP;
+		if (p & B_LEFT) sel = (sel + NP - 1) % NP;
+		if ((p & B_CROSS) && strlen(pat) + 3 < sizeof(pat)) strcat(pat, parts[sel]);
+		if ((p & B_SQUARE) && pat[0]) {   // the last part: a variable is two characters
+			size_t n = strlen(pat);
+			pat[n >= 2 && pat[n - 2] == '%' ? n - 2 : n - 1] = 0;
+		}
+		if (p & B_TRIANGLE) {
+			char e[96];
+			snprintf(e, sizeof(e), "%s", pat);
+			if (osk_input(T(STR_FN_OSK_Q), e, sizeof(e))) snprintf(pat, sizeof(pat), "%s", e);
+			pad_pressed();
+		}
+		if (p & B_CIRCLE) {   // save: an empty pattern goes back to the first ready-made one
+			snprintf(g_name_pat, sizeof(g_name_pat), "%s", pat[0] ? pat : FN_PRESETS[0]);
+			cfg_save();
+			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // the cards show the new names
+			logf("file name pattern: %s", g_name_pat);
+			return;
+		}
+	}
+}
+
 // A list of settings rows with the focused one highlighted (the settings screens share it).
 static void settings_rows(const char *subtitle, const char *const *labels, char (*vals)[96], int nrows, int row, int action_row)
 {
@@ -2814,7 +3173,7 @@ static void settings_rows(const char *subtitle, const char *const *labels, char 
 static void settings_screen()
 {
 	int redump = g_redump, remote = g_remote, webhook_on = g_webhook_on, row = 0;
-	const int NROWS = 9;
+	const int NROWS = 10;
 	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	DriveCfg sd = g_std;
 	char rdver[64] = "";
@@ -2827,46 +3186,47 @@ static void settings_screen()
 			g_redraw = 0;
 			g_drawn = 2;
 			draw_backdrop();
-			char vals[9][96];
+			char vals[10][96];
+			fn_label(g_name_pat, vals[5], sizeof(vals[5]));
 			fmt_speed(sd.speed, vals[0], sizeof(vals[0]));
 			fmt_int(sd.retries, vals[1], sizeof(vals[1]));
 			fmt_check(sd.check, vals[2], sizeof(vals[2]));
 			fmt_onoff(sd.eject, vals[3], sizeof(vals[3]));
 			fmt_onoff(sd.autostart, vals[4], sizeof(vals[4]));
-			snprintf(vals[5], sizeof(vals[0]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
+			snprintf(vals[6], sizeof(vals[0]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
 			if (rdcount > 0) {
 				// Redump's version (date) and when this copy was downloaded (date and time)
 				char date[16], ver[24], when[32];
 				snprintf(date, sizeof(date), "%.10s", rdver);
 				fmt_rd_version(date, ver, sizeof(ver));
 				fmt_local(rdwhen, when, sizeof(when));
-				snprintf(vals[6], sizeof(vals[6]), T(STR_RD_COPY_VALUE), ver, when);
+				snprintf(vals[7], sizeof(vals[7]), T(STR_RD_COPY_VALUE), ver, when);
 			} else {
-				snprintf(vals[6], sizeof(vals[6]), "%s", T(STR_RD_MISSING));
+				snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_RD_MISSING));
 			}
 			char ip[20];
 			remote_ip(ip, sizeof(ip));
-			if (remote) snprintf(vals[7], sizeof(vals[7]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
-			else snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_OFF));
-			if (!webhook_on) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
-			else if (!g_webhook[0]) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_WEBHOOK_NOURL));
+			if (remote) snprintf(vals[8], sizeof(vals[8]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
+			else snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
+			if (!webhook_on) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_OFF));
+			else if (!g_webhook[0]) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_WEBHOOK_NOURL));
 			else {
 				char host[96];
 				webhook_host(g_webhook, host, sizeof(host));
 				int ne = 0;
 				for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
-				snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON_N), host, ne);
+				snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
 			}
-			const char *labels[9] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART),
+			const char *labels[10] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
 			                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK)};
-			settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 6);   // row 6 is an action
-			if (row == 8) {
+			settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 7);   // row 7 is an action
+			if (row == 9 || row == 5) {   // webhooks and the file name: X opens their own view
 				const char *b[] = {"updown", "leftright", "cross", "triangle", "circle"};
 				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 				hint_bar(b, l, 5);
 			} else {
-				const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "triangle", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+				const char *b[] = {"updown", row == 7 ? "cross" : "leftright", "triangle", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), row == 7 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 				hint_bar(b, l, 4);
 			}
 		}
@@ -2875,13 +3235,19 @@ static void settings_screen()
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
-		if ((p & B_CROSS) && row == 8) {
+		if ((p & B_CROSS) && row == 5) {
+			filename_screen();
+			pad_pressed();
+			g_redraw = 2;
+			continue;
+		}
+		if ((p & B_CROSS) && row == 9) {
 			webhook_settings_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 6) {
+		if ((p & B_CROSS) && row == 7) {
 			redump_download_screen();
 			rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
 			pad_pressed();
@@ -2889,7 +3255,7 @@ static void settings_screen()
 			continue;
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (row == 6) d = 0;
+		if (row == 7) d = 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) {
 			reset = own_dialog(T(STR_RESET_Q), 1) == 1;
@@ -2897,6 +3263,7 @@ static void settings_screen()
 			g_redraw = 2;
 			if (reset) {   // defaults; the webhook address and the Redump copy are kept
 				DriveCfg st = {1, 4, 0, 1, 0, CHECK_BITPERFECT};
+				snprintf(g_name_pat, sizeof(g_name_pat), "%s", FN_PRESETS[0]);
 				sd = st;
 				redump = RD_OFF;
 				if (remote) remote_set(0);
@@ -2917,18 +3284,21 @@ static void settings_screen()
 				sd.eject = !sd.eject;
 			} else if (row == 4) {
 				sd.autostart = !sd.autostart;
-			} else if (row == 5) {
+			} else if (row == 5) {   // the ready-made patterns, and the own one
+				fn_step(d);
+			} else if (row == 6) {
 				redump = (redump + (d > 0 ? 1 : 2)) % 3;
-			} else if (row == 7) {
+			} else if (row == 8) {
 				remote = !remote;
 				remote_set(remote);
 				if (remote) notify_url(STR_REMOTE_HELP, "");
-			} else if (row == 8) {
+			} else if (row == 9) {
 				webhook_on = !webhook_on;
 			}
 		}
 		if (d || reset) {   // every change is applied and saved immediately
 			g_std = sd; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on;
+			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
 			cfg_save();
 			logf("settings saved: standard speed=%d retries=%d check=%d eject=%d autostart=%d, redump=%d remote=%d webhook=%d",
 			     sd.speed, sd.retries, sd.check, sd.eject, sd.autostart, g_redump, g_remote, g_webhook_on);
@@ -3118,7 +3488,7 @@ static void usb_presence_thread(void *arg)
 
 // One card: drive, disc, what is known about it here, and where it goes. Returns its height.
 // Text that must stay within maxw pixels: cut at a character and ended with "…".
-static void ui_text_fit(UiFont f, int x, int y, uint32_t col, const char *text, int maxw, UiAlign al = UI_LEFT)
+static void ui_text_fit(UiFont f, int x, int y, uint32_t col, const char *text, int maxw, UiAlign al)
 {
 	if (ui_text_width(f, text) <= maxw) { ui_text(f, x, y, col, text, al); return; }
 	char b[256];
@@ -3134,42 +3504,63 @@ static void ui_text_fit(UiFont f, int x, int y, uint32_t col, const char *text, 
 
 static int draw_card(int c, int y, int focused, int single)
 {
+	// Card, top to bottom: title (Redump's name when there is one) with the Redump icon | drive;
+	// what is known about the disc here | serial and size; (ripping: bar, then what it does);
+	// where it saves. A single drive: the same, centred, without a frame.
 	Card &k = g_cards[c];
 	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
 	int left = ui_w() / 8, right = ui_w() * 7 / 8, cx = ui_w() / 2;
-	int h = lb + ls * 3 + lb / 2;
+	int h = lb + ls * (k.job ? 3 : 2) + lb / 2;
 	if (!single) ui_rect(left - ui_w() / 60, y - lb / 3, right - left + ui_w() / 30, h, focused ? 0x703D6FD9 : 0x30FFFFFF);
-	int st = k.state;
-	int ax = single ? cx : left;
+	int st = k.state, known = k.job || st == DISC_READY;
+	int ax = single ? cx : left, maxw = right - left;   // nothing goes past the card's edges
 	UiAlign al = single ? UI_CENTER : UI_LEFT;
-	int maxw = right - left;   // nothing goes past the card's edges
-	char drive[96];
+	int gap = ui_w() / 60;
+	// right column: drive (icon + name), under it serial and size
+	char drive[96], idl[64] = "";
 	source_name(c ? c - 1 : -1, drive, sizeof(drive));
-	int ly = y;
-	// the drive in the top right corner (single drive: above the title, centred, as before)
-	// with a small icon in front: a disc for the internal drive, the USB trident for USB drives
+	if (known) snprintf(idl, sizeof(idl), "%s  ·  %u MB", k.serial, k.mb);
 	int isz = ls * 3 / 4, igap = ls / 3, tw = ui_text_width(UI_SMALL, drive);
-	int dw = tw + isz + igap + ui_w() / 60;
-	int iy = single ? ly - ls : ly + (lb - ls) / 2;
-	int tx = single ? cx - (tw + isz + igap) / 2 + isz + igap : right - tw;
-	ui_icon(c ? "usb" : "disc", tx - igap - isz, iy + (ls - isz) / 2, isz, 0x8890A8);
-	ui_text(UI_SMALL, tx, iy, 0x8890A8, drive);
-	if (single) dw = 0;
-	if (k.job || st == DISC_READY) {
-		char line[200];
-		snprintf(line, sizeof(line), "%s  ·  %s  ·  %u MB", k.title, k.serial, k.mb);
-		ui_text_fit(UI_BODY, ax, ly, 0xFFFFFF, line, maxw - dw, al);
+	int rw = 0;   // width the right column takes from the left one
+	if (single) {   // above the title, centred
+		int tx = cx - (tw + isz + igap) / 2 + isz + igap;
+		ui_icon(c ? "usb" : "disc", tx - igap - isz, y - ls + (ls - isz) / 2, isz, 0x8890A8);
+		ui_text(UI_SMALL, tx, y - ls, 0x8890A8, drive);
+	} else {
+		ui_icon(c ? "usb" : "disc", right - tw - igap - isz, y + (lb - ls) / 2 + (ls - isz) / 2, isz, 0x8890A8);
+		ui_text(UI_SMALL, right - tw, y + (lb - ls) / 2, 0x8890A8, drive);
+		if (idl[0]) ui_text(UI_SMALL, right, y + lb, 0x8890A8, idl, UI_RIGHT);
+		int iw = ui_text_width(UI_SMALL, idl);
+		rw = (tw + isz + igap > iw ? tw + isz + igap : iw) + gap;
+	}
+	int ly = y;
+	// title, with the Redump icon after it: medal = verified, warning = does not match, ? = not known yet
+	if (known) {
+		const char *title = k.rd_name[0] ? k.rd_name : k.title;
+		const char *icon = k.rd_state == 1 ? "medal" : k.rd_state == 0 ? "warn" : "question";
+		uint32_t icol = k.rd_state == 1 ? 0xE8C870 : k.rd_state == 0 ? 0xFF8A80 : 0x8890A8;
+		int bsz = lb * 3 / 4, room = maxw - rw - bsz - igap;
+		char t[200];
+		snprintf(t, sizeof(t), "%s", title);
+		int w = ui_text_width(UI_BODY, t);
+		if (w > room) w = room;
+		int tx = single ? cx - (w + igap + bsz) / 2 : left;
+		ui_text_fit(UI_BODY, tx, ly, 0xFFFFFF, t, room);
+		ui_icon(icon, tx + w + igap, ly + (lb - bsz) / 2, bsz, icol);
+		ly += lb;
+		if (single) { ui_text(UI_SMALL, cx, ly, 0x8890A8, idl, UI_CENTER); ly += ls; }
 	} else {
 		const char *msg = st == DISC_READING ? T(c ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
-		ui_text_fit(UI_BODY, ax, ly, 0xFFFFFF, msg, maxw - dw, al);
+		ui_text_fit(UI_BODY, ax, ly, 0xFFFFFF, msg, maxw - rw, al);
+		ly += lb;
 	}
-	ly += lb;
+	int lw = single ? maxw : maxw - rw;   // the left column next to serial and size
 	if (k.job) {   // ripping: bar, percentage and time left; below it what the rip is doing
 		OnCard o(c);
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done, tot = g_total ? g_total : 1;
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / tot);
 		if (pct > 100) pct = 100;
-		int bw = (right - left) / 2, bh = ls / 2, bx = single ? cx - bw / 2 : left;
+		int bw = (right - left) / 3, bh = ls / 2, bx = single ? cx - bw / 2 : left;
 		ui_rect(bx, ly + ls / 4, bw, bh, 0x50FFFFFF);
 		ui_rect(bx, ly + ls / 4, (int)((uint64_t)bw * pct / 100), bh, 0xFFC8E05A);
 		Eta e = {k.eta_t0, k.eta_tw, k.eta_pw, k.eta_rate};
@@ -3179,8 +3570,8 @@ static int draw_card(int c, int y, int focused, int single)
 		else eta_line(&e, pos, g_total, tl, sizeof(tl));
 		k.eta_t0 = e.t0; k.eta_tw = e.tw; k.eta_pw = e.pw; k.eta_rate = e.rate;
 		snprintf(pl, sizeof(pl), "%u %%  ·  %s", pct, tl);
-		if (single) ui_text_fit(UI_SMALL, cx, ly + ls, 0xE8E8F0, pl, maxw, UI_CENTER);
-		else ui_text_fit(UI_SMALL, bx + bw + ui_w() / 60, ly, 0xE8E8F0, pl, right - (bx + bw + ui_w() / 60));
+		if (single) { ly += ls; ui_text_fit(UI_SMALL, cx, ly, 0xE8E8F0, pl, maxw, UI_CENTER); }
+		else ui_text_fit(UI_SMALL, bx + bw + gap, ly, 0xE8E8F0, pl, left + lw - (bx + bw + gap));
 		ly += ls;
 		char note[200] = "";
 		if (g_abort) snprintf(note, sizeof(note), "%s", T(STR_CANCELLING));
@@ -3191,43 +3582,41 @@ static int draw_card(int c, int y, int focused, int single)
 			size_t o2 = strlen(note);
 			snprintf(note + o2, sizeof(note) - o2, T(STR_READ_STATS), o2 ? " · " : "", g_readerrs, g_recovered);
 		}
-		if (!note[0] && g_nev > 0) ui_text_fit(UI_SMALL, ax, ly + (single ? ls : 0), g_ev[g_nev - 1].col, g_ev[g_nev - 1].text, maxw, al);   // the latest event
-		else ui_text_fit(UI_SMALL, ax, ly + (single ? ls : 0), 0xF0C060, note, maxw, al);
+		if (!note[0] && g_nev > 0) ui_text_fit(UI_SMALL, ax, ly, g_ev[g_nev - 1].col, g_ev[g_nev - 1].text, maxw, al);   // the latest event
+		else ui_text_fit(UI_SMALL, ax, ly, 0xF0C060, note, maxw, al);
 		ly += ls;
 	} else {
-		if (st == DISC_READY && k.rd_done[0]) ui_text_fit(UI_SMALL, ax, ly, k.rd_done_col, k.rd_done, maxw, al);   // after a rip here
-		else if (st == DISC_READY && k.rd[0]) ui_text_fit(UI_SMALL, ax, ly, 0x9AD0A8, k.rd, maxw, al);
-		ly += ls;
 		if (k.res[0] && k.res_failed && st == DISC_READY && k.prev_rip) {
 			// cancelled or failed over an earlier rip: that one is still there, say so on the same line
-			char p2[160];
+			char p2[160], both[360];
 			if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_PREV_KEPT_ERRORS), k.repair_n);
 			else snprintf(p2, sizeof(p2), "%s", T(STR_PREV_KEPT));
-			int w1 = ui_text_width(UI_SMALL, k.res), w2 = ui_text_width(UI_SMALL, p2), x0 = single ? (ui_w() - w1 - w2) / 2 : left;
-			ui_text(UI_SMALL, x0, ly, k.res_col, k.res);
-			ui_text(UI_SMALL, x0 + w1, ly, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2);
+			snprintf(both, sizeof(both), "%s%s", k.res, p2);
+			ui_text_fit(UI_SMALL, ax, ly, k.res_col, both, lw, al);
 		} else if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // how the last rip on this drive went
-			ui_text_fit(UI_SMALL, ax, ly, k.res_col, k.res, maxw, al);
+			ui_text_fit(UI_SMALL, ax, ly, k.res_col, k.res, lw, al);
 		} else if (st == DISC_READY && k.prev_rip) {   // already ripped here: one line, "known errors" in yellow
-			char p2[96];
+			char p2[96], as[300];
 			if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), k.repair_n);
 			else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
+			const char *en = strrchr(k.exist, '/');
+			en = en ? en + 1 : k.exist;
 			const char *p1 = T(STR_ALREADY_HERE);
+			if (strcmp(en, k.fname)) { snprintf(as, sizeof(as), T(STR_ALREADY_AS), en); p1 = as; }   // under another name
 			int w1 = ui_text_width(UI_SMALL, p1), w2 = ui_text_width(UI_SMALL, p2), x0 = single ? (ui_w() - w1 - w2) / 2 : left;
 			ui_text(UI_SMALL, x0, ly, 0x8FA8D8, p1);
-			ui_text(UI_SMALL, x0 + w1, ly, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2);
+			ui_text_fit(UI_SMALL, x0 + w1, ly, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2, lw - w1);
 		} else if (st == DISC_READY && k.space_short) {   // will not fit (a re-rip replaces the old image)
 			char sl[200];
 			snprintf(sl, sizeof(sl), T(STR_NO_SPACE), k.mb, (unsigned)(k.mb + 2 - k.space_short));
-			ui_text_fit(UI_SMALL, ax, ly, 0xFF8A80, sl, maxw, al);
+			ui_text_fit(UI_SMALL, ax, ly, 0xFF8A80, sl, lw, al);
 		}
 		ly += ls;
 	}
-	char tname[96], saving[160], v[180];
-	target_name(k.dest[0] ? k.dest : HDD_DIR, tname, sizeof(tname));
-	snprintf(saving, sizeof(saving), T(STR_HOME_SAVING), tname);
+	char saving[400], v[420];
+	dest_line(k.dest[0] ? k.dest : HDD_DIR, known ? k.fname : "", saving, sizeof(saving));
 	snprintf(v, sizeof(v), focused && !k.job ? "‹ %s ›" : "%s", saving);   // ←→ chooses where this drive saves
-	ui_text_fit(UI_SMALL, ax, ly + (single && k.job ? ls : 0), focused ? 0xC8D0E0 : 0x8890A8, v, maxw, al);
+	ui_text_fit(UI_SMALL, ax, ly, focused ? 0xC8D0E0 : 0x8890A8, v, maxw, al);
 	return h;
 }
 
@@ -3256,7 +3645,7 @@ static int home_screen()
 			for (int i = 0; i < nc; i++) {
 				Card &k = g_cards[list[i]];
 				if (k.job) continue;   // ripping: the rip has the drive
-				if (k.inserted) { k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0; k.res[0] = 0; k.rd_done[0] = 0; }
+				if (k.inserted) { k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0; k.res[0] = 0; k.rd_done[0] = 0; k.rd_name[0] = 0; k.rd_state = -1; }
 				if (!k.present) { if (k.state != DISC_NONE) k.state = DISC_NONE; k.tried = 0; k.fresh = 0; continue; }
 				if (!k.tried) { k.tried = 1; select_card(list[i]); identify_start(k.fresh); break; }
 				if (k.recheck) { k.recheck = 0; if (k.state == DISC_READY) { select_card(list[i]); prev_rip_check(); } g_redraw = 2; }
@@ -3310,33 +3699,42 @@ static int home_screen()
 				int y = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2;
 				for (int i = 0; i < nc; i++) y += draw_card(list[i], y, list[i] == sel, 0) + ui_line(UI_BODY) / 2;
 			}
+			// above the bottom row, the general things: webhooks on the left, settings and exit on the right
+			int gy = hint_y() - ui_line(UI_BODY) * 3 / 2;
 			if (g_webhook_on && g_webhook[0]) {   // just a hint that webhooks are on; details in the settings
 				int ne = 0;
 				for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
 				char wl[64];
 				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
-				footer_note(wl);
+				ui_text(UI_SMALL, ui_w() / 8, gy + (ui_line(UI_BODY) - ui_line(UI_SMALL)) / 2, 0x6870A0, wl);
 			}
-			if (f.job) {   // ripping: O cancels this rip, the other cards go on; its settings wait until it is done
-				const char *b[] = {"circle", "start"};
-				const char *l[] = {T(STR_HINT_CANCEL_RIP), T(STR_HINT_SETTINGS)};
-				hint_bar(b, l, 2);
+			{
+				int w1 = ui_hint_width("start", T(STR_HINT_SETTINGS)), w2 = f.job ? 0 : ui_hint_width("circle", T(STR_HINT_EXIT)), gap = ui_w() / 40;
+				int x = ui_w() * 7 / 8 - w1 - (w2 ? gap + w2 : 0);
+				x += ui_hint(x, gy, "start", T(STR_HINT_SETTINGS)) + gap;
+				if (w2) ui_hint(x, gy, "circle", T(STR_HINT_EXIT));   // O on a ripping card cancels its rip instead
+			}
+			// the bottom row: what the buttons do on the focused card
+			if (f.job) {
+				const char *b[] = {"circle"};
+				const char *l[] = {T(STR_HINT_CANCEL_RIP)};
+				hint_bar(b, l, 1);
 			} else if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
-				const char *b[] = {"cross", "square", "triangle", "select", "start", "circle"};
-				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
-				hint_bar(b, l, 6);
-			} else if (st == DISC_READY) {
-				const char *b[] = {"cross", "triangle", "select", "start", "circle"};
-				const char *l[] = {T(f.prev_rip ? STR_HINT_NEWRIP : STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
-				hint_bar(b, l, 5);
-			} else if (st == DISC_ERROR) {
-				const char *b[] = {"triangle", "select", "start", "circle"};
-				const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				const char *b[] = {"cross", "square", "triangle", "select"};
+				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
 				hint_bar(b, l, 4);
-			} else {
-				const char *b[] = {"select", "start", "circle"};
-				const char *l[] = {T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+			} else if (st == DISC_READY) {
+				const char *b[] = {"cross", "triangle", "select"};
+				const char *l[] = {T(f.prev_rip ? STR_HINT_NEWRIP : STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
 				hint_bar(b, l, 3);
+			} else if (st == DISC_ERROR) {
+				const char *b[] = {"triangle", "select"};
+				const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
+				hint_bar(b, l, 2);
+			} else {
+				const char *b[] = {"select"};
+				const char *l[] = {T(STR_HINT_DRIVE)};
+				hint_bar(b, l, 1);
 			}
 		}
 		flip_frame();
@@ -3478,8 +3876,11 @@ static int prepare_disc(int *err, int *code)
 	snprintf(name, sizeof(g_name), "%s", title ? title : (g_volid[0] ? g_volid : "PSX DISC"));
 	logf("title=%s", title ? title : "(not in database)");
 	sanitize(name);
-	if (g_serial[0])
-		snprintf(g_base, sizeof(g_base), "%s/%s [%s]", OUT_DIR, name, g_serial);
+	if (g_serial[0]) {
+		char fn[200];
+		name_from(g_name_pat, g_cards[cur_card()].rd_name, name, g_serial, fn, sizeof(fn));
+		snprintf(g_base, sizeof(g_base), "%s/%s", OUT_DIR, fn);
+	}
 	else
 		snprintf(g_base, sizeof(g_base), "%s/%s %lu", OUT_DIR, name, (unsigned long)time(NULL));
 
@@ -3697,6 +4098,13 @@ static int rip_disc_inner(int fresh, int autorip)
 		snprintf(bin, sizeof(bin), "%s.bin", g_base);
 		vf_unlink(bin);
 		if (vf_rename(part, bin)) logf("rename %s failed", part);
+		Card &k = g_cards[cur_card()];
+		if (k.exist[0] && strcmp(k.exist, g_base)) {   // the same disc under another name: this rip replaces it
+			static const char *ext[] = {".bin", ".cue", ".md5", ".log", ".sbi"};
+			for (int i = 0; i < 5; i++) { char o[300]; snprintf(o, sizeof(o), "%s%s", k.exist, ext[i]); vf_unlink(o); }
+			logf("replaced the earlier rip %s", k.exist);
+		}
+		idx_stale();
 	}
 	const char *slash = strrchr(g_base, '/');
 	char binname[256];
@@ -3788,8 +4196,12 @@ static int rip_disc_inner(int fresh, int autorip)
 	{   // the card: the Redump line says how the image compared, the result line how the rip went
 		Card &k = g_cards[cur_card()];
 		k.rd_done[0] = 0;
-		if (g_rd_result == 1) { snprintf(k.rd_done, sizeof(k.rd_done), T(STR_RD_CARD_OK), g_rd_result_name); k.rd_done_col = 0x7CE0A0; }
-		else if (g_rd_result == 0) { snprintf(k.rd_done, sizeof(k.rd_done), "%s", T(STR_RD_NOMATCH)); k.rd_done_col = 0xFF8A80; }
+		k.rd_state = -1;
+		if (g_rd_result == 1) {
+			snprintf(k.rd_done, sizeof(k.rd_done), T(STR_RD_CARD_OK), g_rd_result_name); k.rd_done_col = 0x7CE0A0; k.rd_state = 1;
+			snprintf(k.rd_name, sizeof(k.rd_name), "%s", g_rd_result_name);
+		}
+		else if (g_rd_result == 0) { snprintf(k.rd_done, sizeof(k.rd_done), "%s", T(STR_RD_NOMATCH)); k.rd_done_col = 0xFF8A80; k.rd_state = 0; }
 		char d[16];
 		fmt_dur(d, sizeof(d), (long)(time(NULL) - g_rip_t0));
 		snprintf(k.res, sizeof(k.res), T(STR_CARD_DONE), d);
@@ -3905,6 +4317,7 @@ static int repair_disc_inner()
 	while (g_ident_busy) usleep(10000);
 	int err = 0, code = 0;
 	if (prepare_disc(&err, &code)) { lv1_storage_unpatch(); return 0; }
+	if (g_cards[cur_card()].exist[0]) snprintf(g_base, sizeof(g_base), "%s", g_cards[cur_card()].exist);   // maybe another name
 	char path[320];
 	snprintf(path, sizeof(path), "%s.log", g_base);
 	VFile *lf = vf_open(path, "rb");
@@ -4177,7 +4590,7 @@ int main(int argc, char *argv[])
 		t_card = -1;
 		logf("thread-local storage %s (thread saw %d)", g_parallel ? "ok: parallel rips" : "NOT working: one rip at a time", seen);
 	}
-	{ sys_mutex_attr_t ma; sysMutexAttrInitialize(ma); sysMutexCreate(&g_rd_mx, &ma); }
+	{ sys_mutex_attr_t ma; sysMutexAttrInitialize(ma); sysMutexCreate(&g_rd_mx, &ma); sysMutexCreate(&g_idx_mx, &ma); }
 	lang_init();
 	netInitialize();
 	// start-up checks: config, lv1 state after an earlier crash, USB file systems

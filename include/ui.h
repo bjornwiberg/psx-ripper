@@ -21,7 +21,7 @@ int ui_text(UiFont f, int x, int y, uint32_t rgb, const char *utf8, UiAlign alig
 // Draws a PS button symbol ("cross", "circle", "triangle", "square") followed by a label; returns width.
 int ui_hint(int x, int y, const char *button, const char *label);
 int ui_hint_width(const char *button, const char *label);
-void ui_icon(const char *name, int x, int y, int size, uint32_t rgb);   // "disc" or "usb", own drawings
+void ui_icon(const char *name, int x, int y, int size, uint32_t rgb);   // "disc", "usb", "medal", "warn": own drawings
 extern int ui_guides;
 
 #endif

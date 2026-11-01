@@ -185,9 +185,25 @@ static bool in_disc(float u, float v)
 	float dx = u - 0.5f, dy = v - 0.5f, d = sqrtf(dx * dx + dy * dy);
 	return d <= 0.48f && d >= 0.13f && !(d > 0.27f && d < 0.31f);   // the disc, its hole and a groove
 }
+// Medal (verified against Redump): a disc with a ring and two ribbon tails.
+static bool in_medal(float u, float v)
+{
+	float dx = u - 0.5f, dy = v - 0.36f, d = sqrtf(dx * dx + dy * dy);
+	if (d <= 0.34f) return !(d > 0.22f && d < 0.26f);   // the medal with a ring
+	return in_tri(u, v, 0.32f, 0.58f, 0.46f, 0.62f, 0.26f, 0.98f) || in_tri(u, v, 0.26f, 0.98f, 0.46f, 0.62f, 0.38f, 0.88f) ||
+	       in_tri(u, v, 0.68f, 0.58f, 0.54f, 0.62f, 0.74f, 0.98f) || in_tri(u, v, 0.74f, 0.98f, 0.54f, 0.62f, 0.62f, 0.88f);
+}
+// Warning (does not match Redump): a triangle with an exclamation mark cut out.
+static bool in_warn(float u, float v)
+{
+	if (!in_tri(u, v, 0.5f, 0.06f, 0.02f, 0.92f, 0.98f, 0.92f)) return false;
+	bool bar = u >= 0.45f && u <= 0.55f && v >= 0.32f && v <= 0.64f;
+	float dx = u - 0.5f, dy = v - 0.76f;
+	return !(bar || dx * dx + dy * dy <= 0.06f * 0.06f);
+}
 void ui_icon(const char *name, int x0, int y0, int size, uint32_t rgb)
 {
-	bool usb = !strcmp(name, "usb");
+	int kind = !strcmp(name, "usb") ? 1 : !strcmp(name, "medal") ? 2 : !strcmp(name, "warn") ? 3 : !strcmp(name, "question") ? 4 : 0;
 	for (int y = y0; y < y0 + size; y++) {
 		if (y < 0 || y >= (int)display_height) continue;
 		uint32_t *p = fb_row(y);
@@ -197,10 +213,17 @@ void ui_icon(const char *name, int x0, int y0, int size, uint32_t rgb)
 			for (int sy = 0; sy < 4; sy++)
 				for (int sx = 0; sx < 4; sx++) {
 					float u = (x - x0 + (sx + 0.5f) / 4) / size, v = (y - y0 + (sy + 0.5f) / 4) / size;
-					if (usb ? in_usb(u, v) : in_disc(u, v)) n++;
+					float qd = sqrtf((u - 0.5f) * (u - 0.5f) + (v - 0.5f) * (v - 0.5f));
+					bool in = kind == 1 ? in_usb(u, v) : kind == 2 ? in_medal(u, v) : kind == 3 ? in_warn(u, v)
+					        : kind == 4 ? (qd <= 0.48f && qd >= 0.40f) : in_disc(u, v);
+					if (in) n++;
 				}
 			if (n) p[x] = blend(p[x], rgb, n / 16.0f);
 		}
+	}
+	if (kind == 4) {   // the question mark itself: the small font, centred in the ring
+		int th = ui_line(UI_SMALL);
+		ui_text(UI_SMALL, x0 + size / 2, y0 + (size - th) / 2, rgb, "?", UI_CENTER);
 	}
 }
 

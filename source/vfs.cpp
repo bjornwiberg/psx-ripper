@@ -192,3 +192,23 @@ int vf_scan(VfVolume *out, int max)
 	}
 	return n;
 }
+
+// Calls cb(name, ctx) for each entry of an exFAT directory. Returns the number of entries, or -1
+// for a path the PS3 itself serves (the caller lists those with opendir).
+int vf_list(const char *dir, void (*cb)(const char *name, void *ctx), void *ctx)
+{
+	char fp[320];
+	if (fat_path(dir, fp, sizeof(fp)) < 0) return -1;
+	Lk lk;
+	DIR d;
+	if (f_opendir(&d, fp) != FR_OK) return 0;
+	int n = 0;
+	FILINFO fi;
+	while (f_readdir(&d, &fi) == FR_OK && fi.fname[0]) {
+		if (fi.fname[0] == '.') continue;
+		cb(fi.fname, ctx);
+		n++;
+	}
+	f_closedir(&d);
+	return n;
+}

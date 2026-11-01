@@ -28,5 +28,7 @@ struct VfVolume {
 // Finds USB drives with a file system the PS3 does not mount (exFAT) and mounts them.
 int vf_scan(VfVolume *out, int max);
 int vf_free_mb(const char *path, uint64_t *mb);
+// Entries of an exFAT directory; -1 for paths the PS3 serves itself (list those with opendir).
+int vf_list(const char *dir, void (*cb)(const char *name, void *ctx), void *ctx);
 
 #endif
