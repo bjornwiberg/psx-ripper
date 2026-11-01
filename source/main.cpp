@@ -3850,7 +3850,7 @@ static void draw_page(int c, int y)
 	// the right column (drive, model, disc)
 	{ int under = ytop + lb + ls * 2 + ls / 2; if (y < under) y = under; }
 	y += section_head(L, R, y, T(STR_SEC_DISC));
-	const int ydest = y + lb + (ls + ls / 3) * 3 + lb;   // Mål always here: the page does not jump between tabs
+	const int ydest = y + lb + (ls + ls / 3) * 4 + lb;   // Mål always here: the page does not jump between tabs
 	if (st == DISC_READY && k.prev_rip) {   // already ripped here: how it stands, in words
 		char as[300], line[400];
 		const char *en = strrchr(k.exist, '/');
@@ -3868,6 +3868,10 @@ static void draw_page(int c, int y)
 			char e[120];
 			snprintf(e, sizeof(e), T(STR_KNOWN_ERRORS), k.repair_n);
 			ui_text_fit(UI_SMALL, L, y, 0xF0C060, e, R - L);
+			y += ls + ls / 3;
+			char tip[200];   // what square does about them, right under them
+			snprintf(tip, sizeof(tip), T(STR_REPAIR_TIP), k.repair_n);
+			ui_text_fit(UI_SMALL, L, y, 0x8890A8, tip, R - L);
 			y += ls + ls / 3;
 		}
 		if (k.rd_state < 0) {   // what the check does
