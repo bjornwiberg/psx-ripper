@@ -2543,7 +2543,7 @@ static void identify_start(int fresh)
 }
 
 // ---------------------------------------------------------------- own screens (home, settings)
-enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT = 32, B_RIGHT = 64, B_START = 128, B_SQUARE = 256, B_SELECT = 512, B_L1 = 1024, B_R1 = 2048 };
+enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT = 32, B_RIGHT = 64, B_START = 128, B_SQUARE = 256, B_SELECT = 512, B_L1 = 1024, B_R1 = 2048, B_L2 = 4096, B_R2 = 8192 };
 
 // Buttons newly pressed since the last call, over all connected pads. Each pad keeps its own
 // last state: ioPadGetData only reports changes, so a quiet pad must not resurrect another pad's buttons.
@@ -2571,6 +2571,8 @@ static int pad_pressed()
 				if (pd.BTN_SELECT) b |= B_SELECT;
 				if (pd.BTN_L1) b |= B_L1;
 				if (pd.BTN_R1) b |= B_R1;
+				if (pd.BTN_L2) b |= B_L2;
+				if (pd.BTN_R2) b |= B_R2;
 				pad_state[i] = b;
 			}
 			now |= pad_state[i];
@@ -3227,6 +3229,10 @@ static void settings_rows(const char *subtitle, const char *const *labels, char 
 	// at most VIS rows fit above the footer: a longer list scrolls with the focused row
 	const int VIS = 9;
 	int first = row < VIS ? 0 : row - VIS + 1;
+	// more rows above / below: small arrows at the right edge (L2/R2 jump a page)
+	int asz = ui_line(UI_SMALL) * 2 / 3, ax = right + ui_w() / 40;
+	if (first > 0) ui_icon("up", ax, top + (lh * 3 / 4 - asz) / 2 - lh / 8, asz, 0xC8D0E0);
+	if (first + VIS < nrows) ui_icon("down", ax, top + (VIS - 1) * lh + (lh * 3 / 4 - asz) / 2 - lh / 8, asz, 0xC8D0E0);
 	for (int r = first; r < nrows && r < first + VIS; r++) {
 		int y = top + (r - first) * lh;
 		if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
@@ -3307,6 +3313,8 @@ static void settings_screen()
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
+		if (p & B_R2) row = row + 9 < NROWS ? row + 9 : NROWS - 1;   // a page down / up (9 rows show)
+		if (p & B_L2) row = row >= 9 ? row - 9 : 0;
 		if ((p & B_CROSS) && row == 5) {
 			filename_screen();
 			pad_pressed();
@@ -3734,6 +3742,19 @@ static int draw_card(int c, int y, int focused, int single)
 
 static void rip_job_start(int c, int fresh);
 
+// Cards that fit on the home screen at once (room for ripping cards, the tallest). More drives
+// than that: pages, L1/R1. Flag file psxrip.page1: one card per page, to try the paging.
+static int cards_per_page()
+{
+	static int forced = -1;
+	if (forced < 0) { struct stat st; forced = stat("/dev_hdd0/tmp/psxrip.page1", &st) == 0; }
+	if (forced) return 1;
+	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
+	int top = ui_h() / 10 + ui_line(UI_TITLE) + lb * 2, bottom = hint_y() - lb * 2;
+	int n = (bottom - top) / (lb + ls * 3 + lb);
+	return n < 1 ? 1 : n;
+}
+
 // Home screen: a card per drive. Up/down picks a card; left/right its destination; X, square and
 // triangle act on it. Returns 1 = rip the disc in g_card's drive, 2 = rip a freshly inserted disc,
 // 3 = repair, 0 = exit.
@@ -3805,11 +3826,24 @@ static int home_screen()
 			g_redraw = 0;
 			g_drawn = 2;
 			draw_backdrop();
+			int per = cards_per_page(), pg = si / per, npg = (nc + per - 1) / per;
 			if (nc == 1) {   // one drive: the card without a frame, in the middle as before
 				draw_card(sel, ui_h() * 2 / 5 - ui_line(UI_BODY), 1, 1);
 			} else {
-				int y = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2;
-				for (int i = 0; i < nc; i++) y += draw_card(list[i], y, list[i] == sel, 0) + ui_line(UI_BODY) / 2;
+				int y0 = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, y = y0;
+				for (int i = pg * per; i < nc && i < pg * per + per; i++) y += draw_card(list[i], y, list[i] == sel, 0) + ui_line(UI_BODY) / 2;
+				if (npg > 1) {   // more cards to the side: a faint edge of the next card and an arrow, L1/R1
+					int asz = ui_line(UI_BODY) * 2 / 3, my = y0 + (y - y0) / 2 - asz / 2 - ui_line(UI_BODY) / 3;
+					int el = ui_w() / 8 - ui_w() / 60, er = ui_w() * 7 / 8 + ui_w() / 60, peek = ui_w() / 90;
+					if (pg > 0) {
+						ui_rect(0, y0 - ui_line(UI_BODY) / 3, peek, y - y0 - ui_line(UI_BODY) / 2, 0x28FFFFFF);
+						ui_icon("left", (el - asz) / 2, my, asz, 0xC8D0E0);
+					}
+					if (pg < npg - 1) {
+						ui_rect(ui_w() - peek, y0 - ui_line(UI_BODY) / 3, peek, y - y0 - ui_line(UI_BODY) / 2, 0x28FFFFFF);
+						ui_icon("right", er + (ui_w() - er - asz) / 2, my, asz, 0xC8D0E0);
+					}
+				}
 			}
 			// above the bottom row, the general things: webhooks on the left, settings and exit on the right
 			int gy = hint_y() - ui_line(UI_BODY) * 3 / 2;
@@ -3822,7 +3856,9 @@ static int home_screen()
 			}
 			{
 				int w1 = ui_hint_width("start", T(STR_HINT_SETTINGS)), w2 = f.job ? 0 : ui_hint_width("circle", T(STR_HINT_EXIT)), gap = ui_w() / 40;
-				int x = ui_w() * 7 / 8 - w1 - (w2 ? gap + w2 : 0);
+				int w0 = npg > 1 ? ui_hint_width("l1r1", T(STR_HINT_PAGE)) + gap : 0;   // pages of cards: L1/R1
+				int x = ui_w() * 7 / 8 - w1 - (w2 ? gap + w2 : 0) - w0;
+				if (w0) x += ui_hint(x, gy, "l1r1", T(STR_HINT_PAGE)) + gap;
 				x += ui_hint(x, gy, "start", T(STR_HINT_SETTINGS)) + gap;
 				if (w2) ui_hint(x, gy, "circle", T(STR_HINT_EXIT));   // O on a ripping card cancels its rip instead
 			}
@@ -3851,8 +3887,13 @@ static int home_screen()
 		}
 		flip_frame();
 		int p = pad_pressed();
-		if ((p & B_UP) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }
+		if ((p & B_UP) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }   // over the page edge too
 		if ((p & B_DOWN) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }
+		{
+			int per = cards_per_page(), pg = si / per, npg = (nc + per - 1) / per;
+			if ((p & B_R1) && pg < npg - 1) { sel = list[(pg + 1) * per]; g_redraw = 2; }   // next page: its first card
+			if ((p & B_L1) && pg > 0) { sel = list[(pg - 1) * per]; g_redraw = 2; }
+		}
 		if (f.job) {   // a ripping card: only cancel, and the general settings (they apply to the next rips)
 			if (p & B_CIRCLE) {
 				char m[300];

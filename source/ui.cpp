@@ -214,7 +214,8 @@ static bool in_warn(float u, float v)
 }
 void ui_icon(const char *name, int x0, int y0, int size, uint32_t rgb)
 {
-	int kind = !strcmp(name, "usb") ? 1 : !strcmp(name, "medal") ? 2 : !strcmp(name, "warn") ? 3 : !strcmp(name, "question") ? 4 : !strcmp(name, "drive") ? 5 : 0;
+	int kind = !strcmp(name, "usb") ? 1 : !strcmp(name, "medal") ? 2 : !strcmp(name, "warn") ? 3 : !strcmp(name, "question") ? 4 : !strcmp(name, "drive") ? 5 : !strcmp(name, "up") ? 6 : !strcmp(name, "down") ? 7 :
+	           !strcmp(name, "left") ? 8 : !strcmp(name, "right") ? 9 : 0;
 	for (int y = y0; y < y0 + size; y++) {
 		if (y < 0 || y >= (int)display_height) continue;
 		uint32_t *p = fb_row(y);
@@ -226,7 +227,11 @@ void ui_icon(const char *name, int x0, int y0, int size, uint32_t rgb)
 					float u = (x - x0 + (sx + 0.5f) / 4) / size, v = (y - y0 + (sy + 0.5f) / 4) / size;
 					float qd = sqrtf((u - 0.5f) * (u - 0.5f) + (v - 0.5f) * (v - 0.5f));
 					bool in = kind == 1 ? in_usb(u, v) : kind == 2 ? in_medal(u, v) : kind == 3 ? in_warn(u, v)
-					        : kind == 4 ? (qd <= 0.48f && qd >= 0.40f) : kind == 5 ? in_drive(u, v) : in_disc(u, v);
+					        : kind == 4 ? (qd <= 0.48f && qd >= 0.40f) : kind == 5 ? in_drive(u, v)
+					        : kind == 6 ? in_tri(u, v, 0.5f, 0.15f, 0.05f, 0.85f, 0.95f, 0.85f)     // arrows: solid triangles
+					        : kind == 7 ? in_tri(u, v, 0.5f, 0.85f, 0.05f, 0.15f, 0.95f, 0.15f)
+					        : kind == 8 ? in_tri(u, v, 0.15f, 0.5f, 0.85f, 0.05f, 0.85f, 0.95f)
+					        : kind == 9 ? in_tri(u, v, 0.85f, 0.5f, 0.15f, 0.05f, 0.15f, 0.95f) : in_disc(u, v);
 					if (in) n++;
 				}
 			if (n) p[x] = blend(p[x], rgb, n / 16.0f);
