@@ -37,11 +37,23 @@ static volatile int g_done;
 static volatile s32 g_res, g_cnt;
 static void done_cb(s32 result, s32 count, void *arg) { g_res = result; g_cnt = count; g_done = 1; }
 
-static int wait_done(int ms)
+static uint64_t ms_now()
 {
-	for (int t = 0; t < ms && !g_done; t++) usleep(1000);
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+static int wait_done(int ms)   // by the clock: usleep granularity varies
+{
+	uint64_t end = ms_now() + ms;
+	while (!g_done && ms_now() < end) usleep(2000);
 	return g_done ? 0 : -1;
 }
+
+static volatile int g_cfg_done = 0;
+static volatile s32 g_cfg_res = 1;
+static void cfg_cb(s32 result, s32 count, void *arg) { g_cfg_res = result; g_cfg_done = 1; }
 
 static s32 odd_probe(s32 dev)
 {
@@ -68,6 +80,18 @@ static s32 odd_attach(s32 dev)
 	}
 	if (!ein || !eout) { ulog("usbodd: attach dev %d: no bulk endpoints", dev); return USB_ATTACH_FAILED; }
 	g_ctrl = usbOpenPipe(dev, NULL);
+	// select the configuration, or the bulk endpoints stay inactive
+	const uint8_t *cfg = (const uint8_t *)usbScanStaticDescriptor(dev, NULL, USB_DESCRIPTOR_TYPE_CONFIG);
+	if (g_ctrl >= 0 && cfg) {
+		static usbDeviceRequest req;
+		req.bmRequestType = USB_REQTYPE_DIR_TO_DEVICE | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_RECIP_DEVICE;
+		req.bRequest = USB_REQUEST_SET_CONFIGURATION;
+		req.wValue = cfg[5];   // bConfigurationValue
+		req.wIndex = 0;
+		req.wLength = 0;
+		s32 rc = usbControlTransfer(g_ctrl, &req, NULL, cfg_cb, NULL);
+		ulog("usbodd: set configuration %u -> 0x%x", cfg[5], rc);
+	}
 	g_in = usbOpenPipe(dev, ein);
 	g_out = usbOpenPipe(dev, eout);
 	g_dev = dev;
@@ -99,8 +123,8 @@ int usbodd_init()
 
 void usbodd_status(char *out, int n)
 {
-	snprintf(out, n, "usbInit=0x%x register=0x%x probes=%d attaches=%d attached=%d dev=%d pipes ctrl=%d in=%d out=%d\n",
-	         g_init_rc, g_reg_rc, g_probes, g_attaches, g_attached, g_dev, g_ctrl, g_in, g_out);
+	snprintf(out, n, "usbInit=0x%x register=0x%x probes=%d attaches=%d attached=%d dev=%d pipes ctrl=%d in=%d out=%d set_config done=%d res=0x%x\n",
+	         g_init_rc, g_reg_rc, g_probes, g_attaches, g_attached, g_dev, g_ctrl, g_in, g_out, g_cfg_done, g_cfg_res);
 }
 
 static void put_le32(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
