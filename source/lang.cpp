@@ -263,6 +263,7 @@ static const char *en[STR_COUNT] = {
 	"The check reads the file here, not the disc, and writes the result into its rip log.",
 	"Not ripped to this destination yet.",
 	"Cancel check",
+	"Cancelled",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -522,6 +523,7 @@ static const char *sv[STR_COUNT] = {
 	"Kontrollen läser filen här, inte skivan, och skriver resultatet i rippens logg.",
 	"Inte rippad till det här målet än.",
 	"Avbryt kontroll",
+	"Avbruten",
 };
 
 static const char **table = en;

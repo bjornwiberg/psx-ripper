@@ -3699,7 +3699,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 			else snprintf(stt[i], sizeof(stt[0]), "%u %%", g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
 			scol[i] = 0xC8E05A;
 		} else if (k.res[0] && (k.state == DISC_READY || k.state == DISC_NONE)) {
-			snprintf(stt[i], sizeof(stt[0]), "%s", T(k.res_failed ? STR_TAB_FAILED : STR_TAB_DONE));
+			snprintf(stt[i], sizeof(stt[0]), "%s", T(k.res_failed == 2 ? STR_TAB_CANCELLED : k.res_failed ? STR_TAB_FAILED : STR_TAB_DONE));
 			scol[i] = k.res_failed ? 0xF0C060 : k.res_col;
 		} else if (k.state == DISC_READING) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_READING)); }
 		else if (k.state == DISC_READY) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_READY)); scol[i] = 0xC8D0E0; }
@@ -3849,6 +3849,7 @@ static void draw_page(int c, int y)
 	// the right column (drive, model, disc)
 	{ int under = ytop + lb + ls * 2 + ls / 2; if (y < under) y = under; }
 	y += section_head(L, R, y, T(STR_SEC_DISC));
+	const int ydest = y + lb + (ls + ls / 3) * 3 + lb;   // Mål always here: the page does not jump between tabs
 	if (st == DISC_READY && k.prev_rip) {   // already ripped here: how it stands, in words
 		char as[300], line[400];
 		const char *en = strrchr(k.exist, '/');
@@ -3862,11 +3863,11 @@ static void draw_page(int c, int y)
 		ui_text_fit(UI_BODY, L, y, 0x8FA8D8, line, R - L);
 		if (w1 < R - L) ui_text_fit(UI_BODY, L + w1, y, c2, p2, R - L - w1);
 		y += lb + ls / 3;
-		if (k.repair_n) {
+		if (k.repair_n) {   // details in the small type, like "Senaste rippningen"
 			char e[120];
 			snprintf(e, sizeof(e), T(STR_KNOWN_ERRORS), k.repair_n);
-			ui_text_fit(UI_BODY, L, y, 0xF0C060, e, R - L);
-			y += lb + ls / 3;
+			ui_text_fit(UI_SMALL, L, y, 0xF0C060, e, R - L);
+			y += ls + ls / 3;
 		}
 		if (k.rd_state < 0) {   // what the check does
 			ui_text_fit(UI_SMALL, L, y, 0x8890A8, T(STR_CHECK_TIP), R - L);
@@ -3885,10 +3886,10 @@ static void draw_page(int c, int y)
 	if (st == DISC_READY && k.space_short && !k.prev_rip) {
 		char sl[200];
 		snprintf(sl, sizeof(sl), T(STR_NO_SPACE), k.mb, (unsigned)(k.mb + 2 - k.space_short));
-		ui_text_fit(UI_BODY, L, y, 0xFF8A80, sl, R - L);
-		y += lb + ls / 3;
+		ui_text_fit(UI_SMALL, L, y, 0xFF8A80, sl, R - L);
+		y += ls + ls / 3;
 	}
-	y += lb;
+	y = y + lb > ydest ? y + lb : ydest;
 	y += section_head(L, R, y, T(STR_SEC_DEST));
 	y = dest_block(y, 1, 0xC8D0E0) + ls;
 	if (st == DISC_READY && k.prev_rip && k.repair_n) {   // what square does
@@ -4394,7 +4395,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		Card &k = g_cards[cur_card()];
 		snprintf(k.res, sizeof(k.res), "%s", g_result == 1 ? T(STR_CARD_CANCELLED) : T(STR_CREATE_FAILED));
 		k.res_col = g_result == 1 ? 0xF0C060 : 0xFF8A80;
-		k.res_failed = 1;
+		k.res_failed = g_result == 1 ? 2 : 1;   // 2 = cancelled
 		return 0;
 	}
 
