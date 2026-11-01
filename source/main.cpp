@@ -367,10 +367,10 @@ static volatile int g_debug_on = 0;
 static int g_state_busy();
 static int debug_cmd(const char *q, char *out, int n)
 {
-	char v[80], v2[600];
+	char v[80], v2[600], opbuf[16];
 	if (!g_debug_on) { snprintf(out, n, "debug mode off (create /dev_hdd0/tmp/psxrip.debug)\n"); return 0; }
 	if (g_state_busy()) { snprintf(out, n, "busy: the app is using the drive\n"); return 0; }
-	const char *op = qget(q, "op", v, sizeof(v));
+	const char *op = qget(q, "op", opbuf, sizeof(opbuf));   // own buffer: v is reused below
 	if (!op) { snprintf(out, n, "ops: list | info&id= | scsi&id=&sc=616|604&proto=0|1|3&dir=0|1&cdb=hex&len= | devcmd&id=&cmd=&in=hex&len=\n"); return 0; }
 	if (!strcmp(op, "list")) {
 		static const uint64_t bases[] = {0x0101000000000000ULL, 0x0103000000000000ULL};
