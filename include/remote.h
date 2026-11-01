@@ -7,6 +7,7 @@
 
 struct RemoteHooks {
 	int (*status_json)(char *out, int n);         // current state as JSON
+	int (*debug)(const char *query, char *out, int n);   // /dbg?... (only with the debug flag file)
 };
 
 void remote_init(const RemoteHooks *hooks);

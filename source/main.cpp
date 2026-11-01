@@ -327,6 +327,109 @@ static void usb_optical_probe()
 	g_fd = keep_fd;
 }
 
+// ---------------------------------------------------------------- debug commands over HTTP
+// /dbg?op=... on the remote view, only when /dev_hdd0/tmp/psxrip.debug exists and the app does not
+// use the drive. For finding out how to talk to devices (USB optical drives) without rebuilding.
+static const char *qget(const char *q, const char *key, char *out, size_t n)
+{
+	size_t kl = strlen(key);
+	for (const char *p = q; p && *p; ) {
+		if (!strncmp(p, key, kl) && p[kl] == '=') {
+			size_t v = strcspn(p + kl + 1, "&");
+			if (v >= n) v = n - 1;
+			memcpy(out, p + kl + 1, v); out[v] = 0;
+			return out;
+		}
+		p = strchr(p, '&');
+		if (p) p++;
+	}
+	return NULL;
+}
+
+static int unhex(const char *h, uint8_t *out, int max)
+{
+	int n = 0;
+	while (h[0] && h[1] && n < max) { char b[3] = {h[0], h[1], 0}; out[n++] = (uint8_t)strtol(b, NULL, 16); h += 2; }
+	return n;
+}
+
+static void hexdump(char *out, size_t n, const uint8_t *d, int len)
+{
+	size_t o = strlen(out);
+	for (int i = 0; i < len && o + 4 < n; i++) {
+		o += snprintf(out + o, n - o, "%02x", d[i]);
+		if (i % 16 == 15 && o + 2 < n) out[o++] = '\n', out[o] = 0;
+	}
+	if (o + 2 < n) { out[o++] = '\n'; out[o] = 0; }
+}
+
+static volatile int g_debug_on = 0;
+static int g_state_busy();
+static int debug_cmd(const char *q, char *out, int n)
+{
+	char v[80], v2[600];
+	if (!g_debug_on) { snprintf(out, n, "debug mode off (create /dev_hdd0/tmp/psxrip.debug)\n"); return 0; }
+	if (g_state_busy()) { snprintf(out, n, "busy: the app is using the drive\n"); return 0; }
+	const char *op = qget(q, "op", v, sizeof(v));
+	if (!op) { snprintf(out, n, "ops: list | info&id= | scsi&id=&sc=616|604&proto=0|1|3&dir=0|1&cdb=hex&len= | devcmd&id=&cmd=&in=hex&len=\n"); return 0; }
+	if (!strcmp(op, "list")) {
+		static const uint64_t bases[] = {0x0101000000000000ULL, 0x0103000000000000ULL};
+		for (int b = 0; b < 2; b++)
+			for (int i = 0; i < 0x40; i++) {
+				struct storage_device_info info __attribute__((aligned(16)));
+				memset(&info, 0, sizeof(info));
+				info.unknown03 = 0x12345678;
+				if (sys_storage_get_device_info(bases[b] + i, (uint8_t *)&info)) continue;
+				size_t o = strlen(out);
+				snprintf(out + o, n - o, "%016llx sectors=%llu size=%u writable=%u raw=", (unsigned long long)(bases[b] + i),
+				         (unsigned long long)info.total_sectors, info.sector_size, info.writable);
+				hexdump(out, n, (const uint8_t *)&info, sizeof(info));
+			}
+		return 0;
+	}
+	uint64_t id = qget(q, "id", v, sizeof(v)) ? strtoull(v, NULL, 16) : 0;
+	if (!id) { snprintf(out, n, "id= missing\n"); return 0; }
+	int fd = -1, r = sys_storage_open(id, &fd);
+	snprintf(out, n, "open %016llx -> 0x%x\n", (unsigned long long)id, r);
+	if (r) return 0;
+	static uint8_t buf[8192] __attribute__((aligned(128)));
+	memset(buf, 0, sizeof(buf));
+	int len = qget(q, "len", v, sizeof(v)) ? atoi(v) : 0;
+	if (len < 0 || len > (int)sizeof(buf)) len = 0;
+	if (!strcmp(op, "scsi")) {
+		uint8_t cdb[16] = {0};
+		unhex(qget(q, "cdb", v2, sizeof(v2)) ? v2 : "", cdb, 16);
+		uint32_t sc = qget(q, "sc", v, sizeof(v)) ? strtoul(v, NULL, 0) : 616;
+		uint32_t proto = qget(q, "proto", v, sizeof(v)) ? strtoul(v, NULL, 0) : (len ? ATAPI_PIO_DATA_IN_PROTO : ATAPI_NON_DATA_PROTO);
+		uint32_t dir = qget(q, "dir", v, sizeof(v)) ? strtoul(v, NULL, 0) : (len ? ATAPI_DIR_READ : ATAPI_DIR_WRITE);
+		struct lv2_atapi_cmnd_block cmd;
+		atapi_init(&cmd, len, proto, dir);
+		if (!len) cmd.proto = ATAPI_NON_DATA_PROTO;
+		memcpy(cmd.pkt, cdb, 12);
+		r = sys_storage_send_atapi_command(sc, fd, &cmd, buf);
+		size_t o = strlen(out);
+		snprintf(out + o, n - o, "scsi sc=%u proto=%u dir=%u len=%d -> 0x%x\n", sc, proto, dir, len, r);
+		if (len) hexdump(out, n, buf, len);
+	} else if (!strcmp(op, "devcmd")) {
+		uint32_t c = qget(q, "cmd", v, sizeof(v)) ? strtoul(v, NULL, 0) : 0;
+		static uint8_t in[512] __attribute__((aligned(128)));
+		int inl = unhex(qget(q, "in", v2, sizeof(v2)) ? v2 : "", in, sizeof(in));
+		r = sys_storage_send_device_cmd(fd, c, in, inl, buf, len);
+		size_t o = strlen(out);
+		snprintf(out + o, n - o, "devcmd 0x%x in=%d len=%d -> 0x%x\n", c, inl, len, r);
+		if (len) hexdump(out, n, buf, len);
+	} else if (!strcmp(op, "read")) {
+		uint32_t lba = qget(q, "lba", v, sizeof(v)) ? strtoul(v, NULL, 0) : 0, got = 0;
+		r = sys_storage_read(fd, lba, 1, buf, &got);
+		size_t o = strlen(out);
+		snprintf(out + o, n - o, "read lba %u -> 0x%x got %u\n", lba, r, got);
+		if (!r) hexdump(out, n, buf, 64);
+	}
+	sys_storage_close(fd);
+	logf("debug: %s", q);
+	return 0;
+}
+
 // Data-out command (MODE SELECT).
 static int atapi_out(const uint8_t *cdb, uint8_t *buf, uint32_t len)
 {
@@ -2683,6 +2786,8 @@ static void json_fields(char *js, size_t n)
 	o = strlen(js); snprintf(js + o, n - o, ",\"redump\":\"%s\",\"redump_name\":", rd_result_str()); json_str(js, n, g_rd_result_name);
 }
 
+static int g_state_busy() { return g_state == ST_RIPPING || g_ident_busy || g_repairing || lv1_patched; }
+
 static int status_json(char *js, int n)
 {
 	uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
@@ -3306,7 +3411,7 @@ int main(int argc, char *argv[])
 		for (int i = 0; i < nv && i < 8; i++) logf("exFAT drive on USB port %d (%llu MB free)", v[i].port, (unsigned long long)v[i].free_mb);
 	}
 	{
-		static const RemoteHooks hooks = {status_json};
+		static const RemoteHooks hooks = {status_json, debug_cmd};
 		remote_init(&hooks);
 		if (g_remote) remote_set(1);
 	}
@@ -3338,6 +3443,7 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 	if (warn[0]) own_dialog(warn, 0);   // what the start-up checks found and fixed
+	{ struct stat ds; g_debug_on = stat("/dev_hdd0/tmp/psxrip.debug", &ds) == 0; if (g_debug_on) logf("debug commands on (/dbg)"); }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
 	int autorip = 0;   // set after a successful rip: the next inserted disc is ripped without asking

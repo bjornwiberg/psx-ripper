@@ -114,6 +114,20 @@ static void client_thread(void *arg)
 		}
 		free(jb.p);
 		free(rgb);
+	} else if (!strncmp(req, "GET /dbg?", 9) && g_hooks.debug) {
+		char q[600];
+		size_t k = strcspn(req + 9, " \r\n");
+		if (k >= sizeof(q)) k = sizeof(q) - 1;
+		memcpy(q, req + 9, k); q[k] = 0;
+		char *out = (char *)malloc(16384);
+		if (out) {
+			out[0] = 0;
+			g_hooks.debug(q, out, 16384);
+			char hdr[128];
+			snprintf(hdr, sizeof(hdr), "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\nContent-Length: %d\r\n\r\n", (int)strlen(out));
+			if (!send_str(s, hdr)) send_str(s, out);
+			free(out);
+		}
 	} else if (!strncmp(req, "GET /status.json", 16)) {
 		char js[1024] = "{}";
 		if (g_hooks.status_json) g_hooks.status_json(js, sizeof(js));
