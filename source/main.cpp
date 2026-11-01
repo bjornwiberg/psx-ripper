@@ -647,6 +647,9 @@ static int write_sbi(const char *path)
 // ---------------------------------------------------------------- rip worker
 static volatile uint32_t g_done = 0, g_total = 0;
 static volatile uint32_t g_readpos = 0;   // reader position inside a slow (damaged) chunk
+// sector being re-read right now (shown on the progress screen); g_rr_max = 0 when not re-reading
+static volatile uint32_t g_rr_lba = 0;
+static volatile int g_rr_try = 0, g_rr_max = 0;
 static volatile int g_abort = 0, g_finished = 0, g_result = 0;
 static volatile uint32_t g_readerrs = 0;
 static int g_ripped = 0;    // discs ripped this session
@@ -811,7 +814,9 @@ static void rip_thread(void *arg)
 				uint8_t *sp = buf + i * SECT_Q;
 				if (g_abort) { memset(sp, 0, SECT_Q); dead[i] = 1; continue; }
 				int r = -1, tries = run >= 4 ? 1 : g_retries;
-				for (int t = 0; t < tries && r && !g_abort; t++) r = read_cd(lba + i, 1, sp);
+				g_rr_lba = lba + i; g_rr_max = tries;
+				for (int t = 0; t < tries && r && !g_abort; t++) { g_rr_try = t + 1; r = read_cd(lba + i, 1, sp); }
+				g_rr_max = 0;
 				if (r) {
 					memset(sp, 0, SECT_Q); dead[i] = 1; g_readerrs++; run++;
 					if (g_readerrs <= 64 || g_readerrs % 100 == 0) logf("unreadable sector %u (0x%x, %d tries, %u so far)", lba + i, r, tries, g_readerrs);
@@ -829,10 +834,13 @@ static void rip_thread(void *arg)
 				const char *why = dead[i] ? 0 : check_sector(lba + i, sp);
 				if (!why) continue;
 				int fixed = 0, tries = 0;
+				g_rr_lba = lba + i; g_rr_max = g_retries;
 				while (!fixed && tries < g_retries && !g_abort) {
 					tries++;
+					g_rr_try = tries;
 					if (read_cd(lba + i, 1, g_sec) == 0 && !check_sector(lba + i, g_sec)) { memcpy(sp, g_sec, SECT_Q); fixed = 1; }
 				}
+				g_rr_max = 0;
 				if (fixed) { g_recovered++; logf("sector %u: %s, fixed by re-read %d", lba + i, why, tries); }
 				else if (++g_badsect <= 32) logf("bad sector %u: %s, still wrong after %d re-reads", lba + i, why, tries);
 			}
@@ -1296,7 +1304,7 @@ static void fmt_local(time_t t, char *out, size_t n)
 
 // Own progress screen (instead of the system dialog, whose button reads "Back"): title, bar,
 // detail text and "O Cancel". Draws only when called; the caller decides when something changed.
-static void progress_draw(const char *title, const char *detail, uint32_t pct)
+static void progress_draw(const char *title, const char *detail, uint32_t pct, const char *note = NULL)
 {
 	if (pct > 100) pct = 100;
 	draw_backdrop();
@@ -1308,6 +1316,7 @@ static void progress_draw(const char *title, const char *detail, uint32_t pct)
 	char p[16];
 	snprintf(p, sizeof(p), "%u %%", pct);
 	ui_text(UI_SMALL, ui_w() / 2, y + bh + ui_line(UI_SMALL) / 2, 0xE8E8F0, p, UI_CENTER);
+	if (note && note[0]) ui_text(UI_SMALL, ui_w() / 2, y + bh + ui_line(UI_SMALL) * 2, 0xF0C060, note, UI_CENTER);
 	const char *b[] = {"circle"};
 	const char *l[] = {T(STR_HINT_CANCEL)};
 	hint_bar(b, l, 1);
@@ -1626,16 +1635,25 @@ static int rip_disc_inner(int fresh, int autorip)
 	char ripmsg[256];
 	snprintf(ripmsg, sizeof(ripmsg), T(STR_RIPPING), name, g_serial[0] ? g_serial : T(STR_UNKNOWN));
 	pad_pressed();
-	uint32_t shown = 101;
+	uint32_t shown = 101, shown_pos = 0, shown_lba = 0;
+	int shown_try = -1;
 	while (!g_finished) {
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / (g_total ? g_total : 1));
-		if (pct != shown) {
-			char pm[96];
+		int rmax = g_rr_max, rtry = rmax ? g_rr_try : 0;
+		uint32_t rlba = g_rr_lba;
+		// redraw on a new percentage, every 256 sectors, or when the re-read state changes
+		if (pct != shown || pos / 256 != shown_pos / 256 || rtry != shown_try || (rmax && rlba != shown_lba)) {
+			char pm[96], note[200] = "";
 			snprintf(pm, sizeof(pm), T(STR_PROGRESS), pos, g_total);
-			progress_draw(ripmsg, pm, pct);
-			shown = pct;
+			if (rmax) snprintf(note, sizeof(note), T(STR_REREAD), rlba, rtry, rmax);
+			if (g_readerrs || g_recovered) {
+				size_t o = strlen(note);
+				snprintf(note + o, sizeof(note) - o, T(STR_READ_STATS), o ? " · " : "", g_readerrs, g_recovered);
+			}
+			progress_draw(ripmsg, pm, pct, note);
+			shown = pct; shown_pos = pos; shown_try = rtry; shown_lba = rlba;
 		}
 		flip_frame();
 	}

@@ -79,6 +79,8 @@ static const char *en[STR_COUNT] = {
 	"Version %s, downloaded %s",
 	"Sectors with a checksum error: %u (see the log)",
 	"Cancel",
+	"Re-reading sector %u – try %d of %d",
+	"%sUnreadable so far: %u · fixed: %u",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -154,6 +156,8 @@ static const char *sv[STR_COUNT] = {
 	"Version %s, hämtad %s",
 	"Sektorer med kontrollsummefel: %u (se loggen)",
 	"Avbryt",
+	"Läser om sektor %u – försök %d av %d",
+	"%sOläsbara hittills: %u · lagade: %u",
 };
 
 static const char **table = en;
