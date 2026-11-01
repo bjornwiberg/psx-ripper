@@ -55,6 +55,26 @@ static int g_check = CHECK_BITPERFECT;   // sector check: off, EDC/ECC + re-read
 static int g_webhook_on = 0;       // send webhooks
 static char g_webhook[512] = "";   // webhook address (http://...); may contain a secret id, never logged
 static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
+#define WH_HEADERS 3
+static char g_webhook_hdr[WH_HEADERS][256];    // extra headers "Name: value" (often a secret: never logged or shown)
+static int g_webhook_hdr_on = 0;               // send them (off keeps them stored)
+
+// "Name: value" cleaned of CR/LF, so a header can never add lines to the request
+static void clean_header(char *h)
+{
+	char *o = h;
+	for (char *p = h; *p; p++) if (*p != '\r' && *p != '\n') *o++ = *p;
+	*o = 0;
+	if (!strchr(h, ':')) h[0] = 0;   // not "Name: value"
+}
+
+static void webhook_headers(char *out, size_t n)
+{
+	out[0] = 0;
+	if (!g_webhook_hdr_on) return;
+	for (int i = 0; i < WH_HEADERS; i++)
+		if (g_webhook_hdr[i][0]) snprintf(out + strlen(out), n - strlen(out), "%s\r\n", g_webhook_hdr[i]);
+}
 static const int wh_steps[] = {1, 2, 5, 10, 15, 25, 50};
 static int g_webhook_step = 5;                 // rip_progress every this many percent
 static const int speed_x[4] = {0, 8, 4, 2};
@@ -78,6 +98,11 @@ static void cfg_load()
 		else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
 		else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
 		else if (!strncmp(line, "webhook_events=", 15)) g_webhook_mask = atoi(line + 15) & ((1 << WH_COUNT) - 1);
+		else if (!strncmp(line, "webhook_headers_on=", 19)) g_webhook_hdr_on = atoi(line + 19) ? 1 : 0;
+		else if (!strncmp(line, "webhook_header", 14) && line[14] >= '1' && line[14] <= '0' + WH_HEADERS && line[15] == '=') {
+			snprintf(g_webhook_hdr[line[14] - '1'], sizeof(g_webhook_hdr[0]), "%s", line + 16);
+			clean_header(g_webhook_hdr[line[14] - '1']);
+		}
 		else if (!strncmp(line, "webhook_step=", 13)) { int v = atoi(line + 13); for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
 	}
 	fclose(f);
@@ -89,6 +114,8 @@ static void cfg_save()
 	if (!f) return;
 	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\nwebhook_step=%d\n",
 	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook, g_check, g_webhook_mask, g_webhook_step);
+	fprintf(f, "webhook_headers_on=%d\n", g_webhook_hdr_on);
+	for (int i = 0; i < WH_HEADERS; i++) fprintf(f, "webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
 	fclose(f);
 }
 
@@ -1975,6 +2002,56 @@ static int osk_input(const char *title, char *text, size_t n)
 static void set_webhook(const char *url);
 static int test_webhook();
 
+// The extra headers, each edited with the on-screen keyboard; only the name is shown.
+static void webhook_headers_screen()
+{
+	int row = 0;
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			draw_backdrop();
+			ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_WH_HEADERS), UI_CENTER);
+			int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10;
+			int left = ui_w() / 6, right = ui_w() * 5 / 6;
+			for (int r = 0; r < WH_HEADERS; r++) {
+				int y = top + r * lh;
+				char label[32], val[160];
+				const char *h = g_webhook_hdr[r];
+				snprintf(label, sizeof(label), T(STR_WH_HEADER_N), r + 1);
+				if (h[0]) { const char *c = strchr(h, ':'); snprintf(val, sizeof(val), "%.*s: ••••", (int)(c ? c - h : 0), h); }
+				else snprintf(val, sizeof(val), "%s", T(STR_WH_NONE));
+				if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh, 0x703D6FD9);
+				ui_text(UI_BODY, left, y, 0xFFFFFF, label);
+				ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, val, UI_RIGHT);
+			}
+			const char *b[] = {"updown", "cross", "circle"};
+			const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_EDIT), T(STR_HINT_BACK)};
+			hint_bar(b, l, 3);
+			g_drawn = 2;
+			g_backdrop_shown = 0;
+		}
+		flip_frame();
+		int p = pad_pressed();
+		if (p) g_redraw = 2;
+		if (p & B_UP) row = (row + WH_HEADERS - 1) % WH_HEADERS;
+		if (p & B_DOWN) row = (row + 1) % WH_HEADERS;
+		if (p & B_CIRCLE) return;
+		if (p & B_CROSS) {
+			char h[256];
+			snprintf(h, sizeof(h), "%s", g_webhook_hdr[row]);
+			if (osk_input(T(STR_WH_HEADER_Q), h, sizeof(h))) {
+				clean_header(h);
+				snprintf(g_webhook_hdr[row], sizeof(g_webhook_hdr[0]), "%s", h);
+				cfg_save();
+				logf("webhook header %d %s", row + 1, h[0] ? "set" : "cleared");   // never the value
+			}
+			pad_pressed();
+		}
+	}
+}
+
 // Webhook settings: address (on-screen keyboard), each event on/off, progress step (off or every
 // 1 ... 50 %), and a test. The values live in CFG_PATH and can also be edited there over FTP.
 static void webhook_settings_screen()
@@ -1982,7 +2059,7 @@ static void webhook_settings_screen()
 	// rows: 0 address, events except progress, progress, test
 	int ev[WH_COUNT], nev = 0;
 	for (int i = 0; i < WH_COUNT; i++) if (i != WH_RIP_PROGRESS) ev[nev++] = i;
-	const int R_ADDR = 0, R_EV = 1, R_PROG = 1 + nev, R_TEST = 2 + nev, NROWS = 3 + nev, VIS = 9;
+	const int R_ADDR = 0, R_HDR = 1, R_EV = 2, R_PROG = R_EV + nev, R_TEST = R_PROG + 1, NROWS = R_TEST + 1, VIS = 9;
 	int row = 0, first = 0, test_status = 0;
 	pad_pressed();
 	g_redraw = 2;
@@ -2001,6 +2078,11 @@ static void webhook_settings_screen()
 				if (r == R_ADDR) {
 					snprintf(label, sizeof(label), "%s", T(STR_WH_ADDRESS));
 					if (g_webhook[0]) webhook_host(g_webhook, val, sizeof(val)); else snprintf(val, sizeof(val), "%s", T(STR_WH_NONE));
+				} else if (r == R_HDR) {
+					int nh = 0;
+					for (int i = 0; i < WH_HEADERS; i++) nh += g_webhook_hdr[i][0] != 0;
+					snprintf(label, sizeof(label), "%s", T(STR_WH_HEADERS));
+					if (g_webhook_hdr_on) snprintf(val, sizeof(val), T(STR_WH_HEADERS_ON), nh); else snprintf(val, sizeof(val), "%s", T(STR_OFF));
 				} else if (r < R_PROG) {
 					int i = ev[r - R_EV];
 					snprintf(label, sizeof(label), "%s", T(wh_label(i)));
@@ -2016,16 +2098,20 @@ static void webhook_settings_screen()
 				if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh, 0x703D6FD9);
 				ui_text(UI_BODY, left, y, 0xFFFFFF, label);
 				char v[200];
-				int toggle = r != R_ADDR && r != R_TEST;
+				int toggle = r >= R_HDR && r != R_TEST;
 				snprintf(v, sizeof(v), r == row && toggle ? "‹ %s ›" : "%s", val);
 				ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 			}
 			char foot[200];
 			snprintf(foot, sizeof(foot), T(STR_WH_CFG_PATH), CFG_PATH);
 			ui_text(UI_SMALL, ui_w() / 2, top + VIS * lh - lh / 4, 0x8890A8, foot, UI_CENTER);
-			if (row == R_ADDR || row == R_TEST) {
+			if (row == R_HDR) {   // on/off with left/right, X edits the headers
+				const char *b[] = {"updown", "leftright", "cross", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_EDIT), T(STR_HINT_BACK)};
+				hint_bar(b, l, 4);
+			} else if (row == R_ADDR || row == R_TEST) {
 				const char *b[] = {"updown", "cross", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), T(row == R_ADDR ? STR_HINT_EDIT : STR_HINT_SEND), T(STR_HINT_BACK)};
+				const char *l[] = {T(STR_HINT_SELECT), T(row == R_TEST ? STR_HINT_SEND : STR_HINT_EDIT), T(STR_HINT_BACK)};
 				hint_bar(b, l, 3);
 			} else {
 				const char *b[] = {"updown", "leftright", "circle"};
@@ -2048,11 +2134,14 @@ static void webhook_settings_screen()
 			pad_pressed();
 			continue;
 		}
+		if ((p & B_CROSS) && row == R_HDR) { webhook_headers_screen(); pad_pressed(); g_redraw = 2; continue; }
 		if ((p & B_CROSS) && row == R_TEST) { test_status = test_webhook(); continue; }
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if ((p & B_CROSS) && row > R_ADDR && row < R_PROG) d = 1;   // X toggles an event too
+		if ((p & B_CROSS) && row >= R_EV && row < R_PROG) d = 1;   // X toggles an event too
 		if (!d) continue;
-		if (row > R_ADDR && row < R_PROG) {
+		if (row == R_HDR) {
+			g_webhook_hdr_on = !g_webhook_hdr_on;
+		} else if (row >= R_EV && row < R_PROG) {
 			g_webhook_mask ^= 1 << ev[row - R_EV];
 		} else if (row == R_PROG) {
 			// Off, 1, 2, 5, 10, 15, 25, 50 %
@@ -2495,7 +2584,9 @@ static int test_webhook()
 {
 	char js[1024];
 	event_json(js, sizeof(js), "test");
-	int st = webhook_post(g_webhook, js);
+	char hdrs[1024];
+	webhook_headers(hdrs, sizeof(hdrs));
+	int st = webhook_post(g_webhook, js, hdrs);
 	logf("webhook test -> %d", st);
 	return st;
 }
@@ -2506,7 +2597,9 @@ static void fire_event(const char *event)
 	if (!g_webhook_on || !g_webhook[0] || idx < 0 || !((g_webhook_mask >> idx) & 1)) return;
 	char js[1024];
 	event_json(js, sizeof(js), event);
-	webhook_send_async(g_webhook, js);
+	char hdrs[1024];
+	webhook_headers(hdrs, sizeof(hdrs));
+	webhook_send_async(g_webhook, js, hdrs);
 }
 
 static void write_riplog();

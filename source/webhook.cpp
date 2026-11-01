@@ -47,7 +47,7 @@ void webhook_host(const char *url, char *out, size_t n)
 	if (port == 80) snprintf(out, n, "%s", host); else snprintf(out, n, "%s:%d", host, port);
 }
 
-int webhook_post(const char *url, const char *json)
+int webhook_post(const char *url, const char *json, const char *headers)
 {
 	char host[128], path[512];
 	int port;
@@ -66,10 +66,11 @@ int webhook_post(const char *url, const char *json)
 	memcpy(&sa.sin_addr, h->h_addr_list[0], 4);
 	int status = -4;
 	if (connect(s, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
-		char hdr[768];
+		char hdr[2048];
 		int bl = strlen(json);
 		int n = snprintf(hdr, sizeof(hdr), "POST %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: PSXRipper\r\nContent-Type: application/json\r\n"
-		                 "Content-Length: %d\r\nConnection: close\r\n\r\n", path, host, bl);
+		                 "%sContent-Length: %d\r\nConnection: close\r\n\r\n", path, host, headers ? headers : "", bl);
+		if (n >= (int)sizeof(hdr)) n = sizeof(hdr) - 1;
 		if (send(s, hdr, n, 0) == n && send(s, json, bl, 0) == bl) {
 			char resp[64];
 			int r = recv(s, resp, sizeof(resp) - 1, 0);
@@ -81,25 +82,26 @@ int webhook_post(const char *url, const char *json)
 	return status;
 }
 
-struct Job { char url[512]; char *json; };
+struct Job { char url[512]; char hdrs[1024]; char *json; };
 static void send_thread(void *arg)
 {
 	Job *j = (Job *)arg;
 	char host[160];
 	webhook_host(j->url, host, sizeof(host));
-	int st = webhook_post(j->url, j->json);
+	int st = webhook_post(j->url, j->json, j->hdrs);
 	wlog("webhook to %s -> %d", host, st);   // the path (often a secret id) is never logged
 	free(j->json);
 	free(j);
 	sysThreadExit(0);
 }
 
-void webhook_send_async(const char *url, const char *json)
+void webhook_send_async(const char *url, const char *json, const char *headers)
 {
 	if (!url || !url[0]) return;
 	Job *j = (Job *)malloc(sizeof(Job));
 	if (!j) return;
 	snprintf(j->url, sizeof(j->url), "%s", url);
+	snprintf(j->hdrs, sizeof(j->hdrs), "%s", headers ? headers : "");
 	j->json = strdup(json);
 	sys_ppu_thread_t t;
 	if (!j->json || sysThreadCreate(&t, send_thread, j, 1500, 0x4000, 0, (char *)"psxhook")) { free(j->json); free(j); }

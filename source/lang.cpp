@@ -172,10 +172,14 @@ static const char *en[STR_COUNT] = {
 	"Not set",
 	"Progress",
 	"Send test",
-	"Saved in %s (webhook=, webhook_events=, webhook_step=); can also be edited over FTP",
+	"Saved in %s (webhook=, webhook_headers_on=, webhook_header1-3=, webhook_events=, webhook_step=); can also be edited over FTP",
 	"Edit",
 	"Send",
 	"Webhook address (http://host:port/path)",
+	"Header %d",
+	"Header (Name: value, for example Authorization: Bearer …); empty removes it",
+	"Headers",
+	"On · %d",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -344,10 +348,14 @@ static const char *sv[STR_COUNT] = {
 	"Inte angiven",
 	"Framsteg",
 	"Skicka test",
-	"Sparas i %s (webhook=, webhook_events=, webhook_step=); kan också ändras via FTP",
+	"Sparas i %s (webhook=, webhook_headers_on=, webhook_header1-3=, webhook_events=, webhook_step=); kan också ändras via FTP",
 	"Ändra",
 	"Skicka",
 	"Webhook-adress (http://värd:port/sökväg)",
+	"Header %d",
+	"Header (Namn: värde, till exempel Authorization: Bearer …); tom tar bort den",
+	"Headers",
+	"På · %d st",
 };
 
 static const char **table = en;

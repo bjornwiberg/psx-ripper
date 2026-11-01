@@ -6,9 +6,10 @@
 #include <stddef.h>
 
 // Sends now and returns the HTTP status (negative on error).
-int webhook_post(const char *url, const char *json);
+// `headers`: extra lines "Name: value\r\n" (may be NULL), for example authentication.
+int webhook_post(const char *url, const char *json, const char *headers = NULL);
 // Sends from a background thread, so ripping never waits for the network.
-void webhook_send_async(const char *url, const char *json);
+void webhook_send_async(const char *url, const char *json, const char *headers = NULL);
 // "http://host:port/path" -> "host:port" (for display and logs, without the secret path).
 void webhook_host(const char *url, char *out, size_t n);
 // Events a webhook can be sent for (bit i of the mask = WEBHOOK_EVENTS[i]).
