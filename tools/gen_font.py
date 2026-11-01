@@ -49,27 +49,32 @@ for name, body in (("f1080_sym", 36), ("f720_sym", 24)):
     cap_top, cap_h = cap[1], cap[3] - cap[1]
     data = bytearray()
     glyphs = []
+    # optical corrections: (height factor, downward shift as a fraction of cap height)
+    OPTICAL = {"○": (1.04, 0.06), "✕": (1.0, 0.08)}
     for ch in "△○✕□↑↓←→":
+        hf, shift = OPTICAL.get(ch, (1.0, 0.0))
+        target_h = int(round(cap_h * hf))
         size = body
         for _ in range(40):   # find the size whose glyph height matches the cap height
             f = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), size)
             b = f.getbbox(ch)
-            if abs((b[3] - b[1]) - cap_h) <= 0 or size < 6:
+            if abs((b[3] - b[1]) - target_h) <= 0 or size < 6:
                 break
-            size = max(6, int(round(size * cap_h / (b[3] - b[1]))))
+            size = max(6, int(round(size * target_h / (b[3] - b[1]))))
             f2 = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), size)
-            if abs((f2.getbbox(ch)[3] - f2.getbbox(ch)[1]) - cap_h) <= 1:
+            if abs((f2.getbbox(ch)[3] - f2.getbbox(ch)[1]) - target_h) <= 1:
                 f, b = f2, f2.getbbox(ch)
                 break
         x0, y0, x1, y1 = b
         w, h = x1 - x0, y1 - y0
         img = Image.new("L", (w, h), 0)
         ImageDraw.Draw(img).text((-x0, -y0), ch, font=f, fill=255)
-        if h != cap_h:   # snap to the exact cap height
-            img = img.resize((w, cap_h), Image.LANCZOS)
-            h = cap_h
+        if h != target_h:   # snap to the target height
+            img = img.resize((w, target_h), Image.LANCZOS)
+            h = target_h
         # yoff = cap top, so the symbol's top sits where a capital letter's top sits
-        glyphs.append((ord(ch), w, h, x0, cap_top, int(round(f.getlength(ch))), len(data)))
+        top = cap_top - (target_h - cap_h) // 2 + int(round(cap_h * shift))
+        glyphs.append((ord(ch), w, h, x0, top, int(round(f.getlength(ch))), len(data)))
         data += img.tobytes()
     out.write("static const uint8_t %s_data[] = {%s};\n" % (name, ",".join(str(b) for b in data)))
     out.write("static const Glyph %s_glyphs[] = {\n" % name)
