@@ -195,7 +195,7 @@ static const char *en[STR_COUNT] = {
 	"Drive settings",
 	"Standard (%s)",
 	"All standard",
-	"Done: %s · %s",
+	"Done · %s",
 	"Cancel rip",
 	"Cancel the rip of %s? The unfinished file is removed.",
 	"Rips are running. Cancel them and exit?",
@@ -203,6 +203,9 @@ static const char *en[STR_COUNT] = {
 	"The rip was cancelled",
 	" · the earlier rip is still there, without known errors.",
 	" · the earlier rip is still there, with known errors (%d sectors).",
+	"Redump: %s · verified",
+	" · unreadable: %u",
+	" · fixed by re-reading: %u",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -394,7 +397,7 @@ static const char *sv[STR_COUNT] = {
 	"Läsarinställningar",
 	"Standard (%s)",
 	"Allt standard",
-	"Klar: %s · %s",
+	"Klar · %s",
 	"Avbryt rippning",
 	"Avbryta rippningen av %s? Den ofullständiga filen tas bort.",
 	"Rippningar pågår. Avbryta dem och avsluta?",
@@ -402,6 +405,9 @@ static const char *sv[STR_COUNT] = {
 	"Rippningen avbröts",
 	" · den tidigare rippen finns kvar, utan kända fel.",
 	" · den tidigare rippen finns kvar, med kända fel (%d sektorer).",
+	"Redump: %s · verifierad",
+	" · oläsbara: %u",
+	" · lagade vid omläsning: %u",
 };
 
 static const char **table = en;

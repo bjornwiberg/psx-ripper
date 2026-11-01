@@ -107,6 +107,8 @@ struct Card {
 	char res[200];                    // last rip: one line, coloured res_col
 	uint32_t res_col;
 	int res_failed;                   // it was cancelled or failed: an earlier rip there is untouched
+	char rd_done[160];                // Redump line after this rip (verified / no match), shown instead of rd
+	uint32_t rd_done_col;
 	uint64_t eta_t0, eta_tw; uint32_t eta_pw; double eta_rate;   // time left of the running rip
 	int eta_phase;
 };
@@ -3172,7 +3174,8 @@ static int draw_card(int c, int y, int focused, int single)
 		else ui_text_fit(UI_SMALL, ax, ly + (single ? ls : 0), 0xF0C060, note, maxw, al);
 		ly += ls;
 	} else {
-		if (st == DISC_READY && k.rd[0]) ui_text_fit(UI_SMALL, ax, ly, 0x9AD0A8, k.rd, maxw, al);
+		if (st == DISC_READY && k.rd_done[0]) ui_text_fit(UI_SMALL, ax, ly, k.rd_done_col, k.rd_done, maxw, al);   // after a rip here
+		else if (st == DISC_READY && k.rd[0]) ui_text_fit(UI_SMALL, ax, ly, 0x9AD0A8, k.rd, maxw, al);
 		ly += ls;
 		if (k.res[0] && k.res_failed && st == DISC_READY && k.prev_rip) {
 			// cancelled or failed over an earlier rip: that one is still there, say so on the same line
@@ -3232,7 +3235,7 @@ static int home_screen()
 			for (int i = 0; i < nc; i++) {
 				Card &k = g_cards[list[i]];
 				if (k.job) continue;   // ripping: the rip has the drive
-				if (k.inserted) { k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0; k.res[0] = 0; }
+				if (k.inserted) { k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0; k.res[0] = 0; k.rd_done[0] = 0; }
 				if (!k.present) { if (k.state != DISC_NONE) k.state = DISC_NONE; k.tried = 0; k.fresh = 0; continue; }
 				if (!k.tried) { k.tried = 1; select_card(list[i]); identify_start(k.fresh); break; }
 				if (k.recheck) { k.recheck = 0; if (k.state == DISC_READY) { select_card(list[i]); prev_rip_check(); } g_redraw = 2; }
@@ -3761,13 +3764,17 @@ static int rip_disc_inner(int fresh, int autorip)
 	write_riplog();
 	logf("done: %s errs=%u", g_base, g_readerrs);
 	snprintf(g_done_msg, sizeof(g_done_msg), "%s", msg);
-	{   // the card keeps one line about the result: Redump (or the check) and the time
+	{   // the card: the Redump line says how the image compared, the result line how the rip went
 		Card &k = g_cards[cur_card()];
+		k.rd_done[0] = 0;
+		if (g_rd_result == 1) { snprintf(k.rd_done, sizeof(k.rd_done), T(STR_RD_CARD_OK), g_rd_result_name); k.rd_done_col = 0x7CE0A0; }
+		else if (g_rd_result == 0) { snprintf(k.rd_done, sizeof(k.rd_done), "%s", T(STR_RD_NOMATCH)); k.rd_done_col = 0xFF8A80; }
 		char d[16];
 		fmt_dur(d, sizeof(d), (long)(time(NULL) - g_rip_t0));
-		const char *first = g_nres ? g_res[0].text : "";
-		snprintf(k.res, sizeof(k.res), T(STR_CARD_DONE), first, d);
-		k.res_col = g_nres ? g_res[0].col : 0x7CE0A0;
+		snprintf(k.res, sizeof(k.res), T(STR_CARD_DONE), d);
+		if (g_readerrs) snprintf(k.res + strlen(k.res), sizeof(k.res) - strlen(k.res), T(STR_CARD_UNREADABLE), g_readerrs);
+		if (g_recovered) snprintf(k.res + strlen(k.res), sizeof(k.res) - strlen(k.res), T(STR_CARD_FIXED), g_recovered);
+		k.res_col = g_readerrs || g_badsect ? 0xF0C060 : 0x7CE0A0;
 		k.res_failed = 0;
 	}
 	g_state = ST_HOME;
@@ -3790,6 +3797,7 @@ static void rip_job_thread(void *arg)
 	int fresh = (int)((long)arg & 0xFF);
 	Card &k = g_cards[t_card];
 	k.res[0] = 0;
+	k.rd_done[0] = 0;
 	k.eta_t0 = 0;
 	if (fresh) usleep(2000 * 1000);   // give the drive a moment to spin up
 	g_done = 0; g_total = 0; g_readpos = 0; g_phase = 0; g_pass2_total = 0;
