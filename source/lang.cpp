@@ -195,6 +195,11 @@ static const char *en[STR_COUNT] = {
 	"Drive settings",
 	"Standard (%s)",
 	"All standard",
+	"Done: %s · %s",
+	"Cancel rip",
+	"Cancel the rip of %s? The unfinished file is removed.",
+	"Rips are running. Cancel them and exit?",
+	"A repair uses the whole screen: wait until the rips are done.",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -386,6 +391,11 @@ static const char *sv[STR_COUNT] = {
 	"Läsarinställningar",
 	"Standard (%s)",
 	"Allt standard",
+	"Klar: %s · %s",
+	"Avbryt rippning",
+	"Avbryta rippningen av %s? Den ofullständiga filen tas bort.",
+	"Rippningar pågår. Avbryta dem och avsluta?",
+	"En lagning använder hela skärmen: vänta tills rippningarna är klara.",
 };
 
 static const char **table = en;

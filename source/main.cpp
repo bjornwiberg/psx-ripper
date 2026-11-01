@@ -35,24 +35,19 @@
 #include "webhook.h"
 #include "vfs.h"
 #include "usbodd.h"
+#include <sys/mutex.h>
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
 // Output locations; the mount test redirects both so a mounted image is never overwritten
-static const char *OUT_DIR = "/dev_hdd0/PSXISO";
 static const char *SBI_DIR = "/dev_hdd0/tmp/sbi";
 static int g_mounttest = 0;   // flag psxrip.mounttest: rip the image Cobra has mounted (development aid)
 
 // ---------------------------------------------------------------- settings (saved in CFG_PATH)
 #define CFG_PATH "/dev_hdd0/tmp/psxrip.cfg"
 static char g_outdir[64] = "/dev_hdd0/PSXISO";
-static int g_retries = 4;          // attempts per READ CD before falling back / giving up
-static int g_speed = 0;            // 0 = max, 1 = 8x, 2 = 4x, 3 = 2x
-static int g_eject = 1;            // eject the disc after a successful rip
-static int g_autostart = 0;        // rip an inserted disc without the confirmation
 static int g_redump = RD_OFF;      // verification against Redump: off, online or local copy
 static int g_remote = 0;           // remote view (web server on port 8090)
 enum { CHECK_OFF, CHECK_ON, CHECK_BITPERFECT };
-static int g_check = CHECK_BITPERFECT;   // sector check: off, EDC/ECC + re-read, + secure read and confirmation
 static int g_webhook_on = 0;       // send webhooks
 static char g_webhook[512] = "";   // webhook address (http://...); may contain a secret id, never logged
 static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
@@ -60,13 +55,11 @@ static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
 static char g_webhook_hdr[WH_HEADERS][256];    // extra headers "Name: value" (often a secret: never logged or shown)
 static int g_webhook_hdr_on = 0;               // send them (off keeps them stored)
 enum { SRC_BD, SRC_USB };
-static volatile int g_usb = 0;                 // usbodd drive number of the USB drive in use
-static volatile int g_use = SRC_BD;            // the drive the drive commands go to (set by select_card)
 static char g_outdir_usb[8][64];               // destination per USB drive, by its port ("" = the hard disk)
 // Drive settings: the standard (Settings, START) and a drive's own values (SELECT on its card),
 // where -1 means "standard".
 struct DriveCfg { int set, retries, speed, eject, autostart, check; };
-static DriveCfg g_std;                         // the standard, from the old keys retries=, speed=, ...
+static DriveCfg g_std = {1, 4, 0, 1, 0, CHECK_BITPERFECT};   // the standard, from the old keys retries=, speed=, ...
 static DriveCfg g_bdcfg = {0, -1, -1, -1, -1, -1};   // the PS3 drive's own values (drive_bd=)
 static DriveCfg g_usbcfg[8];                   // a USB drive's own values, by its port (drive_usbN=)
 static int std_or(int v, int std) { return v >= 0 ? v : std; }
@@ -110,6 +103,11 @@ struct Card {
 	char outdir[64];                  // chosen destination
 	char dest[64];                    // used: the chosen one, or the hard disk while it is out
 	int retries, speed, eject, autostart, check;   // the drive's settings
+	volatile int job;                 // a rip runs on this card (its own thread)
+	char res[200];                    // last rip: one line, coloured res_col
+	uint32_t res_col;
+	uint64_t eta_t0, eta_tw; uint32_t eta_pw; double eta_rate;   // time left of the running rip
+	int eta_phase;
 };
 static Card g_cards[NCARDS];
 
@@ -136,13 +134,13 @@ static int cfg_load()
 		line[strcspn(line, "\r\n")] = 0;
 		if (!strncmp(line, "outdir=", 7) && (line[7] == '/' || !strncmp(line + 7, "exfat", 5)))   // also exFAT drives
 			snprintf(g_outdir, sizeof(g_outdir), "%s", line + 7);
-		else if (!strncmp(line, "retries=", 8)) { int r = atoi(line + 8); if (r >= 1 && r <= 64) g_retries = r; }
-		else if (!strncmp(line, "speed=", 6)) { int v = atoi(line + 6); if (v >= 0 && v <= 3) g_speed = v; }
-		else if (!strncmp(line, "eject=", 6)) g_eject = atoi(line + 6) ? 1 : 0;
-		else if (!strncmp(line, "autostart=", 10)) g_autostart = atoi(line + 10) ? 1 : 0;
+		else if (!strncmp(line, "retries=", 8)) { int r = atoi(line + 8); if (r >= 1 && r <= 64) g_std.retries = r; }
+		else if (!strncmp(line, "speed=", 6)) { int v = atoi(line + 6); if (v >= 0 && v <= 3) g_std.speed = v; }
+		else if (!strncmp(line, "eject=", 6)) g_std.eject = atoi(line + 6) ? 1 : 0;
+		else if (!strncmp(line, "autostart=", 10)) g_std.autostart = atoi(line + 10) ? 1 : 0;
 		else if (!strncmp(line, "redump=", 7)) { int v = atoi(line + 7); if (v >= RD_OFF && v <= RD_LOCAL) g_redump = v; }
 		else if (!strncmp(line, "remote=", 7)) g_remote = atoi(line + 7) ? 1 : 0;
-		else if (!strncmp(line, "check=", 6)) { int v = atoi(line + 6); if (v >= CHECK_OFF && v <= CHECK_BITPERFECT) g_check = v; }
+		else if (!strncmp(line, "check=", 6)) { int v = atoi(line + 6); if (v >= CHECK_OFF && v <= CHECK_BITPERFECT) g_std.check = v; }
 		else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
 		else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
 		else if (!strncmp(line, "webhook_events=", 15)) g_webhook_mask = atoi(line + 15) & ((1 << WH_COUNT) - 1);
@@ -194,11 +192,233 @@ static void cfg_save()
 #define MAX_TRACKS 99
 #define MAX_LC     512             // max mismatching Q sectors we keep
 
+// ---------------------------------------------------------------- per-drive context
+// Everything one identification or rip of one drive uses lives in its context: a card's drive can
+// rip while another one identifies or rips. A thread working for a card sets t_card; the UI and
+// other threads use the card the screen acts on (g_card). The names below are macros for the
+// context of the current thread, so the ripping code reads as before.
+#define SECT_Q (RAW_SIZE + SUBQ_SIZE)
+#define MAX_HARD 8192
+#define MAX_SUSPECT 512
+#define NEV 5
+enum { ST_HOME, ST_RIPPING };
+struct Track {
+	int num;
+	int ctrl;        // 0x4 bit set = data
+	uint32_t lba;
+};
+struct LcEntry { uint32_t lba; uint8_t q[10]; };
+struct RipEvent { char text[120]; uint32_t col; };
+struct ResLine { char text[240]; uint32_t col; };
+struct Ctx {
+	// the drive
+	int g_fd;
+	uint32_t g_sc;                 // atapi syscall that worked
+	uint8_t *g_cmdbuf;             // aligned command transfer buffer
+	uint8_t *g_sec;                // 128-byte aligned sector buffer
+	int g_use, g_usb;              // SRC_BD / SRC_USB, usbodd drive number
+	int g_read_mode;               // 0 = syscall 604/6 args, 1 = syscall 616/7 args
+	uint8_t g_er_page[12];
+	int g_er_valid;
+	int g_retries, g_speed, g_eject, g_autostart, g_check;   // the drive's settings (standard or its own)
+	const char *OUT_DIR;           // destination
+	// the disc
+	Track g_tracks[MAX_TRACKS + 1];
+	int g_ntracks;
+	uint32_t g_leadout;
+	char g_serial[16];             // "SLUS_005.53"
+	char g_volid[33];
+	char g_name[128];              // title (or volume id)
+	char g_base[256];              // "/dev_hdd0/PSXISO/NAME [SERIAL]"
+	// Q and LibCrypt
+	LcEntry g_lc[MAX_LC];
+	int g_nlc;
+	uint32_t g_qzero, g_qchecked;
+	int g_is_pal;                  // LibCrypt is only checked on PAL discs
+	int g_qoff, g_qcal_done;
+	int g_qhist[5];                // delta -2..+2
+	// the rip
+	volatile uint32_t g_done, g_total;
+	volatile uint32_t g_readpos;   // reader position inside a slow (damaged) chunk
+	volatile uint32_t g_rr_lba;
+	volatile int g_rr_try, g_rr_max;
+	uint32_t g_hard[MAX_HARD];
+	uint32_t g_nhard;
+	volatile uint32_t g_pass2_total, g_pass2_done;
+	uint32_t g_suspect[MAX_SUSPECT];
+	uint8_t *g_suspect_data;       // MAX_SUSPECT * RAW_SIZE
+	uint32_t g_nsuspect;
+	uint8_t g_suspect_ok[MAX_SUSPECT];   // confirmed in the second pass
+	volatile uint32_t g_confirmed, g_changed;
+	volatile int g_abort, g_finished, g_result;
+	volatile uint32_t g_readerrs;
+	Md5 g_md5[MAX_TRACKS + 1];
+	char g_track_md5[MAX_TRACKS + 1][33];
+	uint8_t g_track_md5bin[MAX_TRACKS + 1][16];
+	volatile uint32_t g_tstart[MAX_TRACKS + 1];
+	uint8_t *g_bufs[2];
+	volatile uint32_t g_buf_len[2];   // sectors in buffer, 0 = empty
+	volatile uint32_t g_buf_end[2];   // lba after the last sector in buffer
+	volatile int g_reader_done, g_write_failed;
+	VFile *g_out;
+	volatile uint32_t g_badsect, g_recovered;
+	volatile uint32_t g_unstable, g_secure;   // sectors that read differently / sectors compared
+	uint8_t *g_vbuf;               // second read of a run, CHUNK sectors
+	uint32_t *g_uv_lba;
+	uint64_t *g_uv_hash;
+	uint32_t g_nuv;
+	volatile int g_phase;          // 0 reading, 1 verify pass, 2 second pass, 3 finishing
+	RipEvent g_ev[NEV];
+	volatile int g_nev, g_ev_seq;
+	// Redump
+	RdDisc g_rd_discs[4];          // online results, reused to verify the rip
+	int g_rd_ndiscs;               // -1 = no online lookup for the current disc
+	char g_rd_serial[16];          // serial the online results belong to
+	char g_id_serial[16];
+	uint64_t g_id_total;
+	int g_id_ntracks;
+	int g_rd_result;               // last verification: 1 verified, 0 no match, -1 unchecked, -2 not found, -3 off
+	char g_rd_result_name[RD_NAME];
+	// state and result
+	char g_state_title[128], g_state_serial[16];
+	volatile int g_state;          // ST_HOME / ST_RIPPING
+	time_t g_rip_t0;
+	char g_done_msg[768];          // summary of the last successful rip
+	ResLine g_res[8];
+	int g_nres;
+	char g_res_title[160], g_res_path[300];
+	// scratch buffers (were function statics)
+	uint8_t er_b[64] __attribute__((aligned(128)));
+	uint8_t er_w[20] __attribute__((aligned(128)));
+	uint8_t ecc_t[RAW_SIZE];
+	uint8_t cr_prev[SECT_Q] __attribute__((aligned(128)));
+	uint8_t vp_sec[RAW_SIZE] __attribute__((aligned(128)));
+	uint8_t sp_sec[RAW_SIZE] __attribute__((aligned(128)));
+	uint8_t rt_dead[CHUNK];
+	uint32_t rt_last_bad;
+	char log_buf[65536];
+};
+static Ctx g_ctx[NCARDS];
+static __thread int t_card = -1;   // card the current thread works for, -1 = the one the screen acts on
+static int g_parallel = 1;          // thread-local storage works: cards may rip at the same time
+static inline int cur_card() { return t_card >= 0 ? t_card : g_card; }
+static void ctx_init(int c)
+{
+	Ctx &x = g_ctx[c];
+	x.g_fd = -1; x.g_sc = 616; x.g_rd_ndiscs = -1; x.g_rd_result = -3; x.g_state = ST_HOME;
+	x.g_use = c ? SRC_USB : SRC_BD; x.g_usb = c ? c - 1 : 0;
+	x.OUT_DIR = "/dev_hdd0/PSXISO";
+	x.g_cmdbuf = (uint8_t *)memalign(128, 4096);
+	x.g_sec = (uint8_t *)memalign(128, 4096);
+	x.g_retries = 4; x.g_eject = 1; x.g_check = CHECK_BITPERFECT;
+}
+#define CX (g_ctx[cur_card()])
+#define g_fd (CX.g_fd)
+#define g_sc (CX.g_sc)
+#define g_cmdbuf (CX.g_cmdbuf)
+#define g_sec (CX.g_sec)
+#define g_use (CX.g_use)
+#define g_usb (CX.g_usb)
+#define g_read_mode (CX.g_read_mode)
+#define g_er_page (CX.g_er_page)
+#define g_er_valid (CX.g_er_valid)
+#define g_retries (CX.g_retries)
+#define g_speed (CX.g_speed)
+#define g_eject (CX.g_eject)
+#define g_autostart (CX.g_autostart)
+#define g_check (CX.g_check)
+#define OUT_DIR (CX.OUT_DIR)
+#define g_tracks (CX.g_tracks)
+#define g_ntracks (CX.g_ntracks)
+#define g_leadout (CX.g_leadout)
+#define g_serial (CX.g_serial)
+#define g_volid (CX.g_volid)
+#define g_name (CX.g_name)
+#define g_base (CX.g_base)
+#define g_lc (CX.g_lc)
+#define g_nlc (CX.g_nlc)
+#define g_qzero (CX.g_qzero)
+#define g_qchecked (CX.g_qchecked)
+#define g_is_pal (CX.g_is_pal)
+#define g_qoff (CX.g_qoff)
+#define g_qcal_done (CX.g_qcal_done)
+#define g_qhist (CX.g_qhist)
+#define g_done (CX.g_done)
+#define g_total (CX.g_total)
+#define g_readpos (CX.g_readpos)
+#define g_rr_lba (CX.g_rr_lba)
+#define g_rr_try (CX.g_rr_try)
+#define g_rr_max (CX.g_rr_max)
+#define g_hard (CX.g_hard)
+#define g_nhard (CX.g_nhard)
+#define g_pass2_total (CX.g_pass2_total)
+#define g_pass2_done (CX.g_pass2_done)
+#define g_suspect (CX.g_suspect)
+#define g_suspect_data (CX.g_suspect_data)
+#define g_nsuspect (CX.g_nsuspect)
+#define g_suspect_ok (CX.g_suspect_ok)
+#define g_confirmed (CX.g_confirmed)
+#define g_changed (CX.g_changed)
+#define g_abort (CX.g_abort)
+#define g_finished (CX.g_finished)
+#define g_result (CX.g_result)
+#define g_readerrs (CX.g_readerrs)
+#define g_md5 (CX.g_md5)
+#define g_track_md5 (CX.g_track_md5)
+#define g_track_md5bin (CX.g_track_md5bin)
+#define g_tstart (CX.g_tstart)
+#define g_bufs (CX.g_bufs)
+#define g_buf_len (CX.g_buf_len)
+#define g_buf_end (CX.g_buf_end)
+#define g_reader_done (CX.g_reader_done)
+#define g_write_failed (CX.g_write_failed)
+#define g_out (CX.g_out)
+#define g_badsect (CX.g_badsect)
+#define g_recovered (CX.g_recovered)
+#define g_unstable (CX.g_unstable)
+#define g_secure (CX.g_secure)
+#define g_vbuf (CX.g_vbuf)
+#define g_uv_lba (CX.g_uv_lba)
+#define g_uv_hash (CX.g_uv_hash)
+#define g_nuv (CX.g_nuv)
+#define g_phase (CX.g_phase)
+#define g_ev (CX.g_ev)
+#define g_nev (CX.g_nev)
+#define g_ev_seq (CX.g_ev_seq)
+#define g_rd_discs (CX.g_rd_discs)
+#define g_rd_ndiscs (CX.g_rd_ndiscs)
+#define g_rd_serial (CX.g_rd_serial)
+#define g_id_serial (CX.g_id_serial)
+#define g_id_total (CX.g_id_total)
+#define g_id_ntracks (CX.g_id_ntracks)
+#define g_rd_result (CX.g_rd_result)
+#define g_rd_result_name (CX.g_rd_result_name)
+#define g_state_title (CX.g_state_title)
+#define g_state_serial (CX.g_state_serial)
+#define g_state (CX.g_state)
+#define g_rip_t0 (CX.g_rip_t0)
+#define g_done_msg (CX.g_done_msg)
+#define g_res (CX.g_res)
+#define g_nres (CX.g_nres)
+#define g_res_title (CX.g_res_title)
+#define g_res_path (CX.g_res_path)
+
+// Card c's context from any thread: the field names are macros for the current thread's context,
+// so these switch the thread's card for a moment.
+struct OnCard { int keep; OnCard(int c) : keep(t_card) { t_card = c; } ~OnCard() { t_card = keep; } };
+static int ctx_ripping(int c) { OnCard o(c); return g_state == ST_RIPPING; }
+static int any_ripping() { for (int c = 0; c < NCARDS; c++) if (ctx_ripping(c)) return 1; return 0; }
+
+#define disc_inserted (g_cards[cur_card()].inserted)
+#define disc_present (g_cards[cur_card()].present)
+
+
 // ---------------------------------------------------------------- logging
 static void logf(const char *fmt, ...)
 {
 	FILE *f = fopen(LOG_PATH, "a");
 	if (!f) return;
+	if (t_card >= 0) fprintf(f, "[%d] ", t_card);   // a card's thread: which drive
 	va_list ap;
 	va_start(ap, fmt);
 	vfprintf(f, fmt, ap);
@@ -230,8 +450,6 @@ static void sysutil_callback(u64 status, u64 param, void *usrdata)
 	if (status >= SYSUTIL_OSK_LOADED && status <= SYSUTIL_OSK_INPUT_CANCELED) g_osk_event = (int)status;
 }
 
-#define disc_inserted (g_cards[g_card].inserted)
-#define disc_present (g_cards[g_card].present)
 // the system's disc callbacks are about its own drive only
 static void disc_eject_cb(void) { g_cards[0].inserted = 0; g_cards[0].present = 0; }
 static void disc_insert_cb(u32 type, char *title) { g_cards[0].inserted = 1; g_cards[0].present = 1; }
@@ -325,10 +543,6 @@ static void tell(const char *msg)
 }
 
 // ---------------------------------------------------------------- drive
-static int g_fd = -1;
-static uint32_t g_sc = 616;        // atapi syscall that worked
-static uint8_t *g_cmdbuf;          // aligned command transfer buffer
-static uint8_t *g_sec;   // 128-byte aligned, allocated in main()
 
 // ATAPI packets are SCSI commands: with the USB drive selected they go over our own USB driver.
 // The SuperDrive is an ATAPI drive behind a USB bridge: it only answers 12-byte packets.
@@ -576,12 +790,10 @@ static uint64_t now_ms()
 // Read/write error recovery mode page (0x01). Its read retry count decides how long the drive
 // itself keeps retrying a bad sector before it reports an error. The first pass sets it low so a
 // scratch costs little time; the original value is restored for the second pass and afterwards.
-static uint8_t g_er_page[12];
-static int g_er_valid = 0;
 
 static int er_read(uint8_t page[12])
 {
-	static uint8_t b[64] __attribute__((aligned(128)));
+	uint8_t (&b)[64] = CX.er_b;
 	uint8_t cdb[12] = {0x5A, 0x08, 0x01, 0, 0, 0, 0, 0, sizeof(b), 0, 0, 0};   // MODE SENSE(10), DBD, page 1
 	memset(b, 0, sizeof(b));
 	int r = atapi(cdb, b, sizeof(b), ATAPI_PIO_DATA_IN_PROTO);
@@ -595,7 +807,7 @@ static int er_read(uint8_t page[12])
 
 static int er_write(const uint8_t page[12])
 {
-	static uint8_t b[20] __attribute__((aligned(128)));
+	uint8_t (&b)[20] = CX.er_w;
 	memset(b, 0, sizeof(b));
 	memcpy(b + 8, page, 12);
 	b[8] &= 0x3F;   // PS bit must be 0 in MODE SELECT
@@ -620,14 +832,6 @@ static void er_set_retries(int n)   // n < 0: restore the original page
 	logf("set read retries %d -> 0x%x (now %d)", n >= 0 ? n : g_er_page[3], r, rr ? -1 : chk[3]);
 }
 
-struct Track {
-	int num;
-	int ctrl;        // 0x4 bit set = data
-	uint32_t lba;
-};
-static Track g_tracks[MAX_TRACKS + 1];
-static int g_ntracks = 0;
-static uint32_t g_leadout = 0;
 
 static uint32_t be32(const uint8_t *p) { return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; }
 
@@ -668,8 +872,6 @@ static int read_toc()
 
 // Reads `count` raw sectors, each 2352 bytes followed by 16 bytes formatted Q,
 // the same way IRISMAN does (syscall 604, one ATAPI block per sector, DMA).
-#define SECT_Q (RAW_SIZE + SUBQ_SIZE)
-static int g_read_mode = 0;   // 0 = syscall 604/6 args, 1 = syscall 616/7 args
 
 // READ CD with a chosen subchannel selection: 0 = none, 1 = raw P-W (96 bytes), 2 = formatted Q (16 bytes)
 static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, uint32_t blk)
@@ -820,8 +1022,6 @@ static int find_file(const uint8_t *dir, uint32_t dirlen, const char *name, uint
 	return -1;
 }
 
-static char g_serial[16];   // "SLUS_005.53"
-static char g_volid[33];
 
 static void detect_disc_id()
 {
@@ -975,10 +1175,6 @@ static void lba_to_msf(uint32_t lba, uint8_t *m)
 	m[2] = bcd(lba % 75);
 }
 
-struct LcEntry { uint32_t lba; uint8_t q[10]; };
-static LcEntry g_lc[MAX_LC];
-static int g_nlc = 0;
-static uint32_t g_qzero = 0, g_qchecked = 0;
 
 static int bcd2(uint8_t b) { return (b >> 4) * 10 + (b & 0x0F); }
 
@@ -988,7 +1184,6 @@ static int bcd2(uint8_t b) { return (b >> 4) * 10 + (b & 0x0F); }
 #define LC_LBA_MIN 13000
 #define LC_LBA_MAX 45000
 
-static int g_is_pal = 0;    // LibCrypt is only checked on PAL discs
 
 // Sectors whose Q the ripper uses: the calibration at the start, the LibCrypt area of a PAL disc and
 // the 10 s before each later track (pregap starts).
@@ -1003,8 +1198,6 @@ static int q_needed(uint32_t lba, uint32_t count)
 	}
 	return 0;
 }
-static int g_qoff = 0, g_qcal_done = 0;
-static int g_qhist[5];   // delta -2..+2
 
 static void build_q(uint32_t lba, uint8_t *exp)
 {
@@ -1094,17 +1287,9 @@ static int write_sbi(const char *path)
 }
 
 // ---------------------------------------------------------------- rip worker
-static volatile uint32_t g_done = 0, g_total = 0;
-static volatile uint32_t g_readpos = 0;   // reader position inside a slow (damaged) chunk
 // sector being re-read right now (shown on the progress screen); g_rr_max = 0 when not re-reading
-static volatile uint32_t g_rr_lba = 0;
-static volatile int g_rr_try = 0, g_rr_max = 0;
 // Sectors that failed in the first pass (unreadable, or bit 31 set: wrong EDC). They get a second
 // pass at low speed once the whole disc has been read, the way data recovery tools work.
-#define MAX_HARD 8192
-static uint32_t g_hard[MAX_HARD];
-static uint32_t g_nhard = 0;
-static volatile uint32_t g_pass2_total = 0, g_pass2_done = 0;
 
 static void note_hard(uint32_t lba, int edc_bad)
 {
@@ -1114,13 +1299,7 @@ static void note_hard(uint32_t lba, int edc_bad)
 // Sectors that were wrong at first but fixed in the first pass (EDC fixed by a re-read, or two
 // reads that disagreed): they are confirmed in the second pass. Their data is kept to see whether
 // the confirmation changes them.
-#define MAX_SUSPECT 512
-static uint32_t g_suspect[MAX_SUSPECT];
-static uint8_t *g_suspect_data;   // MAX_SUSPECT * RAW_SIZE
-static uint32_t g_nsuspect = 0;
-static uint8_t g_suspect_ok[MAX_SUSPECT];   // confirmed in the second pass
 #define HARD_RESOLVED 0x40000000u          // g_hard flag: read correctly in the second pass
-static volatile uint32_t g_confirmed = 0, g_changed = 0;
 
 static void note_suspect(uint32_t lba, const uint8_t *sector)
 {
@@ -1132,12 +1311,9 @@ static void note_suspect(uint32_t lba, const uint8_t *sector)
 	memcpy(g_suspect_data + g_nsuspect * RAW_SIZE, sector, RAW_SIZE);
 	g_nsuspect++;
 }
-static volatile int g_abort = 0, g_finished = 0, g_result = 0;
-static volatile uint32_t g_readerrs = 0;
 static int g_ripped = 0;    // discs ripped this session
 static int g_headless = 0;  // remote test mode: no dialogs, no eject, exit after one rip
 #define AUTO_FLAG "/dev_hdd0/tmp/psxrip.auto"
-static char g_base[256];      // "/dev_hdd0/PSXISO/NAME [SERIAL]"
 
 static int track_is_audio(uint32_t lba)
 {
@@ -1149,13 +1325,9 @@ static int track_is_audio(uint32_t lba)
 // Double buffering: the reader thread fills one buffer from the drive while the writer
 // thread flushes the other to the hard disk, so drive and disk work in parallel.
 // MD5 per track, computed by the writer thread (Redump hashes each track separately)
-static Md5 g_md5[MAX_TRACKS + 1];
-static char g_track_md5[MAX_TRACKS + 1][33];
-static uint8_t g_track_md5bin[MAX_TRACKS + 1][16];
 // First sector of each track as Redump splits a disc: tracks after the first start at their
 // pregap (INDEX 00), not at INDEX 01 from the TOC. Starts with the usual 2 s pregap after a data
 // track and is corrected from the Q subchannel (absolute time + track number) while reading.
-static volatile uint32_t g_tstart[MAX_TRACKS + 1];
 
 static void tstart_init()
 {
@@ -1180,16 +1352,10 @@ static void tstart_from_q(const uint8_t *q)
 	}
 }
 
-static uint8_t *g_bufs[2];
-static volatile uint32_t g_buf_len[2];   // sectors in buffer, 0 = empty
-static volatile uint32_t g_buf_end[2];   // lba after the last sector in buffer
-static volatile int g_reader_done = 0, g_write_failed = 0;
-static VFile *g_out;
 
 // Sector check (data track 1): sync pattern, header address and EDC. The drive can hand out a
 // sector with uncorrected errors and still report success, so the reader re-reads such sectors.
 static uint32_t g_edc_tab[256];
-static volatile uint32_t g_badsect = 0, g_recovered = 0;
 
 static void edc_init()
 {
@@ -1241,7 +1407,7 @@ static int ecc_part_ok(const uint8_t *src, int major_count, int minor_count, int
 
 static int ecc_ok(const uint8_t *s, int mode2)
 {
-	static uint8_t t[RAW_SIZE];
+	uint8_t (&t)[RAW_SIZE] = CX.ecc_t;
 	const uint8_t *p = s;
 	if (mode2) { memcpy(t, s, RAW_SIZE); memset(t + 12, 0, 4); p = t; }   // mode 2: header counts as zero
 	return ecc_part_ok(p + 0xC, 86, 24, 2, 86, p + 0x81C) && ecc_part_ok(p + 0xC, 52, 43, 86, 88, p + 0x8C8);
@@ -1272,21 +1438,11 @@ static int unverifiable(const uint8_t *s)
 {
 	return s[15] == 2 && (s[18] & 0x20) && !(s[2348] | s[2349] | s[2350] | s[2351]);
 }
-static volatile uint32_t g_unstable = 0, g_secure = 0;   // sectors that read differently / sectors compared
-static uint8_t *g_vbuf;                                   // second read of a run, CHUNK sectors
 // The first pass only records a fingerprint of each sector without EDC; a verify pass after it
 // re-reads them in long runs at full speed (no seeking back and forth while ripping).
 #define MAX_UV (256 * 1024)
-static uint32_t *g_uv_lba;
-static uint64_t *g_uv_hash;
-static uint32_t g_nuv = 0;
-static volatile int g_phase = 0;   // 0 reading, 1 verify pass, 2 second pass
 
 // Recent events for the progress screen ("Sector 125454 fixed by re-reading"), newest last.
-#define NEV 5
-struct RipEvent { char text[120]; uint32_t col; };
-static RipEvent g_ev[NEV];
-static volatile int g_nev = 0, g_ev_seq = 0;
 static void rip_event(uint32_t col, StrId fmt, uint32_t lba, const char *why = NULL)
 {
 	if (g_nev == NEV) { memmove(g_ev, g_ev + 1, sizeof(RipEvent) * (NEV - 1)); g_nev--; }
@@ -1314,6 +1470,7 @@ static uint64_t fnv64(const uint8_t *p, int n)
 
 static void writer_thread(void *arg)
 {
+	t_card = (int)(long)arg;
 	for (int k = 0;; k ^= 1) {
 		while (!g_buf_len[k] && !(g_reader_done && !g_buf_len[k ^ 1] && !g_buf_len[k])) usleep(500);
 		if (!g_buf_len[k]) break;   // reader done and nothing left
@@ -1352,7 +1509,7 @@ static void set_cd_speed(int x)   // x = 0: maximum, otherwise the CD speed fact
 // one, the EDC is right); it is then written into the image. O stops the pass and keeps the image.
 static int confirm_read(uint32_t lba, int need_edc, int max_reads, uint8_t *out)
 {
-	static uint8_t prev[SECT_Q] __attribute__((aligned(128)));
+	uint8_t (&prev)[SECT_Q] = CX.cr_prev;
 	int streak = 0;
 	for (int t = 0; t < max_reads && !g_abort; t++) {
 		g_rr_try = t + 1;
@@ -1374,7 +1531,7 @@ static int verify_pass()
 	g_pass2_total = g_nuv; g_pass2_done = 0;
 	uint64_t t0 = now_ms();
 	int patched = 0, reads = g_retries * 3 + 3;
-	static uint8_t sec[RAW_SIZE] __attribute__((aligned(128)));
+	uint8_t (&sec)[RAW_SIZE] = CX.vp_sec;
 	for (uint32_t k = 0; k < g_nuv && !g_abort; ) {
 		uint32_t a = g_uv_lba[k], m = 1;   // sectors within one window of CHUNK, read as one run
 		while (k + m < g_nuv && g_uv_lba[k + m] - a < CHUNK) m++;
@@ -1417,7 +1574,7 @@ static int second_pass()
 	set_cd_speed(2);
 	uint32_t t1_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
 	int data1 = g_tracks[0].ctrl & 0x4, patched = 0, reads = g_retries * 3 + 3;
-	static uint8_t sec[RAW_SIZE] __attribute__((aligned(128)));
+	uint8_t (&sec)[RAW_SIZE] = CX.sp_sec;
 	time_t t0 = time(NULL);
 	for (uint32_t k = 0; k < total && !g_abort; k++) {
 		int suspect = k >= g_nhard;
@@ -1492,6 +1649,7 @@ static void md5_from_file(const char *path)
 
 static void rip_thread(void *arg)
 {
+	t_card = (int)(long)arg;
 	char path[300];
 	snprintf(path, sizeof(path), "%s.bin.part", g_base);   // renamed to .bin when complete
 	g_out = vf_open(path, "wb");
@@ -1513,7 +1671,7 @@ static void rip_thread(void *arg)
 	uint32_t data_end = (g_ntracks > 1) ? g_tracks[1].lba : g_leadout;  // LibCrypt lives in track 1
 
 	sys_ppu_thread_t wtid;
-	sysThreadCreate(&wtid, writer_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxwrite");
+	sysThreadCreate(&wtid, writer_thread, (void *)(long)cur_card(), 1000, 0x10000, THREAD_JOINABLE, (char *)"psxwrite");
 
 	struct stat st;
 	int single = stat("/dev_hdd0/tmp/psxrip_single", &st) == 0;   // test switch: disable overlap
@@ -1528,7 +1686,7 @@ static void rip_thread(void *arg)
 		if (lba + n > g_leadout) n = g_leadout - lba;
 
 		int ret = -1;
-		static uint8_t dead[CHUNK];   // sectors the drive could not read at all (zero-filled)
+		uint8_t (&dead)[CHUNK] = CX.rt_dead;   // sectors the drive could not read at all (zero-filled)
 		memset(dead, 0, n);
 		for (int tries = 0; tries < g_retries && ret; tries++) ret = read_cd(lba, n, buf);
 		if (ret) {
@@ -1536,7 +1694,7 @@ static void rip_thread(void *arg)
 			// sector. Inside a damaged area (an unreadable sector within the last 256) each sector
 			// gets one try, otherwise a scratch that hits once per revolution costs hours.
 			// Cancelling is checked per sector.
-			static uint32_t last_bad = 0;
+			uint32_t &last_bad = CX.rt_last_bad;
 			const uint32_t PIECE = 16;
 			for (uint32_t i0 = 0; i0 < n; i0 += PIECE) {
 				uint32_t m = n - i0 < PIECE ? n - i0 : PIECE;
@@ -1858,7 +2016,7 @@ static uint64_t dest_free_mb(const char *dir)
 }
 
 // Does the identified disc fit at the destination? (image + some room for cue/md5/log/sbi)
-#define g_space_short (g_cards[g_card].space_short)   // MB missing, 0 = fits or unknown
+#define g_space_short (g_cards[cur_card()].space_short)   // MB missing, 0 = fits or unknown
 static void space_check(uint32_t disc_mb)
 {
 	uint64_t fr = dest_free_mb(OUT_DIR);
@@ -1909,16 +2067,16 @@ static void next_target(char *outdir, int dir)
 }
 
 // ---------------------------------------------------------------- disc identification for the home screen
-static char g_name[128];   // title (or volume id) of the disc in the drive
 static int prepare_disc(int *err, int *code);
-#define g_disc_state (g_cards[g_card].state)
+#define g_disc_state (g_cards[cur_card()].state)
 static volatile int g_ident_busy = 0;
+static volatile int g_ident_card = -1;   // card being identified
 static volatile int g_repairing = 0;   // a repair reads the drive
-#define g_disc_title (g_cards[g_card].title)
-#define g_disc_serial (g_cards[g_card].serial)
-#define g_disc_mb (g_cards[g_card].mb)
-#define g_repair_n (g_cards[g_card].repair_n)   // sectors a previous rip of this disc still has wrong (from its log)
-#define g_prev_rip (g_cards[g_card].prev_rip)   // the destination already has <name>.bin for this disc
+#define g_disc_title (g_cards[cur_card()].title)
+#define g_disc_serial (g_cards[cur_card()].serial)
+#define g_disc_mb (g_cards[cur_card()].mb)
+#define g_repair_n (g_cards[cur_card()].repair_n)   // sectors a previous rip of this disc still has wrong (from its log)
+#define g_prev_rip (g_cards[cur_card()].prev_rip)   // the destination already has <name>.bin for this disc
 
 // Counts the sectors in <g_base>.log that are still wrong (unreadable, bad, unconfirmed).
 static int riplog_open_count()
@@ -1930,7 +2088,7 @@ static int riplog_open_count()
 	snprintf(path, sizeof(path), "%s.log", g_base);
 	VFile *f = vf_open(path, "rb");
 	if (!f) return 0;
-	static char buf[65536];
+	char (&buf)[65536] = CX.log_buf;
 	int n = (int)vf_read(f, buf, sizeof(buf) - 1), cnt = 0;
 	vf_close(f);
 	buf[n > 0 ? n : 0] = 0;
@@ -1941,13 +2099,11 @@ static int riplog_open_count()
 }
 
 // Redump lookup for the home screen; runs after identification (network only, no drive access).
-static volatile int g_rd_card = 0;     // card the Redump lookup running now is for
-#define g_disc_rd (g_cards[g_rd_card].rd)  // line shown on the home screen, empty = none
+#define g_disc_rd (g_cards[cur_card()].rd)  // line shown on the home screen, empty = none
 static volatile int g_rd_seq = 0;      // bumped when g_disc_rd changes
-static volatile int g_rd_busy = 0;     // a lookup is running (redump.cpp uses static buffers)
-static RdDisc g_rd_discs[4];           // online results, reused to verify the rip
-static int g_rd_ndiscs = -1;           // -1 = no online lookup for the current disc
-static char g_rd_serial[16];           // serial the online results belong to
+static sys_mutex_t g_rd_mx;            // one lookup at a time (redump.cpp uses static buffers); made in main()
+static void rd_lock() { sysMutexLock(g_rd_mx, 0); }
+static void rd_unlock() { sysMutexUnlock(g_rd_mx); }
 
 static void rd_set(const char *text)
 {
@@ -1968,8 +2124,7 @@ static void rd_guess_names(int hits, char (*names)[RD_NAME])
 // What Redump says about the identified disc: by size (local copy) or by serial (online).
 static void redump_lookup(const char *serial, uint64_t total, int ntracks)
 {
-	while (g_rd_busy) usleep(10000);
-	g_rd_busy = 1;
+	rd_lock();
 	g_rd_ndiscs = -1;
 	if (g_redump == RD_LOCAL) {
 		char names[1][RD_NAME];
@@ -1990,15 +2145,13 @@ static void redump_lookup(const char *serial, uint64_t total, int ntracks)
 		}
 		snprintf(g_rd_serial, sizeof(g_rd_serial), "%s", serial);
 	}
-	g_rd_busy = 0;
+	rd_unlock();
 }
 
 // Re-run the lookup for the disc already shown (the Redump setting was changed).
-static char g_id_serial[16];
-static uint64_t g_id_total;
-static int g_id_ntracks;
 static void lookup_thread(void *arg)
 {
+	t_card = (int)(long)arg;
 	rd_set("");
 	if (g_redump != RD_OFF) redump_lookup(g_id_serial, g_id_total, g_id_ntracks);
 	sysThreadExit(0);
@@ -2006,30 +2159,25 @@ static void lookup_thread(void *arg)
 
 static void lookup_start()
 {
-	g_rd_card = g_card;
 	sys_ppu_thread_t t;
-	sysThreadCreate(&t, lookup_thread, NULL, 1000, 0x10000, 0, (char *)"psxlookup");
+	sysThreadCreate(&t, lookup_thread, (void *)(long)cur_card(), 1000, 0x10000, 0, (char *)"psxlookup");
 }
 
 // Compares the track MD5s of the finished rip with Redump. Fills `out` with the result line.
-static int g_rd_result = -3;            // last verification: 1 verified, 0 no match, -1 unchecked, -2 not found, -3 off
-static char g_rd_result_name[RD_NAME];
 static void redump_verify(char *out, size_t n)
 {
 	char name[RD_NAME] = "";
 	int r;   // 1 = verified, 0 = no match, -1 = could not check, -2 = serial unknown to Redump
-	while (g_rd_busy) usleep(10000);
+	rd_lock();
 	if (g_redump == RD_LOCAL) {
 		r = rd_local_verify(g_track_md5bin, g_ntracks, name, sizeof(name));
 	} else if (!g_serial[0]) {
 		r = -1;
 	} else {
-		g_rd_busy = 1;
 		if (g_rd_ndiscs < 0 || strcmp(g_rd_serial, g_serial)) {
 			g_rd_ndiscs = rd_online(g_serial, g_rd_discs, 4);
 			snprintf(g_rd_serial, sizeof(g_rd_serial), "%s", g_serial);
 		}
-		g_rd_busy = 0;
 		if (g_rd_ndiscs < 0) r = -1;
 		else if (g_rd_ndiscs == 0) r = -2;
 		else {
@@ -2042,6 +2190,7 @@ static void redump_verify(char *out, size_t n)
 			}
 		}
 	}
+	rd_unlock();
 	if (r == 1) snprintf(out, n, T(STR_RD_VERIFIED), name);
 	else if (r == 0) snprintf(out, n, "%s", T(STR_RD_NOMATCH));
 	else if (r == -2) snprintf(out, n, "%s", T(STR_RD_NOTFOUND));
@@ -2070,35 +2219,35 @@ static void prev_rip_check()
 }
 
 static void fire_event(const char *event);
-static char g_state_title[128], g_state_serial[16];
 static void identify_thread(void *arg)
 {
-	g_rd_card = g_card;
-	if ((long)arg) usleep(2000 * 1000);   // freshly inserted: let the drive spin up
+	t_card = (int)((long)arg >> 8);
+	long fresh = (long)arg & 0xFF;
+	if (fresh) usleep(2000 * 1000);   // freshly inserted: let the drive spin up
 	int err = 0, code = 0;
 	int r = prepare_disc(&err, &code);
 	if (r == 0) sys_storage_close(g_fd);
 	// Undo the lv1 patch straight away: if the app is then killed (webMAN exit, XMB quit) the
 	// hypervisor would stay patched and the next system storage operation (pkg install) hangs.
-	lv1_storage_unpatch();
+	if (g_use == SRC_BD) lv1_storage_unpatch();
 	rd_set("");
 	if (r == 0) {
 		snprintf(g_disc_title, sizeof(g_disc_title), "%s", g_name);
 		snprintf(g_disc_serial, sizeof(g_disc_serial), "%s", g_serial[0] ? g_serial : T(STR_UNKNOWN));
 		g_disc_mb = (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024));
 		prev_rip_check();
-		snprintf(g_cards[g_card].base, sizeof(g_cards[0].base), "%s", g_base);
+		snprintf(g_cards[cur_card()].base, sizeof(g_cards[0].base), "%s", g_base);
 		snprintf(g_state_title, sizeof(g_state_title), "%s", g_name);
 		snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
 		// only for a disc inserted while the app runs; a disc already in the drive at start is part
 		// of app_started, and the home screen identifying the same disc again sends nothing
-		if ((long)arg) fire_event("disc_identified");
+		if (fresh) fire_event("disc_identified");
 		if (g_repair_n) logf("previous rip has %d sector(s) to repair", g_repair_n);
 		__sync_synchronize();
 		g_disc_state = DISC_READY;
 	} else {
 		g_disc_state = (r == -2) ? DISC_NONE : DISC_ERROR;
-		if (r != -2 && (long)arg) {   // a disc was inserted but is not a readable PS1 disc
+		if (r != -2 && fresh) {   // a disc was inserted but is not a readable PS1 disc
 			g_state_title[0] = 0; g_state_serial[0] = 0;
 			fire_event("disc_not_identified");
 		}
@@ -2115,11 +2264,12 @@ static void identify_thread(void *arg)
 
 static void identify_start(int fresh)
 {
+	g_ident_card = cur_card();
 	if (g_ident_busy) return;
 	g_ident_busy = 1;
 	g_disc_state = DISC_READING;
 	sys_ppu_thread_t t;
-	sysThreadCreate(&t, identify_thread, (void *)(long)fresh, 1000, 0x10000, 0, (char *)"psxident");
+	sysThreadCreate(&t, identify_thread, (void *)(long)(fresh | cur_card() << 8), 1000, 0x10000, 0, (char *)"psxident");
 }
 
 // ---------------------------------------------------------------- own screens (home, settings)
@@ -2299,10 +2449,9 @@ static volatile uint32_t g_dl_done, g_dl_total;
 static volatile int g_dl_phase, g_dl_abort, g_dl_result, g_dl_finished;
 static void download_thread(void *arg)
 {
-	while (g_rd_busy) usleep(10000);
-	g_rd_busy = 1;
+	rd_lock();
 	g_dl_result = rd_download(&g_dl_done, &g_dl_total, &g_dl_phase, &g_dl_abort);
-	g_rd_busy = 0;
+	rd_unlock();
 	g_dl_finished = 1;
 	sysThreadExit(0);
 }
@@ -2837,6 +2986,11 @@ static void eject_disc()
 	g_disc_state = DISC_NONE;
 }
 
+static int card_busy(int c)
+{
+	return ctx_ripping(c) || g_cards[c].job || (g_ident_busy && g_ident_card == c) || (g_repairing && g_card == c);
+}
+
 // Makes card c the one the drive commands, OUT_DIR and the disc globals refer to. Only while idle.
 static void select_card(int c)
 {
@@ -2886,7 +3040,6 @@ static void usb_presence_thread(void *arg)
 	for (int i = 0; i < USBODD_DRIVES; i++) { was[i] = -1; since[i] = 0; }
 	while (!exit_requested) {
 		usleep(2000 * 1000);
-		int busy = g_state_busy();
 		for (int i = 0; i < USBODD_DRIVES; i++) {
 			Card &k = g_cards[1 + i];
 			if (!usbodd_attached(i)) {
@@ -2895,7 +3048,7 @@ static void usb_presence_thread(void *arg)
 				continue;
 			}
 			if (!since[i]) since[i] = now_ms();
-			if (busy && g_card == 1 + i) { was[i] = -1; continue; }   // in use: its own commands tell
+			if (card_busy(1 + i)) { was[i] = -1; continue; }   // in use: its own commands tell
 			if (!usbodd_name(i)[0]) {   // just connected: model, port and the destination chosen for that port
 				usbodd_identify(i);
 				int port = usbodd_port(i);
@@ -2924,10 +3077,9 @@ static void usb_presence_thread(void *arg)
 			if (was[i] != now) g_redraw = 2;
 			was[i] = now;
 		}
-		if (busy) continue;   // a rip may be writing to a destination: leave them be
 		for (int c = 0; c < NCARDS; c++) {
 			Card &k = g_cards[c];
-			if (!k.outdir[0]) continue;
+			if (!k.outdir[0] || card_busy(c)) continue;   // a rip writes there: leave it be
 			const char *dest = dest_available(k.outdir) ? k.outdir : HDD_DIR;
 			if (strcmp(dest, k.dest)) {
 				snprintf(k.dest, sizeof(k.dest), "%s", dest);
@@ -2949,45 +3101,80 @@ static int draw_card(int c, int y, int focused, int single)
 	int h = ls + lb + ls * 3 + lb / 2;
 	if (!single) ui_rect(left - ui_w() / 60, y - lb / 3, right - left + ui_w() / 30, h, focused ? 0x703D6FD9 : 0x30FFFFFF);
 	int st = k.state;
+	int ax = single ? cx : left;
+	UiAlign al = single ? UI_CENTER : UI_LEFT;
 	char drive[96];
 	source_name(c ? c - 1 : -1, drive, sizeof(drive));
 	int ly = y;
-	ui_text(UI_SMALL, single ? cx : left, ly, 0x8890A8, drive, (UiAlign)(single ? UI_CENTER : UI_LEFT));
+	ui_text(UI_SMALL, ax, ly, 0x8890A8, drive, al);
 	ly += ls;
-	if (st == DISC_READY) {
+	if (k.job || st == DISC_READY) {
 		char line[200];
 		snprintf(line, sizeof(line), "%s  ·  %s  ·  %u MB", k.title, k.serial, k.mb);
-		ui_text(UI_BODY, single ? cx : left, ly, 0xFFFFFF, line, (UiAlign)(single ? UI_CENTER : UI_LEFT));
+		ui_text(UI_BODY, ax, ly, 0xFFFFFF, line, al);
 	} else {
 		const char *msg = st == DISC_READING ? T(c ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
-		ui_text(UI_BODY, single ? cx : left, ly, 0xFFFFFF, msg, (UiAlign)(single ? UI_CENTER : UI_LEFT));
+		ui_text(UI_BODY, ax, ly, 0xFFFFFF, msg, al);
 	}
 	ly += lb;
-	int ax = single ? cx : left;
-	UiAlign al = single ? UI_CENTER : UI_LEFT;
-	if (st == DISC_READY && k.rd[0]) ui_text(UI_SMALL, ax, ly, 0x9AD0A8, k.rd, al);
-	ly += ls;
-	if (st == DISC_READY && k.prev_rip) {   // already ripped here: one line, "known errors" in yellow
-		char p2[96];
-		if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), k.repair_n);
-		else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
-		const char *p1 = T(STR_ALREADY_HERE);
-		int w1 = ui_text_width(UI_SMALL, p1), w2 = ui_text_width(UI_SMALL, p2), x0 = single ? (ui_w() - w1 - w2) / 2 : left;
-		ui_text(UI_SMALL, x0, ly, 0x8FA8D8, p1);
-		ui_text(UI_SMALL, x0 + w1, ly, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2);
-	} else if (st == DISC_READY && k.space_short) {   // will not fit (a re-rip replaces the old image)
-		char sl[200];
-		snprintf(sl, sizeof(sl), T(STR_NO_SPACE), k.mb, (unsigned)(k.mb + 2 - k.space_short));
-		ui_text(UI_SMALL, ax, ly, 0xFF8A80, sl, al);
+	if (k.job) {   // ripping: bar, percentage and time left; below it what the rip is doing
+		OnCard o(c);
+		uint32_t pos = g_readpos > g_done ? g_readpos : g_done, tot = g_total ? g_total : 1;
+		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / tot);
+		if (pct > 100) pct = 100;
+		int bw = (right - left) / 2, bh = ls / 2, bx = single ? cx - bw / 2 : left;
+		ui_rect(bx, ly + ls / 4, bw, bh, 0x50FFFFFF);
+		ui_rect(bx, ly + ls / 4, (int)((uint64_t)bw * pct / 100), bh, 0xFFC8E05A);
+		Eta e = {k.eta_t0, k.eta_tw, k.eta_pw, k.eta_rate};
+		if (!k.eta_t0 || g_phase != k.eta_phase) { uint64_t t0 = k.eta_t0; eta_start(&e); if (t0) e.t0 = t0; k.eta_phase = g_phase; }
+		char tl[96], pl[140];
+		if (g_pass2_total && g_phase) eta_line(&e, g_pass2_done, g_pass2_total, tl, sizeof(tl));
+		else eta_line(&e, pos, g_total, tl, sizeof(tl));
+		k.eta_t0 = e.t0; k.eta_tw = e.tw; k.eta_pw = e.pw; k.eta_rate = e.rate;
+		snprintf(pl, sizeof(pl), "%u %%  ·  %s", pct, tl);
+		ui_text(UI_SMALL, single ? cx : bx + bw + ui_w() / 60, single ? ly + ls : ly, 0xE8E8F0, pl, single ? UI_CENTER : UI_LEFT);
+		ly += ls;
+		char note[200] = "";
+		if (g_abort) snprintf(note, sizeof(note), "%s", T(STR_CANCELLING));
+		else if (g_phase == 3) snprintf(note, sizeof(note), "%s", T(STR_FINISHING));
+		else if (g_pass2_total) snprintf(note, sizeof(note), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
+		if (!g_abort && g_rr_max) snprintf(note + strlen(note), sizeof(note) - strlen(note), T(STR_REREAD), g_rr_lba, g_rr_max ? g_rr_try : 0, g_rr_max);
+		if (!g_abort && (g_readerrs || g_recovered)) {
+			size_t o2 = strlen(note);
+			snprintf(note + o2, sizeof(note) - o2, T(STR_READ_STATS), o2 ? " · " : "", g_readerrs, g_recovered);
+		}
+		if (!note[0] && g_nev > 0) ui_text(UI_SMALL, ax, ly + (single ? ls : 0), g_ev[g_nev - 1].col, g_ev[g_nev - 1].text, al);   // the latest event
+		else ui_text(UI_SMALL, ax, ly + (single ? ls : 0), 0xF0C060, note, al);
+		ly += ls;
+	} else {
+		if (st == DISC_READY && k.rd[0]) ui_text(UI_SMALL, ax, ly, 0x9AD0A8, k.rd, al);
+		ly += ls;
+		if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // how the last rip on this drive went
+			ui_text(UI_SMALL, ax, ly, k.res_col, k.res, al);
+		} else if (st == DISC_READY && k.prev_rip) {   // already ripped here: one line, "known errors" in yellow
+			char p2[96];
+			if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), k.repair_n);
+			else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
+			const char *p1 = T(STR_ALREADY_HERE);
+			int w1 = ui_text_width(UI_SMALL, p1), w2 = ui_text_width(UI_SMALL, p2), x0 = single ? (ui_w() - w1 - w2) / 2 : left;
+			ui_text(UI_SMALL, x0, ly, 0x8FA8D8, p1);
+			ui_text(UI_SMALL, x0 + w1, ly, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2);
+		} else if (st == DISC_READY && k.space_short) {   // will not fit (a re-rip replaces the old image)
+			char sl[200];
+			snprintf(sl, sizeof(sl), T(STR_NO_SPACE), k.mb, (unsigned)(k.mb + 2 - k.space_short));
+			ui_text(UI_SMALL, ax, ly, 0xFF8A80, sl, al);
+		}
+		ly += ls;
 	}
-	ly += ls;
 	char tname[96], saving[160], v[180];
 	target_name(k.dest[0] ? k.dest : HDD_DIR, tname, sizeof(tname));
 	snprintf(saving, sizeof(saving), T(STR_HOME_SAVING), tname);
-	snprintf(v, sizeof(v), focused ? "‹ %s ›" : "%s", saving);   // ←→ chooses where this drive saves
-	ui_text(UI_SMALL, ax, ly, focused ? 0xC8D0E0 : 0x8890A8, v, al);
+	snprintf(v, sizeof(v), focused && !k.job ? "‹ %s ›" : "%s", saving);   // ←→ chooses where this drive saves
+	ui_text(UI_SMALL, ax, ly + (single && k.job ? ls : 0), focused ? 0xC8D0E0 : 0x8890A8, v, al);
 	return h;
 }
+
+static void rip_job_start(int c, int fresh);
 
 // Home screen: a card per drive. Up/down picks a card; left/right its destination; X, square and
 // triangle act on it. Returns 1 = rip the disc in g_card's drive, 2 = rip a freshly inserted disc,
@@ -3011,7 +3198,8 @@ static int home_screen()
 		if (!g_ident_busy && !g_repairing) {
 			for (int i = 0; i < nc; i++) {
 				Card &k = g_cards[list[i]];
-				if (k.inserted) { k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0; }
+				if (k.job) continue;   // ripping: the rip has the drive
+				if (k.inserted) { k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0; k.res[0] = 0; }
 				if (!k.present) { if (k.state != DISC_NONE) k.state = DISC_NONE; k.tried = 0; k.fresh = 0; continue; }
 				if (!k.tried) { k.tried = 1; select_card(list[i]); identify_start(k.fresh); break; }
 				if (k.recheck) { k.recheck = 0; if (k.state == DISC_READY) { select_card(list[i]); prev_rip_check(); } g_redraw = 2; }
@@ -3037,14 +3225,20 @@ static int home_screen()
 				fire_event("app_started");
 			}
 		}
-		int sig = nc;
-		for (int i = 0; i < nc; i++) sig = sig * 7 + g_cards[list[i]].state * 2 + g_cards[list[i]].prev_rip;
+		int sig = nc, jobs = 0;
+		for (int i = 0; i < nc; i++) { sig = sig * 7 + g_cards[list[i]].state * 2 + g_cards[list[i]].prev_rip + g_cards[list[i]].job * 3; jobs += g_cards[list[i]].job; }
 		if (sig != last_sig) { last_sig = sig; g_redraw = 2; }
+		static uint64_t last_prog = 0;   // ripping cards: their progress twice a second
+		if (jobs && now_ms() - last_prog >= 500) { last_prog = now_ms(); g_redraw = 2; }
 		// automatic rip only for a disc not ripped to this destination yet: never overwrite one
 		if (!g_ident_busy)
 			for (int i = 0; i < nc; i++) {
 				Card &k = g_cards[list[i]];
-				if (std_or(k.autostart, g_std.autostart) && k.state == DISC_READY && k.fresh && !k.prev_rip) { select_card(list[i]); k.fresh = 0; return 2; }
+				if (!k.job && std_or(k.autostart, g_std.autostart) && k.state == DISC_READY && k.fresh && !k.prev_rip) {
+					k.fresh = 0;
+					select_card(list[i]);
+					rip_job_start(list[i], 1);
+				}
 			}
 		Card &f = g_cards[sel];
 		int st = f.state;
@@ -3066,7 +3260,11 @@ static int home_screen()
 				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
 				footer_note(wl);
 			}
-			if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
+			if (f.job) {   // ripping: O cancels this rip, the other cards go on
+				const char *b[] = {"circle", "select", "start"};
+				const char *l[] = {T(STR_HINT_CANCEL_RIP), T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS)};
+				hint_bar(b, l, 3);
+			} else if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
 				const char *b[] = {"cross", "square", "triangle", "select", "start", "circle"};
 				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
 				hint_bar(b, l, 6);
@@ -3088,6 +3286,17 @@ static int home_screen()
 		int p = pad_pressed();
 		if ((p & B_UP) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }
 		if ((p & B_DOWN) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }
+		if (f.job) {   // a ripping card: only cancel (and the settings below)
+			if (p & B_CIRCLE) {
+				char m[300];
+				snprintf(m, sizeof(m), T(STR_CANCEL_RIP_Q), f.title);
+				if (own_dialog(m, 1) == 1 && f.job) { OnCard o(sel); g_abort = 1; }
+				pad_pressed();
+				g_redraw = 2;
+				continue;
+			}
+			p &= B_SELECT | B_START;
+		}
 		if (p & (B_LEFT | B_RIGHT)) {   // where this drive saves
 			char od[64];
 			snprintf(od, sizeof(od), "%s", f.dest[0] ? f.dest : HDD_DIR);
@@ -3096,7 +3305,7 @@ static int home_screen()
 			g_redraw = 2;
 		}
 		if ((p & (B_CROSS | B_SQUARE | B_TRIANGLE)) && (st == DISC_READY || st == DISC_ERROR)) {
-			while (g_ident_busy) usleep(10000);
+			while (g_ident_busy && g_ident_card == sel) usleep(10000);
 			select_card(sel);
 		}
 		if ((p & B_CROSS) && st == DISC_READY) {
@@ -3113,12 +3322,15 @@ static int home_screen()
 			}
 			int fr = f.fresh;
 			f.fresh = 0;
-			return fr ? 2 : 1;   // rip, also over an existing rip (X is always a rip)
+			rip_job_start(sel, fr);   // rip, also over an existing rip (X is always a rip); the card shows it
+			g_redraw = 2;
+			continue;
 		}
 		if ((p & B_SQUARE) && st == DISC_READY && f.prev_rip && f.repair_n) {   // repair the sectors the log lists
 			int shown_prev = g_prev_rip;
 			prev_rip_check();
 			if (g_prev_rip != shown_prev || !g_repair_n) { g_redraw = 2; continue; }
+			if (any_ripping()) { own_dialog(T(STR_REPAIR_WAIT), 0); g_redraw = 2; continue; }   // a repair takes the screen
 			return 3;
 		}
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
@@ -3135,18 +3347,18 @@ static int home_screen()
 			for (int i = 0; i < NCARDS; i++) g_cards[i].recheck = 1;   // destinations may have been reset
 			g_redraw = 2;
 		}
-		if (p & B_CIRCLE) return 0;
+		if (p & B_CIRCLE) {
+			if (!jobs) return 0;
+			if (own_dialog(T(STR_EXIT_RIPS_Q), 1) == 1) return 0;   // the rips are cancelled on the way out
+			pad_pressed();
+			g_redraw = 2;
+		}
 	}
 	return 0;
 }
 
 // ---------------------------------------------------------------- one disc
-static char g_done_msg[768];   // summary of the last successful rip
 // The same summary for the own result screen: coloured lines
-struct ResLine { char text[240]; uint32_t col; };
-static ResLine g_res[8];
-static int g_nres = 0;
-static char g_res_title[160], g_res_path[300];
 static void res_add(uint32_t col, const char *fmt, ...)
 {
 	if (g_nres >= 8) return;
@@ -3166,7 +3378,7 @@ static int prepare_disc(int *err, int *code)
 	char *name = g_name;
 	g_ntracks = 0; g_leadout = 0; g_nlc = 0; g_qzero = 0; g_qchecked = 0; g_readerrs = 0;
 	g_qoff = 0; g_qcal_done = 0; memset(g_qhist, 0, sizeof(g_qhist));
-	if (!g_mounttest) webman_unmount();
+	if (!g_mounttest && g_use == SRC_BD) webman_unmount();
 
 	int ret;
 	if (g_use == SRC_USB) {   // no lv2 device and no lv1 patch: our own driver talks to the drive
@@ -3219,9 +3431,6 @@ static int prepare_disc(int *err, int *code)
 }
 
 // ---------------------------------------------------------------- remote view and webhooks
-enum { ST_HOME, ST_RIPPING };
-static volatile int g_state = ST_HOME;
-static time_t g_rip_t0;
 
 static const char *rd_result_str()
 {
@@ -3245,13 +3454,17 @@ static void json_fields(char *js, size_t n)
 	o = strlen(js); snprintf(js + o, n - o, ",\"redump\":\"%s\",\"redump_name\":", rd_result_str()); json_str(js, n, g_rd_result_name);
 }
 
-static int g_state_busy() { return g_state == ST_RIPPING || g_ident_busy || g_repairing || lv1_patched; }
+static int g_state_busy() { return any_ripping() || g_ident_busy || g_repairing || lv1_patched; }
 
 static int status_json(char *js, int n)
 {
+	// the fields describe the first card that rips, else the one on the screen
+	int c = g_card;
+	for (int i = NCARDS - 1; i >= 0; i--) if (ctx_ripping(i)) c = i;
+	OnCard on(c);
 	uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
-	// busy: the drive is in use or the lv1 patch is on; never stop or reinstall the app then
-	int busy = g_state == ST_RIPPING || g_ident_busy || g_repairing || lv1_patched;
+	// busy: a drive is in use or the lv1 patch is on; never stop or reinstall the app then
+	int busy = g_state_busy();
 	snprintf(js, n, "{\"state\":\"%s\",\"busy\":%s,\"percent\":%u,", g_state == ST_RIPPING ? "ripping" : "idle", busy ? "true" : "false",
 	         g_state == ST_RIPPING && g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
 	if (g_state != ST_RIPPING) {   // idle: describe the disc on the home screen
@@ -3347,14 +3560,16 @@ static int rip_disc_inner(int fresh, int autorip)
 		if (err == STR_OPEN_FAILED) snprintf(msg, sizeof(msg), T(STR_OPEN_FAILED), code);
 		else if (err == STR_UNKNOWN) return 0;   // diag run
 		else snprintf(msg, sizeof(msg), T((StrId)err), code, LOG_PATH);
-		tell(msg);
+		if (g_headless) tell(msg);
+		Card &k = g_cards[cur_card()];
+		snprintf(k.res, sizeof(k.res), "%s", msg);
+		k.res_col = 0xFF8A80;
 		return 0;
 	}
 	const char *name = g_name;
 	uint32_t mb = (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024));
 	snprintf(msg, sizeof(msg), T(STR_FOUND),
 	         name, g_serial[0] ? g_serial : T(STR_UNKNOWN), g_ntracks, mb, OUT_DIR);
-	if (!autorip && !ask_yesno(msg)) { sys_storage_close(g_fd); return 0; }
 
 	g_rd_result = -3; g_rd_result_name[0] = 0;
 	g_rip_t0 = time(NULL);
@@ -3373,61 +3588,23 @@ static int rip_disc_inner(int fresh, int autorip)
 		logf("set cd speed %u KB/s -> 0x%x", kbs, atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
 	}
 	sys_ppu_thread_t tid;
-	sysThreadCreate(&tid, rip_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxrip");
+	sysThreadCreate(&tid, rip_thread, (void *)(long)cur_card(), 1000, 0x10000, THREAD_JOINABLE, (char *)"psxrip");
 
-	char ripmsg[256];
-	snprintf(ripmsg, sizeof(ripmsg), T(STR_RIPPING), name, g_serial[0] ? g_serial : T(STR_UNKNOWN));
-	pad_pressed();
-	uint32_t shown = 101, shown_pos = 0, shown_lba = 0;
-	int shown_try = -1, shown_abort = 0;
-	Eta eta;
-	eta_start(&eta);
-	uint64_t shown_ms = 0;
-	int shown_ev = -1;
+	// the card on the home screen shows the progress; this thread only reports it
 	uint32_t sent_pct = 0;   // last percentage sent as rip_progress
 	while (!g_finished) {
-		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
+		if (exit_requested) g_abort = 1;
+		usleep(100 * 1000);
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / (g_total ? g_total : 1));
 		if (pct >= sent_pct + (uint32_t)g_webhook_step && pct < 100 && !g_phase) {   // every g_webhook_step percent
 			sent_pct = pct - pct % g_webhook_step;
 			fire_event("rip_progress");
 		}
-		int rmax = g_rr_max, rtry = rmax ? g_rr_try : 0;
-		uint32_t rlba = g_rr_lba;
-		// redraw on a new percentage, every 256 sectors, or when the re-read state changes
-		if (pct != shown || pos / 256 != shown_pos / 256 || rtry != shown_try || (rmax && rlba != shown_lba) || g_abort != shown_abort ||
-		    now_ms() - shown_ms >= 1000 || g_ev_seq != shown_ev) {
-			shown_ms = now_ms();
-			shown_ev = g_ev_seq;
-			char pm[96], note[200] = "";
-			snprintf(pm, sizeof(pm), T(STR_PROGRESS), pos, g_total);
-			if (g_phase == 3) snprintf(note, sizeof(note), "%s", T(STR_FINISHING));
-			else if (g_pass2_total) snprintf(note, sizeof(note), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
-			if (rmax) snprintf(note + strlen(note), sizeof(note) - strlen(note), T(STR_REREAD), rlba, rtry, rmax);
-			if (g_readerrs || g_recovered) {
-				size_t o = strlen(note);
-				snprintf(note + o, sizeof(note) - o, T(STR_READ_STATS), o ? " · " : "", g_readerrs, g_recovered);
-			}
-			char tl[96];
-			// during the double-check and the slow re-reads the estimate follows that phase
-			static int eta_phase = 0;
-			if (g_phase != eta_phase) { eta_phase = g_phase; uint64_t t0 = eta.t0; eta_start(&eta); eta.t0 = t0; }
-			if (g_pass2_total && g_phase) eta_line(&eta, g_pass2_done, g_pass2_total, tl, sizeof(tl));
-			else eta_line(&eta, pos, g_total, tl, sizeof(tl));
-			progress_draw(ripmsg, pm, pct, note, g_abort, tl);
-			shown = pct; shown_pos = pos; shown_try = rtry; shown_lba = rlba; shown_abort = g_abort;
-		}
-		flip_frame();
 	}
 	u64 rv;
 	sysThreadJoin(tid, &rv);
-	if (!g_result) {   // LibCrypt check and Redump run here: say so instead of a frozen last frame
-		char pm[96];
-		snprintf(pm, sizeof(pm), T(STR_PROGRESS), g_total, g_total);
-		progress_draw(ripmsg, pm, 100, T(STR_FINISHING), 0, " ");
-		flip_frame(); flip_frame();
-	}
+	if (!g_result) g_phase = 3;   // LibCrypt check and Redump: the card says "finishing"
 	int is_pal = g_is_pal;
 	// re-reading LibCrypt candidates only matters for discs on the LibCrypt list
 	if (!g_result && is_pal && g_qcal_done && g_nlc > 0 && g_nlc <= MAX_LC && g_serial[0] && is_libcrypt_disc(g_serial)) {
@@ -3449,7 +3626,9 @@ static int rip_disc_inner(int fresh, int autorip)
 		vf_unlink(msg);
 		g_state = ST_HOME;
 		fire_event(g_result == 1 ? "rip_cancelled" : "rip_failed");
-		tell(g_result == 1 ? T(STR_ABORTED) : T(STR_CREATE_FAILED));
+		Card &k = g_cards[cur_card()];
+		snprintf(k.res, sizeof(k.res), "%s", g_result == 1 ? T(STR_ABORTED) : T(STR_CREATE_FAILED));
+		k.res_col = g_result == 1 ? 0xF0C060 : 0xFF8A80;
 		return 0;
 	}
 
@@ -3547,6 +3726,14 @@ static int rip_disc_inner(int fresh, int autorip)
 	write_riplog();
 	logf("done: %s errs=%u", g_base, g_readerrs);
 	snprintf(g_done_msg, sizeof(g_done_msg), "%s", msg);
+	{   // the card keeps one line about the result: Redump (or the check) and the time
+		Card &k = g_cards[cur_card()];
+		char d[16];
+		fmt_dur(d, sizeof(d), (long)(time(NULL) - g_rip_t0));
+		const char *first = g_nres ? g_res[0].text : "";
+		snprintf(k.res, sizeof(k.res), T(STR_CARD_DONE), first, d);
+		k.res_col = g_nres ? g_res[0].col : 0x7CE0A0;
+	}
 	g_state = ST_HOME;
 	fire_event("rip_finished");
 	return 1;
@@ -3554,10 +3741,46 @@ static int rip_disc_inner(int fresh, int autorip)
 
 static int rip_disc(int fresh, int autorip)
 {
-	while (g_ident_busy) usleep(10000);   // the identify thread patches/unpatches lv1 itself
+	if (g_use == SRC_BD) while (g_ident_busy && g_ident_card == 0) usleep(10000);   // it patches/unpatches lv1 itself
 	int ok = rip_disc_inner(fresh, autorip);
-	lv1_storage_unpatch();
+	if (g_use == SRC_BD) lv1_storage_unpatch();
 	return ok;
+}
+
+// A rip in the background, for one card: the home screen keeps running and shows it in the card.
+static void rip_job_thread(void *arg)
+{
+	t_card = (int)((long)arg >> 8);
+	int fresh = (int)((long)arg & 0xFF);
+	Card &k = g_cards[t_card];
+	k.res[0] = 0;
+	k.eta_t0 = 0;
+	if (fresh) usleep(2000 * 1000);   // give the drive a moment to spin up
+	g_done = 0; g_total = 0; g_readpos = 0; g_phase = 0; g_pass2_total = 0;
+	logf("start rip (%s)", fresh ? "disc inserted" : "disc already in drive");
+	rip_disc(fresh, 1);
+	g_state = ST_HOME;     // also after an early failure
+	k.state = DISC_NONE;   // ejected or ripped: identify again
+	k.tried = 0;
+	__sync_synchronize();
+	k.job = 0;
+	g_redraw = 2;
+	sysThreadExit(0);
+}
+
+static void rip_job_start(int c, int fresh)
+{
+	Card &k = g_cards[c];
+	if (k.job) return;
+	if (!g_parallel && any_ripping()) { own_dialog(T(STR_REPAIR_WAIT), 0); return; }   // one at a time then
+	k.job = 1;
+	OnCard o(c);
+	g_state = ST_RIPPING;   // busy from now on (status, the poll thread, deploy)
+	g_abort = 0; g_finished = 0;
+	sys_ppu_thread_t t;
+	if (sysThreadCreate(&t, rip_job_thread, (void *)(long)(fresh | c << 8), 1000, 0x10000, 0, (char *)"psxjob")) {
+		k.job = 0; g_state = ST_HOME;
+	}
 }
 
 // Rip log next to the image (<name>.log): what was read and which sectors are still wrong, so a
@@ -3591,6 +3814,7 @@ static void write_riplog()
 // existing image. The disc in the drive must be the same one (same name and serial).
 static void repair_thread(void *arg)
 {
+	t_card = (int)(long)arg;
 	int patched = second_pass();
 	vf_close(g_out);
 	char bin[320];
@@ -3619,7 +3843,7 @@ static int repair_disc_inner()
 	char path[320];
 	snprintf(path, sizeof(path), "%s.log", g_base);
 	VFile *lf = vf_open(path, "rb");
-	static char buf[65536];
+	char (&buf)[65536] = CX.log_buf;
 	int n = lf ? (int)vf_read(lf, buf, sizeof(buf) - 1) : 0;
 	if (lf) vf_close(lf);
 	buf[n > 0 ? n : 0] = 0;
@@ -3689,7 +3913,7 @@ static int repair_disc_inner()
 	g_done = g_total = g_leadout;
 	int check = g_check; g_check = CHECK_BITPERFECT;   // the repair always confirms
 	sys_ppu_thread_t tid;
-	sysThreadCreate(&tid, repair_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxrepair");
+	sysThreadCreate(&tid, repair_thread, (void *)(long)cur_card(), 1000, 0x10000, THREAD_JOINABLE, (char *)"psxrepair");
 	char title[256];
 	snprintf(title, sizeof(title), T(STR_REPAIRING), g_name, g_serial);
 	pad_pressed();
@@ -3876,14 +4100,24 @@ int main(int argc, char *argv[])
 	ioPadInit(7);
 	atexit(program_exit_callback);
 	sysUtilRegisterCallback(SYSUTIL_EVENT_SLOT0, sysutil_callback, NULL);
-	g_cmdbuf = (uint8_t *)memalign(128, 4096);
-	g_sec = (uint8_t *)memalign(128, 4096);
+	for (int c = 0; c < NCARDS; c++) ctx_init(c);
+	{   // each thread must see its own t_card, or the cards' rips would share one context
+		static volatile int seen = -2;
+		struct P { static void run(void *) { seen = t_card; t_card = 2; sysThreadExit(0); } };
+		t_card = 1;
+		sys_ppu_thread_t th;
+		u64 rv;
+		if (sysThreadCreate(&th, P::run, NULL, 1000, 0x4000, THREAD_JOINABLE, (char *)"psxtls") == 0) sysThreadJoin(th, &rv);
+		g_parallel = seen == -1 && t_card == 1;
+		t_card = -1;
+		logf("thread-local storage %s (thread saw %d)", g_parallel ? "ok: parallel rips" : "NOT working: one rip at a time", seen);
+	}
+	{ sys_mutex_attr_t ma; sysMutexAttrInitialize(ma); sysMutexCreate(&g_rd_mx, &ma); }
 	lang_init();
 	netInitialize();
 	// start-up checks: config, lv1 state after an earlier crash, USB file systems
 	char warn[400] = "";
 	int had_cfg = cfg_load();
-	{ DriveCfg st = {1, g_retries, g_speed, g_eject, g_autostart, g_check}; g_std = st; }   // the old keys are the standard
 	card_defaults(g_cards[0]);
 	if (g_bdcfg.set) card_from(g_cards[0], g_bdcfg);
 	if (!had_cfg) { mkdir("/dev_hdd0/tmp", 0777); cfg_save(); logf("startup: no config, defaults written"); }   // editable over FTP
@@ -3940,36 +4174,19 @@ int main(int argc, char *argv[])
 	{ sys_ppu_thread_t t; sysThreadCreate(&t, usb_presence_thread, NULL, 1500, 0x4000, 0, (char *)"psxusbpoll"); }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
-	int autorip = 0;   // set after a successful rip: the next inserted disc is ripped without asking
 	while (!exit_requested) {
-		int fresh;
-		if (autorip) {
-			fresh = 1;
-		} else {
-			int a = home_screen();
-			if (exit_requested || a == 0) break;
-			if (a == 3) {
-				if (repair_disc() && result_screen()) autorip = 1;
-				g_disc_state = DISC_NONE;
-				g_cards[g_card].tried = 0;   // identify it again (the log changed)
-				continue;
-			}
-			fresh = (a == 2);
+		int a = home_screen();   // rips run on their cards, from the home screen
+		if (exit_requested || a == 0) break;
+		if (a == 3) {
+			repair_disc();
+			result_screen();
+			g_disc_state = DISC_NONE;
+			g_cards[g_card].tried = 0;   // identify it again (the log changed)
 		}
-		logf("start rip (%s%s)", fresh ? "disc inserted" : "disc already in drive", autorip ? ", auto" : "");
-		if (fresh) {
-			// give the drive a moment to spin up before we talk to it
-			for (int i = 0; i < 120 && !exit_requested; i++) do_flip();
-		}
-		int ok = rip_disc(fresh, 1);   // the home screen already shows what will be ripped
-		g_disc_state = DISC_NONE;     // ejected (or ripped): identify again on the next home screen
-		g_cards[g_card].tried = 0;
-		autorip = 0;
-		if (!ok) continue;
-
-		// auto mode: show the result and wait for the next disc; O goes back to the start screen
-		if (result_screen()) autorip = 1;
 	}
+	// cancel what still rips and wait for it: the files are cleaned up and lv1 unpatched
+	for (int c = 0; c < NCARDS; c++) if (g_cards[c].job) { OnCard o(c); g_abort = 1; }
+	for (int c = 0; c < NCARDS; c++) while (g_cards[c].job) usleep(50 * 1000);
 	sysDiscUnregisterDiscChangeCallback();
 	while (g_ident_busy) usleep(10000);
 	if (g_ripped && !exit_requested && ask_yesno(T(STR_ASK_REFRESH))) {

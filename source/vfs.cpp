@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <sys/mutex.h>
 #include "ff.h"
 #include "vfs.h"
 
@@ -18,6 +19,25 @@ struct VFile {
 
 static FATFS g_fs[8];
 static int g_mounted[8];
+
+// FatFs is built without re-entrancy: drives that rip at the same time take turns on it (the
+// stdio paths need no lock). Recursive, created by the first caller (vf_scan at start-up).
+static sys_mutex_t g_lock;
+static int g_lock_made = 0;
+struct Lk {
+	Lk()
+	{
+		if (!g_lock_made) {
+			sys_mutex_attr_t a;
+			sysMutexAttrInitialize(a);
+			a.attr_recursive = SYS_MUTEX_ATTR_RECURSIVE;
+			sysMutexCreate(&g_lock, &a);
+			g_lock_made = 1;
+		}
+		sysMutexLock(g_lock, 0);
+	}
+	~Lk() { sysMutexUnlock(g_lock); }
+};
 
 // "exfat3:/PSXISO/x.bin" -> drive 3, FatFs path "3:/PSXISO/x.bin". Returns -1 for stdio paths.
 static int fat_path(const char *path, char *out, size_t n)
@@ -41,6 +61,7 @@ VFile *vf_open(const char *path, const char *mode)
 		if (mode[0] != 'r') setvbuf(f->std, NULL, _IONBF, 0);
 		return f;
 	}
+	Lk lk;
 	BYTE m = !strcmp(mode, "rb") ? FA_READ : !strcmp(mode, "r+b") ? (FA_READ | FA_WRITE) : (FA_WRITE | FA_CREATE_ALWAYS);
 	if (f_open(&f->fil, fp, m) != FR_OK) { free(f); return NULL; }
 	return f;
@@ -49,6 +70,7 @@ VFile *vf_open(const char *path, const char *mode)
 size_t vf_write(VFile *f, const void *p, size_t n)
 {
 	if (f->std) return fwrite(p, 1, n, f->std);
+	Lk lk;
 	UINT w = 0;
 	return f_write(&f->fil, p, (UINT)n, &w) == FR_OK ? w : 0;
 }
@@ -56,6 +78,7 @@ size_t vf_write(VFile *f, const void *p, size_t n)
 size_t vf_read(VFile *f, void *p, size_t n)
 {
 	if (f->std) return fread(p, 1, n, f->std);
+	Lk lk;
 	UINT r = 0;
 	return f_read(&f->fil, p, (UINT)n, &r) == FR_OK ? r : 0;
 }
@@ -63,6 +86,7 @@ size_t vf_read(VFile *f, void *p, size_t n)
 int vf_seek(VFile *f, uint64_t pos)
 {
 	if (f->std) return fseeko(f->std, (off_t)pos, SEEK_SET);
+	Lk lk;
 	return f_lseek(&f->fil, (FSIZE_t)pos) == FR_OK ? 0 : -1;
 }
 
@@ -80,7 +104,9 @@ int vf_printf(VFile *f, const char *fmt, ...)
 
 int vf_close(VFile *f)
 {
-	int r = f->std ? fclose(f->std) : (f_close(&f->fil) == FR_OK ? 0 : -1);
+	int r;
+	if (f->std) r = fclose(f->std);
+	else { Lk lk; r = f_close(&f->fil) == FR_OK ? 0 : -1; }
 	free(f);
 	return r;
 }
@@ -89,6 +115,7 @@ int vf_unlink(const char *path)
 {
 	char fp[320];
 	if (fat_path(path, fp, sizeof(fp)) < 0) return unlink(path);
+	Lk lk;
 	return f_unlink(fp) == FR_OK ? 0 : -1;
 }
 
@@ -97,6 +124,7 @@ int vf_rename(const char *from, const char *to)
 	char a[320], b[320];
 	if (fat_path(from, a, sizeof(a)) < 0) return rename(from, to);
 	if (fat_path(to, b, sizeof(b)) < 0) return -1;
+	Lk lk;
 	// f_rename takes the new name without the drive number
 	const char *nb = strchr(b, ':');
 	return f_rename(a, nb ? nb + 1 : b) == FR_OK ? 0 : -1;
@@ -106,6 +134,7 @@ int vf_mkdir(const char *path)
 {
 	char fp[320];
 	if (fat_path(path, fp, sizeof(fp)) < 0) return mkdir(path, 0777);
+	Lk lk;
 	FRESULT r = f_mkdir(fp);
 	return r == FR_OK || r == FR_EXIST ? 0 : -1;
 }
@@ -114,6 +143,7 @@ int vf_exists(const char *path)
 {
 	char fp[320];
 	if (fat_path(path, fp, sizeof(fp)) < 0) { struct stat st; return stat(path, &st) == 0; }
+	Lk lk;
 	FILINFO fi;
 	return f_stat(fp, &fi) == FR_OK;
 }
@@ -123,6 +153,7 @@ int vf_free_mb(const char *path, uint64_t *mb)
 	char fp[320];
 	int d = fat_path(path, fp, sizeof(fp));
 	if (d < 0) return -1;
+	Lk lk;
 	DWORD clusters = 0;
 	FATFS *fs;
 	char drv[4] = {(char)('0' + d), ':', 0};
@@ -133,6 +164,7 @@ int vf_free_mb(const char *path, uint64_t *mb)
 
 int vf_scan(VfVolume *out, int max)
 {
+	Lk lk;
 	int n = 0;
 	for (int port = 0; port < 8; port++) {
 		uint64_t sectors;
