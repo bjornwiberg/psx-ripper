@@ -4783,7 +4783,10 @@ static int repair_disc_inner()
 	char path[320];
 	snprintf(path, sizeof(path), "%s.log", g_base);
 	VFile *lf = vf_open(path, "rb");
-	char (&buf)[65536] = CX.log_buf;
+	// its own buffer: riplog_open_count() below reads the log into CX.log_buf and would overwrite
+	// this one while it is being parsed (that once wrote a log without its sector list)
+	static char rbuf[NCARDS][65536];
+	char (&buf)[65536] = rbuf[cur_card()];
 	int n = lf ? (int)vf_read(lf, buf, sizeof(buf) - 1) : 0;
 	if (lf) vf_close(lf);
 	buf[n > 0 ? n : 0] = 0;
