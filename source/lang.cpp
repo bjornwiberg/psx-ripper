@@ -163,6 +163,9 @@ static const char *en[STR_COUNT] = {
 	"(default)",
 	"Defaults",
 	"Reset all settings to their defaults?\n\nThe webhook address and the local Redump copy are kept.",
+	"Show",
+	"%s · sent to %s",
+	"Change them at http://%s:%d/webhook",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -322,6 +325,9 @@ static const char *sv[STR_COUNT] = {
 	"(standard)",
 	"Standard",
 	"Vill du återställa alla inställningar till standard?\n\nWebhook-adressen och den lokala Redump-kopian behålls.",
+	"Visa",
+	"%s · skickas till %s",
+	"Ändra dem på http://%s:%d/webhook",
 };
 
 static const char **table = en;

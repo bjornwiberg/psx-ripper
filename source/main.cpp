@@ -1900,6 +1900,48 @@ static void notify_url(StrId fmt, const char *page)
 	webman_get(url);
 }
 
+// Read-only view of the webhook settings; they are changed on the remote view's web page.
+static void webhook_info_screen(int on)
+{
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			draw_backdrop();
+			int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
+			int y = ui_h() / 10 + ui_line(UI_TITLE) + lb / 2;
+			ui_text(UI_BODY, ui_w() / 2, y, 0xA8B0C8, T(STR_L_WEBHOOK), UI_CENTER);
+			y += lb * 2;
+			char host[96], line[200];
+			if (g_webhook[0]) webhook_host(g_webhook, host, sizeof(host)); else snprintf(host, sizeof(host), "%s", T(STR_WEBHOOK_NOURL));
+			snprintf(line, sizeof(line), T(STR_WH_INFO_STATE), on ? T(STR_ON) : T(STR_OFF), host);
+			ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, line, UI_CENTER);
+			y += lb * 3 / 2;
+			for (int i = 0; i < WH_COUNT; i++) {
+				int sel = (g_webhook_mask >> i) & 1;
+				// small font: • chosen, – not chosen
+				if (i == WH_RIP_PROGRESS && sel) snprintf(line, sizeof(line), "•  %s (%d %%)", T(wh_label(i)), g_webhook_step);
+				else snprintf(line, sizeof(line), "%s  %s", sel ? "•" : "–", T(wh_label(i)));
+				ui_text(UI_SMALL, ui_w() / 3, y, sel ? 0x7CE0A0 : 0x6870A0, line);
+				y += ls * 12 / 10;
+			}
+			y += ls;
+			char ip[20];
+			remote_ip(ip, sizeof(ip));
+			snprintf(line, sizeof(line), T(g_remote ? STR_WEBHOOK_HELP2 : STR_WEBHOOK_HELP), ip, REMOTE_PORT);
+			ui_text(UI_SMALL, ui_w() / 2, y, 0x9AD0A8, line, UI_CENTER);
+			const char *b[] = {"circle"};
+			const char *l[] = {T(STR_HINT_BACK)};
+			hint_bar(b, l, 1);
+			g_drawn = 2;
+			g_backdrop_shown = 0;
+		}
+		flip_frame();
+		if (pad_pressed() & (B_CIRCLE | B_CROSS)) return;
+	}
+}
+
 static void settings_screen()
 {
 	// edit locally; each change is applied and saved at once, O goes back
@@ -1907,7 +1949,7 @@ static void settings_screen()
 	snprintf(outdir, sizeof(outdir), "%s", g_outdir);
 	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, redump = g_redump, row = 0;
 	int remote = g_remote, webhook_on = g_webhook_on, check = g_check, whstep = g_webhook_step;
-	const int NROWS = 11, VIS = 9;   // the list scrolls when it is longer than VIS rows
+	const int NROWS = 10, VIS = 9;   // the list scrolls when it is longer than VIS rows
 	int first = 0;
 	char rdver[64] = "";
 	time_t rdwhen = 0;
@@ -1955,15 +1997,14 @@ static void settings_screen()
 			snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON_N), host, ne);
 		}
 		snprintf(vals[9], sizeof(vals[9]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
-		snprintf(vals[10], sizeof(vals[10]), T(STR_WH_STEP_VALUE), whstep);
 		{   // mark the default values
-			int def[11] = {!strcmp(outdir, "/dev_hdd0/PSXISO"), retries == 4, speed == 0, eject == 1, autostart == 0, redump == RD_OFF, 0,
-			               remote == 0, webhook_on == 0, check == CHECK_BITPERFECT, whstep == 5};
-			for (int r = 0; r < 11; r++)
+			int def[10] = {!strcmp(outdir, "/dev_hdd0/PSXISO"), retries == 4, speed == 0, eject == 1, autostart == 0, redump == RD_OFF, 0,
+			               remote == 0, webhook_on == 0, check == CHECK_BITPERFECT};
+			for (int r = 0; r < 10; r++)
 				if (def[r]) snprintf(vals[r] + strlen(vals[r]), sizeof(vals[r]) - strlen(vals[r]), " %s", T(STR_DEFAULT_MARK));
 		}
-		const char *labels[11] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
-		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK), T(STR_L_WH_STEP)};
+		const char *labels[10] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
+		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK)};
 		if (row < first) first = row;
 		if (row >= first + VIS) first = row - VIS + 1;
 		// first row below the "Settings" subtitle (drawn at h/10 + title + body/2), then nine rows
@@ -1976,15 +2017,27 @@ static void settings_screen()
 			snprintf(v, sizeof(v), r == row && r != 6 ? "‹ %s ›" : "%s", vals[r]);   // row 6 is an action
 			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 		}
-		const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "triangle", "circle"};
-		const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
-		hint_bar(b, l, 4);
+		if (row == 8) {
+			const char *b[] = {"updown", "leftright", "cross", "triangle", "circle"};
+			const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+			hint_bar(b, l, 5);
+		} else {
+			const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "triangle", "circle"};
+			const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+			hint_bar(b, l, 4);
+		}
 		}
 		flip_frame();
 		int p = pad_pressed();
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
+		if ((p & B_CROSS) && row == 8) {
+			webhook_info_screen(webhook_on);
+			pad_pressed();
+			g_redraw = 2;
+			continue;
+		}
 		if ((p & B_CROSS) && row == 6) {
 			redump_download_screen();
 			rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
@@ -2003,7 +2056,7 @@ static void settings_screen()
 				snprintf(outdir, sizeof(outdir), "/dev_hdd0/PSXISO");
 				retries = 4; speed = 0; eject = 1; autostart = 0; redump = RD_OFF;
 				if (remote) remote_set(0);
-				remote = 0; webhook_on = 0; check = CHECK_BITPERFECT; whstep = 5;
+				remote = 0; webhook_on = 0; check = CHECK_BITPERFECT; whstep = 5;   // step: web page only
 			}
 		}
 		if (d && !reset) {
@@ -2035,9 +2088,6 @@ static void settings_screen()
 				if (webhook_on) notify_url(STR_WEBHOOK_HELP, "webhook");
 			} else if (row == 9) {
 				check = (check + (d > 0 ? 1 : 2)) % 3;
-			} else if (row == 10) {
-				int k = 0; while (k < 7 && wh_steps[k] != whstep) k++;
-				whstep = wh_steps[(k + (d > 0 ? 1 : 6)) % 7];
 			}
 		}
 		if (d || reset) {
