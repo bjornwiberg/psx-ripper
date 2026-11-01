@@ -1271,6 +1271,27 @@ static void fmt_local(time_t t, char *out, size_t n)
 	fmt_datetime(g->tm_year + 1900, g->tm_mon + 1, g->tm_mday, g->tm_hour, g->tm_min, 1, out, n);
 }
 
+// Own progress screen (instead of the system dialog, whose button reads "Back"): title, bar,
+// detail text and "O Cancel". Draws only when called; the caller decides when something changed.
+static void progress_draw(const char *title, const char *detail, uint32_t pct)
+{
+	if (pct > 100) pct = 100;
+	draw_backdrop();
+	int y = ui_h() * 2 / 5, bw = ui_w() * 3 / 5, bx = (ui_w() - bw) / 2, bh = ui_line(UI_BODY) / 3;
+	ui_text(UI_BODY, ui_w() / 2, y - ui_line(UI_BODY) * 2, 0xFFFFFF, title, UI_CENTER);
+	if (detail && detail[0]) ui_text(UI_SMALL, bx + bw, y - ui_line(UI_SMALL) * 3 / 2, 0xA8B0C8, detail, UI_RIGHT);
+	ui_rect(bx, y, bw, bh, 0x50FFFFFF);
+	ui_rect(bx, y, (int)((uint64_t)bw * pct / 100), bh, 0xFFC8E05A);
+	char p[16];
+	snprintf(p, sizeof(p), "%u %%", pct);
+	ui_text(UI_SMALL, ui_w() / 2, y + bh + ui_line(UI_SMALL) / 2, 0xE8E8F0, p, UI_CENTER);
+	const char *b[] = {"circle"};
+	const char *l[] = {T(STR_HINT_CANCEL)};
+	hint_bar(b, l, 1);
+	g_drawn = 2;
+	g_backdrop_shown = 0;   // a system dialog shown afterwards needs its plain backdrop again
+}
+
 // Downloads the Redump dat to the console and builds the local index (progress dialog, O cancels).
 static volatile uint32_t g_dl_done, g_dl_total;
 static volatile int g_dl_phase, g_dl_abort, g_dl_result, g_dl_finished;
@@ -1289,31 +1310,26 @@ static void redump_download_screen()
 	g_dl_done = g_dl_total = 0; g_dl_phase = 0; g_dl_abort = 0; g_dl_finished = 0;
 	sys_ppu_thread_t tid;
 	sysThreadCreate(&tid, download_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxredump");
-	dialog_action = 0;
-	msgDialogOpen2((msgType)(MSG_DIALOG_SINGLE_PROGRESSBAR | MSG_DIALOG_MUTE_ON), T(STR_RD_DOWNLOADING), dialog_handler, NULL, NULL);
-	uint32_t shown = 0;
+	pad_pressed();
+	uint32_t shown = 101, shown_kb = ~0u;
 	int last_phase = -1;
-	time_t last_msg = 0;
 	while (!g_dl_finished) {
-		if (dialog_action == 2 || exit_requested) g_dl_abort = 1;
+		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_dl_abort = 1;
 		// each phase runs the bar from 0 to 100 %: first the download (bytes), then the index
-		if (g_dl_phase != last_phase && last_phase >= 0) { msgDialogProgressBarReset(MSG_PROGRESSBAR_INDEX0); shown = 0; }
 		uint32_t tot = g_dl_total ? g_dl_total : 1;
 		uint32_t pct = g_dl_total ? (uint32_t)((uint64_t)g_dl_done * 100 / tot) : 0;
-		if (pct > 100) pct = 100;
-		if (pct > shown) { msgDialogProgressBarInc(MSG_PROGRESSBAR_INDEX0, pct - shown); shown = pct; }
-		if (g_dl_phase != last_phase || time(NULL) != last_msg) {
+		uint32_t kb = g_dl_done / 1024;
+		if (pct != shown || g_dl_phase != last_phase || (!g_dl_phase && kb / 64 != shown_kb / 64)) {
 			char pm[96];
 			if (g_dl_phase) snprintf(pm, sizeof(pm), "%s", T(STR_RD_INDEXING));
-			else snprintf(pm, sizeof(pm), T(STR_RD_DL_PROGRESS), g_dl_done / 1024, g_dl_total / 1024);
-			msgDialogProgressBarSetMsg(MSG_PROGRESSBAR_INDEX0, pm);
-			last_phase = g_dl_phase; last_msg = time(NULL);
+			else snprintf(pm, sizeof(pm), T(STR_RD_DL_PROGRESS), kb, g_dl_total / 1024);
+			progress_draw(T(STR_RD_DOWNLOADING), pm, pct);
+			shown = pct; shown_kb = kb; last_phase = g_dl_phase;
 		}
-		do_flip();
+		flip_frame();
 	}
 	u64 rv;
 	sysThreadJoin(tid, &rv);
-	msgDialogAbort();
 	logf("redump download result %d", g_dl_result);
 	if (g_dl_result == -7 || exit_requested) return;   // cancelled
 	char msg[256], ver[64] = "";
@@ -1584,26 +1600,23 @@ static int rip_disc_inner(int fresh, int autorip)
 	sys_ppu_thread_t tid;
 	sysThreadCreate(&tid, rip_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxrip");
 
-	dialog_action = 0;
 	char ripmsg[256];
 	snprintf(ripmsg, sizeof(ripmsg), T(STR_RIPPING), name, g_serial[0] ? g_serial : T(STR_UNKNOWN));
-	msgDialogOpen2((msgType)(MSG_DIALOG_SINGLE_PROGRESSBAR | MSG_DIALOG_MUTE_ON), ripmsg, dialog_handler, NULL, NULL);
-	uint32_t shown = 0;
+	pad_pressed();
+	uint32_t shown = 101;
 	while (!g_finished) {
-		if (dialog_action == 2 || exit_requested) g_abort = 1;
+		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
 		uint32_t pct = (uint32_t)((uint64_t)g_done * 100 / (g_total ? g_total : 1));
-		if (pct > shown) {
-			msgDialogProgressBarInc(MSG_PROGRESSBAR_INDEX0, pct - shown);
-			shown = pct;
+		if (pct != shown) {
 			char pm[96];
 			snprintf(pm, sizeof(pm), T(STR_PROGRESS), g_done, g_total);
-			msgDialogProgressBarSetMsg(MSG_PROGRESSBAR_INDEX0, pm);
+			progress_draw(ripmsg, pm, pct);
+			shown = pct;
 		}
-		do_flip();
+		flip_frame();
 	}
 	u64 rv;
 	sysThreadJoin(tid, &rv);
-	msgDialogAbort();
 	int is_pal = g_is_pal;
 	if (!g_result && is_pal && g_qcal_done && g_nlc > 0 && g_nlc <= MAX_LC) {
 		uint8_t *tmp = (uint8_t *)memalign(128, 4096);

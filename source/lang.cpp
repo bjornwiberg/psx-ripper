@@ -13,7 +13,7 @@ static const char *en[STR_COUNT] = {
 	"The drive refused raw reading (READ CD 0x%x).\n\nLog: %s",
 	"unknown",
 	"Found: %s\nSerial: %s\nTracks: %d   Size: %u MB\n\nRip to %s?",
-	"Ripping %s [%s]\n○ cancels",
+	"Ripping %s [%s]",
 	"%u / %u sectors",
 	"Ripping was cancelled. The incomplete file has been removed.",
 	"Could not create the file. Is the destination full or write-protected?",
@@ -63,7 +63,7 @@ static const char *en[STR_COUNT] = {
 	"Local Redump copy",
 	"Not downloaded",
 	"Download now",
-	"Downloading the Redump database from redump.org…\n○ cancels",
+	"Downloading the Redump database from redump.org…",
 	"%u / %u KB",
 	"Building the index…",
 	"The Redump database has been downloaded: version %s, %d discs.",
@@ -78,6 +78,7 @@ static const char *en[STR_COUNT] = {
 	"Redump: the serial was not found.",
 	"Version %s, downloaded %s",
 	"Sectors with a checksum error: %u (see the log)",
+	"Cancel",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -87,7 +88,7 @@ static const char *sv[STR_COUNT] = {
 	"Skivläsaren vägrar rå läsning (READ CD 0x%x).\n\nLogg: %s",
 	"okänt",
 	"Hittade: %s\nSkivnummer: %s\nSpår: %d   Storlek: %u MB\n\nRippa till %s?",
-	"Rippar %s [%s]\n○ avbryter",
+	"Rippar %s [%s]",
 	"%u / %u sektorer",
 	"Rippningen avbröts. Den ofullständiga filen är borttagen.",
 	"Kunde inte skapa filen. Är målet fullt eller skrivskyddat?",
@@ -137,7 +138,7 @@ static const char *sv[STR_COUNT] = {
 	"Lokal Redump-kopia",
 	"Inte hämtad",
 	"Hämta nu",
-	"Hämtar Redump-databasen från redump.org …\n○ avbryter",
+	"Hämtar Redump-databasen från redump.org …",
 	"%u / %u kB",
 	"Bygger index …",
 	"Redump-databasen är hämtad: version %s, %d skivor.",
@@ -152,6 +153,7 @@ static const char *sv[STR_COUNT] = {
 	"Redump: skivnumret hittades inte.",
 	"Version %s, hämtad %s",
 	"Sektorer med kontrollsummefel: %u (se loggen)",
+	"Avbryt",
 };
 
 static const char **table = en;
