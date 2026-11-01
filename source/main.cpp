@@ -3094,28 +3094,46 @@ static void usb_presence_thread(void *arg)
 }
 
 // One card: drive, disc, what is known about it here, and where it goes. Returns its height.
+// Text that must stay within maxw pixels: cut at a character and ended with "…".
+static void ui_text_fit(UiFont f, int x, int y, uint32_t col, const char *text, int maxw, UiAlign al = UI_LEFT)
+{
+	if (ui_text_width(f, text) <= maxw) { ui_text(f, x, y, col, text, al); return; }
+	char b[256];
+	snprintf(b, sizeof(b), "%s", text);
+	int n = (int)strlen(b);
+	while (n > 0) {
+		do n--; while (n > 0 && ((unsigned char)b[n] & 0xC0) == 0x80);   // back one UTF-8 character
+		snprintf(b + n, sizeof(b) - n, "…");
+		if (ui_text_width(f, b) <= maxw) break;
+	}
+	ui_text(f, x, y, col, b, al);
+}
+
 static int draw_card(int c, int y, int focused, int single)
 {
 	Card &k = g_cards[c];
 	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
 	int left = ui_w() / 8, right = ui_w() * 7 / 8, cx = ui_w() / 2;
-	int h = ls + lb + ls * 3 + lb / 2;
+	int h = lb + ls * 3 + lb / 2;
 	if (!single) ui_rect(left - ui_w() / 60, y - lb / 3, right - left + ui_w() / 30, h, focused ? 0x703D6FD9 : 0x30FFFFFF);
 	int st = k.state;
 	int ax = single ? cx : left;
 	UiAlign al = single ? UI_CENTER : UI_LEFT;
+	int maxw = right - left;   // nothing goes past the card's edges
 	char drive[96];
 	source_name(c ? c - 1 : -1, drive, sizeof(drive));
 	int ly = y;
-	ui_text(UI_SMALL, ax, ly, 0x8890A8, drive, al);
-	ly += ls;
+	// the drive in the top right corner (single drive: above the title, centred, as before)
+	int dw = ui_text_width(UI_SMALL, drive) + ui_w() / 60;
+	if (single) { ui_text(UI_SMALL, cx, ly - ls, 0x8890A8, drive, UI_CENTER); dw = 0; }
+	else ui_text(UI_SMALL, right, ly + (lb - ls) / 2, 0x8890A8, drive, UI_RIGHT);
 	if (k.job || st == DISC_READY) {
 		char line[200];
 		snprintf(line, sizeof(line), "%s  ·  %s  ·  %u MB", k.title, k.serial, k.mb);
-		ui_text(UI_BODY, ax, ly, 0xFFFFFF, line, al);
+		ui_text_fit(UI_BODY, ax, ly, 0xFFFFFF, line, maxw - dw, al);
 	} else {
 		const char *msg = st == DISC_READING ? T(c ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
-		ui_text(UI_BODY, ax, ly, 0xFFFFFF, msg, al);
+		ui_text_fit(UI_BODY, ax, ly, 0xFFFFFF, msg, maxw - dw, al);
 	}
 	ly += lb;
 	if (k.job) {   // ripping: bar, percentage and time left; below it what the rip is doing
@@ -3133,7 +3151,8 @@ static int draw_card(int c, int y, int focused, int single)
 		else eta_line(&e, pos, g_total, tl, sizeof(tl));
 		k.eta_t0 = e.t0; k.eta_tw = e.tw; k.eta_pw = e.pw; k.eta_rate = e.rate;
 		snprintf(pl, sizeof(pl), "%u %%  ·  %s", pct, tl);
-		ui_text(UI_SMALL, single ? cx : bx + bw + ui_w() / 60, single ? ly + ls : ly, 0xE8E8F0, pl, single ? UI_CENTER : UI_LEFT);
+		if (single) ui_text_fit(UI_SMALL, cx, ly + ls, 0xE8E8F0, pl, maxw, UI_CENTER);
+		else ui_text_fit(UI_SMALL, bx + bw + ui_w() / 60, ly, 0xE8E8F0, pl, right - (bx + bw + ui_w() / 60));
 		ly += ls;
 		char note[200] = "";
 		if (g_abort) snprintf(note, sizeof(note), "%s", T(STR_CANCELLING));
@@ -3144,11 +3163,11 @@ static int draw_card(int c, int y, int focused, int single)
 			size_t o2 = strlen(note);
 			snprintf(note + o2, sizeof(note) - o2, T(STR_READ_STATS), o2 ? " · " : "", g_readerrs, g_recovered);
 		}
-		if (!note[0] && g_nev > 0) ui_text(UI_SMALL, ax, ly + (single ? ls : 0), g_ev[g_nev - 1].col, g_ev[g_nev - 1].text, al);   // the latest event
-		else ui_text(UI_SMALL, ax, ly + (single ? ls : 0), 0xF0C060, note, al);
+		if (!note[0] && g_nev > 0) ui_text_fit(UI_SMALL, ax, ly + (single ? ls : 0), g_ev[g_nev - 1].col, g_ev[g_nev - 1].text, maxw, al);   // the latest event
+		else ui_text_fit(UI_SMALL, ax, ly + (single ? ls : 0), 0xF0C060, note, maxw, al);
 		ly += ls;
 	} else {
-		if (st == DISC_READY && k.rd[0]) ui_text(UI_SMALL, ax, ly, 0x9AD0A8, k.rd, al);
+		if (st == DISC_READY && k.rd[0]) ui_text_fit(UI_SMALL, ax, ly, 0x9AD0A8, k.rd, maxw, al);
 		ly += ls;
 		if (k.res[0] && k.res_failed && st == DISC_READY && k.prev_rip) {
 			// cancelled or failed over an earlier rip: that one is still there, say so on the same line
@@ -3159,7 +3178,7 @@ static int draw_card(int c, int y, int focused, int single)
 			ui_text(UI_SMALL, x0, ly, k.res_col, k.res);
 			ui_text(UI_SMALL, x0 + w1, ly, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2);
 		} else if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // how the last rip on this drive went
-			ui_text(UI_SMALL, ax, ly, k.res_col, k.res, al);
+			ui_text_fit(UI_SMALL, ax, ly, k.res_col, k.res, maxw, al);
 		} else if (st == DISC_READY && k.prev_rip) {   // already ripped here: one line, "known errors" in yellow
 			char p2[96];
 			if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), k.repair_n);
@@ -3171,7 +3190,7 @@ static int draw_card(int c, int y, int focused, int single)
 		} else if (st == DISC_READY && k.space_short) {   // will not fit (a re-rip replaces the old image)
 			char sl[200];
 			snprintf(sl, sizeof(sl), T(STR_NO_SPACE), k.mb, (unsigned)(k.mb + 2 - k.space_short));
-			ui_text(UI_SMALL, ax, ly, 0xFF8A80, sl, al);
+			ui_text_fit(UI_SMALL, ax, ly, 0xFF8A80, sl, maxw, al);
 		}
 		ly += ls;
 	}
@@ -3179,7 +3198,7 @@ static int draw_card(int c, int y, int focused, int single)
 	target_name(k.dest[0] ? k.dest : HDD_DIR, tname, sizeof(tname));
 	snprintf(saving, sizeof(saving), T(STR_HOME_SAVING), tname);
 	snprintf(v, sizeof(v), focused && !k.job ? "‹ %s ›" : "%s", saving);   // ←→ chooses where this drive saves
-	ui_text(UI_SMALL, ax, ly + (single && k.job ? ls : 0), focused ? 0xC8D0E0 : 0x8890A8, v, al);
+	ui_text_fit(UI_SMALL, ax, ly + (single && k.job ? ls : 0), focused ? 0xC8D0E0 : 0x8890A8, v, maxw, al);
 	return h;
 }
 
