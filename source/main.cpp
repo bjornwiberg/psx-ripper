@@ -807,24 +807,30 @@ static void rip_thread(void *arg)
 		memset(dead, 0, n);
 		for (int tries = 0; tries < g_retries && ret; tries++) ret = read_cd(lba, n, buf);
 		if (ret) {
-			// fall back to single sectors so one bad sector doesn't zero the whole chunk.
-			// In a damaged area (several unreadable sectors in a row) each sector gets one try only,
-			// otherwise a scratch costs hours; cancelling is checked per sector.
-			static int run = 0;   // unreadable sectors in a row
-			for (uint32_t i = 0; i < n; i++) {
-				uint8_t *sp = buf + i * SECT_Q;
-				if (g_abort) { memset(sp, 0, SECT_Q); dead[i] = 1; continue; }
-				int r = -1, tries = run >= 4 ? 1 : g_retries;
-				g_rr_lba = lba + i; g_rr_max = tries;
-				for (int t = 0; t < tries && r && !g_abort; t++) { g_rr_try = t + 1; r = read_cd(lba + i, 1, sp); }
-				g_rr_max = 0;
-				if (r) {
-					memset(sp, 0, SECT_Q); dead[i] = 1; g_readerrs++; run++;
-					if (g_readerrs <= 64 || g_readerrs % 100 == 0) logf("unreadable sector %u (0x%x, %d tries, %u so far)", lba + i, r, tries, g_readerrs);
-				} else {
-					run = 0;
+			// Fall back to reads of 16 sectors; only a 16-sector piece that fails is read sector by
+			// sector. Inside a damaged area (an unreadable sector within the last 256) each sector
+			// gets one try, otherwise a scratch that hits once per revolution costs hours.
+			// Cancelling is checked per sector.
+			static uint32_t last_bad = 0;
+			const uint32_t PIECE = 16;
+			for (uint32_t i0 = 0; i0 < n; i0 += PIECE) {
+				uint32_t m = n - i0 < PIECE ? n - i0 : PIECE;
+				g_readpos = lba + i0;   // keep the progress bar moving in slow areas
+				if (g_abort) { for (uint32_t i = i0; i < i0 + m; i++) { memset(buf + i * SECT_Q, 0, SECT_Q); dead[i] = 1; } continue; }
+				if (read_cd(lba + i0, m, buf + i0 * SECT_Q) == 0) continue;
+				for (uint32_t i = i0; i < i0 + m; i++) {
+					uint8_t *sp = buf + i * SECT_Q;
+					if (g_abort) { memset(sp, 0, SECT_Q); dead[i] = 1; continue; }
+					int damaged = g_readerrs && lba + i - last_bad < 256;
+					int r = -1, tries = damaged ? 1 : g_retries;
+					g_rr_lba = lba + i; g_rr_max = tries;
+					for (int t = 0; t < tries && r && !g_abort; t++) { g_rr_try = t + 1; r = read_cd(lba + i, 1, sp); }
+					g_rr_max = 0;
+					if (r) {
+						memset(sp, 0, SECT_Q); dead[i] = 1; g_readerrs++; last_bad = lba + i;
+						if (g_readerrs <= 64 || g_readerrs % 100 == 0) logf("unreadable sector %u (0x%x, %d tries, %u so far)", lba + i, r, tries, g_readerrs);
+					}
 				}
-				if (!(i & 15)) g_readpos = lba + i;   // keep the progress bar moving in slow areas
 			}
 		}
 		// data track 1: re-read sectors whose sync, address or EDC is wrong
