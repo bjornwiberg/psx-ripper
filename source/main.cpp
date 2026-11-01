@@ -3698,7 +3698,7 @@ static int draw_card(int c, int y, int focused, int single)
 			else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
 			const char *en = strrchr(k.exist, '/');
 			en = en ? en + 1 : k.exist;
-			const char *p1 = T(k.repair_n ? STR_ALREADY_SHORT : STR_ALREADY_HERE);   // with errors: shorter, the count matters
+			const char *p1 = T(STR_ALREADY_HERE);   // "Redan rippad hit" + och verifierad / utan / med kända fel
 			if (strcmp(en, k.fname)) { snprintf(as, sizeof(as), T(STR_ALREADY_AS), en); p1 = as; }   // under another name
 			int w1 = ui_text_width(UI_SMALL, p1), w2 = ui_text_width(UI_SMALL, p2), x0 = single ? (ui_w() - w1 - w2) / 2 : left;
 			ui_text(UI_SMALL, x0, ly, 0x8FA8D8, p1);
