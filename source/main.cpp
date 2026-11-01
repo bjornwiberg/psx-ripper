@@ -1765,11 +1765,14 @@ static int pad_pressed()
 	return pressed;
 }
 
+// Top of the button hint bar: low on the screen (inside the TV safe area), so lists above it get room.
+static int hint_y() { return ui_h() - ui_h() * 4 / 100 - ui_line(UI_BODY); }
+
 static void hint_bar(const char *const *buttons, const char *const *labels, int n)
 {
 	int total = 0, gap = ui_w() / 24;
 	for (int i = 0; i < n; i++) total += ui_hint_width(buttons[i], labels[i]) + (i ? gap : 0);
-	int x = (ui_w() - total) / 2, y = ui_h() - ui_h() / 8;
+	int x = (ui_w() - total) / 2, y = hint_y();
 	for (int i = 0; i < n; i++) x += ui_hint(x, y, buttons[i], labels[i]) + gap;
 }
 
@@ -2394,7 +2397,7 @@ static int home_screen()
 				for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
 				char wl[64];
 				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
-				ui_text(UI_SMALL, ui_w() / 2, ui_h() - ui_h() / 8 - ui_line(UI_SMALL) * 2, 0x6870A0, wl, UI_CENTER);
+				ui_text(UI_SMALL, ui_w() / 2, hint_y() - ui_line(UI_SMALL) * 2, 0x6870A0, wl, UI_CENTER);
 			}
 			if (st == DISC_READY && g_repair_n) {
 				char rl[128];
