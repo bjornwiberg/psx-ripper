@@ -909,6 +909,29 @@ static uint64_t *g_uv_hash;
 static uint32_t g_nuv = 0;
 static volatile int g_phase = 0;   // 0 reading, 1 verify pass, 2 second pass
 
+// Recent events for the progress screen ("Sector 125454 fixed by re-reading"), newest last.
+#define NEV 5
+struct RipEvent { char text[120]; uint32_t col; };
+static RipEvent g_ev[NEV];
+static volatile int g_nev = 0, g_ev_seq = 0;
+static void rip_event(uint32_t col, StrId fmt, uint32_t lba, const char *why = NULL)
+{
+	if (g_nev == NEV) { memmove(g_ev, g_ev + 1, sizeof(RipEvent) * (NEV - 1)); g_nev--; }
+	snprintf(g_ev[g_nev].text, sizeof(g_ev[g_nev].text), T(fmt), lba, why ? why : "");
+	g_ev[g_nev].col = col;
+	__sync_synchronize();
+	g_nev++;
+	g_ev_seq++;
+}
+
+// "EDC" -> plain words for the screen
+static const char *why_words(const char *why)
+{
+	if (!strcmp(why, "EDC")) return T(STR_WHY_CHECKSUM);
+	if (!strcmp(why, "ECC")) return T(STR_WHY_ECC);
+	return T(STR_WHY_HEADER);
+}
+
 static uint64_t fnv64(const uint8_t *p, int n)
 {
 	uint64_t h = 1469598103934665603ULL;
@@ -995,6 +1018,9 @@ static int verify_pass()
 				g_rr_max = 0;
 				if (ok && fnv64(sec, RAW_SIZE) != g_uv_hash[k + j]) {
 					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; g_changed++; }
+					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
+				} else if (ok) {
+					rip_event(0xA8B0C8, STR_EV_CONFIRMED, lba);
 				}
 				if (!ok) note_hard(lba, 1);
 				if (g_unstable <= 32) logf("verify: sector %u read differently, %s", lba, ok ? (fnv64(sec, RAW_SIZE) != g_uv_hash[k + j] ? "confirmed new data" : "first read confirmed") : "NOT confirmed");
@@ -1037,6 +1063,9 @@ static int second_pass()
 					g_changed++;
 					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) patched++;
 					logf("second pass: sector %u confirmed with different data, image updated", lba);
+					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
+				} else {
+					rip_event(0xA8B0C8, STR_EV_CONFIRMED, lba);
 				}
 			} else {
 				logf("second pass: sector %u could not be confirmed", lba);
@@ -1047,6 +1076,7 @@ static int second_pass()
 			if (edc_bad) g_badsect--; else g_readerrs--;
 			g_recovered++;
 			logf("second pass: sector %u recovered", lba);
+			rip_event(0x7CE0A0, STR_EV_RECOVERED, lba);
 		}
 		g_pass2_done = k + 1;
 	}
@@ -1105,7 +1135,7 @@ static void rip_thread(void *arg)
 	g_unstable = 0; g_secure = 0; g_nsuspect = 0; g_confirmed = 0; g_changed = 0;
 	if (!g_vbuf) g_vbuf = (uint8_t *)memalign(128, CHUNK * SECT_Q);
 	if (!g_uv_lba) { g_uv_lba = (uint32_t *)malloc(MAX_UV * 4); g_uv_hash = (uint64_t *)malloc(MAX_UV * 8); }
-	g_nuv = 0; g_phase = 0;
+	g_nuv = 0; g_phase = 0; g_nev = 0;
 	g_reader_done = 0; g_write_failed = 0;
 	uint32_t data_end = (g_ntracks > 1) ? g_tracks[1].lba : g_leadout;  // LibCrypt lives in track 1
 
@@ -1155,6 +1185,7 @@ static void rip_thread(void *arg)
 					if (r) {
 						memset(sp, 0, SECT_Q); dead[i] = 1; g_readerrs++; last_bad = lba + i;
 						note_hard(lba + i, 0);
+						rip_event(0xFF8A80, STR_EV_UNREADABLE, lba + i);
 						if (g_readerrs <= 64 || g_readerrs % 100 == 0)
 							logf("unreadable sector %u (0x%x, %d tries, %u ms, %u so far)", lba + i, r, tries, (unsigned)(now_ms() - t0), g_readerrs);
 					}
@@ -1186,9 +1217,10 @@ static void rip_thread(void *arg)
 					if (read_cd(lba + i, 1, g_sec) == 0 && !check_sector(lba + i, g_sec)) { memcpy(sp, g_sec, SECT_Q); fixed = 1; }
 				}
 				g_rr_max = 0;
-				if (fixed) { g_recovered++; note_suspect(lba + i, sp); logf("sector %u: %s, fixed by re-read %d", lba + i, why, tries); }
+				if (fixed) { g_recovered++; note_suspect(lba + i, sp); rip_event(0x7CE0A0, STR_EV_FIXED, lba + i, why_words(why)); logf("sector %u: %s, fixed by re-read %d", lba + i, why, tries); }
 				else {
 					note_hard(lba + i, 1);
+					rip_event(0xFF8A80, STR_EV_STILLBAD, lba + i, why_words(why));
 					if (++g_badsect <= 32) logf("bad sector %u: %s, still wrong after %d re-reads", lba + i, why, tries);
 				}
 			}
@@ -1714,7 +1746,13 @@ static void progress_draw(const char *title, const char *detail, uint32_t pct, c
 	ui_text(UI_SMALL, ui_w() / 2, y + bh + ls / 2, 0xE8E8F0, p, UI_CENTER);
 	if (timeline && timeline[0]) ui_text(UI_SMALL, ui_w() / 2, y + bh + ls * 2, 0xA8B0C8, timeline, UI_CENTER);
 	if (cancelling) note = T(STR_CANCELLING);   // O was pressed: say what we are waiting for
-	if (note && note[0]) ui_text(UI_SMALL, ui_w() / 2, y + bh + ls * (timeline && timeline[0] ? 7 : 4) / 2, 0xF0C060, note, UI_CENTER);
+	int ny = y + bh + ls * (timeline && timeline[0] ? 7 : 4) / 2;
+	if (note && note[0]) ui_text(UI_SMALL, ui_w() / 2, ny, 0xF0C060, note, UI_CENTER);
+	// event feed (rip and repair only): newest at the bottom
+	if (timeline && timeline[0]) {
+		int n = g_nev, ey = ny + ls * 2;
+		for (int i = 0; i < n; i++) ui_text(UI_SMALL, ui_w() / 2, ey + i * ls * 11 / 10, g_ev[i].col, g_ev[i].text, UI_CENTER);
+	}
 	if (!cancelling) {
 		const char *b[] = {"circle"};
 		const char *l[] = {T(STR_HINT_CANCEL)};
@@ -2264,6 +2302,7 @@ static int rip_disc_inner(int fresh, int autorip)
 	Eta eta;
 	eta_start(&eta);
 	uint64_t shown_ms = 0;
+	int shown_ev = -1;
 	while (!g_finished) {
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
@@ -2272,8 +2311,9 @@ static int rip_disc_inner(int fresh, int autorip)
 		uint32_t rlba = g_rr_lba;
 		// redraw on a new percentage, every 256 sectors, or when the re-read state changes
 		if (pct != shown || pos / 256 != shown_pos / 256 || rtry != shown_try || (rmax && rlba != shown_lba) || g_abort != shown_abort ||
-		    now_ms() - shown_ms >= 1000) {
+		    now_ms() - shown_ms >= 1000 || g_ev_seq != shown_ev) {
 			shown_ms = now_ms();
+			shown_ev = g_ev_seq;
 			char pm[96], note[200] = "";
 			snprintf(pm, sizeof(pm), T(STR_PROGRESS), pos, g_total);
 			if (g_pass2_total) snprintf(note, sizeof(note), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
@@ -2542,16 +2582,22 @@ static int repair_disc()
 	char title[256];
 	snprintf(title, sizeof(title), T(STR_REPAIRING), g_name, g_serial);
 	pad_pressed();
-	uint32_t shown = ~0u; int shown_try = -1, shown_abort = 0;
+	uint32_t shown = ~0u; int shown_try = -1, shown_abort = 0, shown_ev = -1;
+	g_nev = 0;
+	Eta eta;
+	eta_start(&eta);
+	uint64_t shown_ms = 0;
 	while (!g_finished) {
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
 		uint32_t tot = g_pass2_total ? g_pass2_total : 1, done = g_pass2_done;
 		int rtry = g_rr_max ? g_rr_try : 0;
-		if (done != shown || rtry != shown_try || g_abort != shown_abort) {
-			char pm[96], note[200] = "";
+		if (done != shown || rtry != shown_try || g_abort != shown_abort || g_ev_seq != shown_ev || now_ms() - shown_ms >= 1000) {
+			shown_ev = g_ev_seq; shown_ms = now_ms();
+			char pm[96], note[200] = "", tl[96];
+			eta_line(&eta, done, g_pass2_total, tl, sizeof(tl));
 			snprintf(pm, sizeof(pm), T(STR_PROGRESS), done, g_pass2_total);
 			if (g_rr_max) snprintf(note, sizeof(note), T(STR_REREAD), g_rr_lba, rtry, g_rr_max);
-			progress_draw(title, pm, (uint32_t)((uint64_t)done * 100 / tot), note, g_abort);
+			progress_draw(title, pm, (uint32_t)((uint64_t)done * 100 / tot), note, g_abort, tl);
 			shown = done; shown_try = rtry; shown_abort = g_abort;
 		}
 		flip_frame();

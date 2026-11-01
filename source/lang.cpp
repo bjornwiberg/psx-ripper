@@ -121,6 +121,15 @@ static const char *en[STR_COUNT] = {
 	"No",
 	"OK",
 	"No sectors to repair: the previous rip is complete.",
+	"checksum",
+	"error correction data",
+	"sector header",
+	"Sector %u fixed by re-reading (%s)",
+	"Sector %u still wrong (%s), retried at the end",
+	"Sector %u could not be read, retried at the end",
+	"Sector %u read differently – corrected",
+	"Sector %u confirmed",
+	"Sector %u could be read at low speed",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -238,6 +247,15 @@ static const char *sv[STR_COUNT] = {
 	"Nej",
 	"OK",
 	"Inga sektorer att laga: den tidigare rippen är komplett.",
+	"kontrollsumma",
+	"felkorrigering",
+	"sektorhuvud",
+	"Sektor %u lagad vid omläsning (%s)",
+	"Sektor %u fortfarande fel (%s), provas igen i slutet",
+	"Sektor %u gick inte att läsa, provas igen i slutet",
+	"Sektor %u lästes olika – rättad",
+	"Sektor %u bekräftad",
+	"Sektor %u kunde läsas vid långsam läsning",
 };
 
 static const char **table = en;
