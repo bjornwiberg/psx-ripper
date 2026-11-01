@@ -2044,25 +2044,6 @@ static void space_check(uint32_t disc_mb)
 	g_space_short = (fr && fr < (uint64_t)disc_mb + 2) ? (int)(disc_mb + 2 - fr) : 0;
 }
 
-static void target_name(const char *dir, char *out, size_t n)
-{
-	// "Hard disk (/PSXISO, 120 GB free)", "USB 0 · exFAT (/PSXISO, 3 GB free)", "USB 1 · FAT32 (...)":
-	// the same for every destination; /dev_usbNNN is just the PS3's internal name
-	int port;
-	uint64_t mb = 0;
-	if (sscanf(dir, "exfat%1d:", &port) == 1) {
-		vf_free_mb(dir, &mb);
-		snprintf(out, n, T(STR_TARGET_EXFAT), port, (unsigned)(mb / 1024));
-		return;
-	}
-	char dev[16];
-	snprintf(dev, sizeof(dev), "%.12s", dir);   // "/dev_hdd0" or "/dev_usb001"
-	char *sl = strchr(dev + 1, '/');
-	if (sl) *sl = 0;
-	if (disk_free(dev, &mb)) mb = 0;
-	if (sscanf(dir, "/dev_usb%3d", &port) == 1) snprintf(out, n, T(STR_TARGET_USB), port, (unsigned)(mb / 1024));
-	else snprintf(out, n, T(STR_TARGET_HDD), (unsigned)(mb / 1024));
-}
 
 // Destination next to the current one in the list hard disk, USB 0, USB 1, ... (by port; a FAT32
 // drive is mounted by the PS3 as /dev_usbNNN, an exFAT drive is reached through FatFs).
@@ -2151,7 +2132,7 @@ static void region_of(const char *rdname, const char *serial, char *out, size_t 
 	if (!serial || strlen(serial) < 4) return;
 	if (serial[2] == 'E') snprintf(out, n, "Europe");                       // SLES, SCES, SLED, SCED
 	else if (serial[2] == 'U') snprintf(out, n, "USA");                     // SLUS, SCUS
-	else if (serial[2] == 'P' || serial[0] == 'S' && serial[1] == 'I') snprintf(out, n, "Japan");   // SLPS, SCPS, SLPM, SIPS
+	else if (serial[2] == 'P' || (serial[0] == 'S' && serial[1] == 'I')) snprintf(out, n, "Japan");   // SLPS, SCPS, SLPM, SIPS
 }
 
 // The file name for a pattern; illegal characters replaced, empty brackets and double spaces gone.
@@ -3633,149 +3614,193 @@ static int drive_column(int c, int right, int y, const char *idl)
 	return w;
 }
 
-static int draw_card(int c, int y, int focused, int single)
+
+// Tabs: one per drive, with a short status, the selected one blue. They scroll sideways when
+// there are more than fit. Returns the height used.
+static int draw_tabs(const int *list, int nc, int sel, int y)
 {
-	// Card, top to bottom: title (Redump's name when there is one) with the Redump icon | drive;
-	// what is known about the disc here | serial and size; (ripping: bar, then what it does);
-	// where it saves. A single drive: the same, centred, without a frame.
-	Card &k = g_cards[c];
-	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
-	int left = ui_w() / 8, right = ui_w() * 7 / 8, cx = ui_w() / 2;
-	int h = lb + ls * (k.job ? 3 : 2) + lb / 2;
-	if (!single) ui_rect(left - ui_w() / 60, y - lb / 3, right - left + ui_w() / 30, h, focused ? 0x703D6FD9 : 0x30FFFFFF);
-	int st = k.state, known = k.job || st == DISC_READY;
-	int ax = single ? cx : left, maxw = right - left;   // nothing goes past the card's edges
-	UiAlign al = single ? UI_CENTER : UI_LEFT;
-	int gap = ui_w() / 60;
-	// right column: the drive (icon + "USB 0" / "Intern läsare"), under it its model, then the disc
-	// in it (disc icon + ID and size)
-	char drive[96], model[48] = "", idl[64] = "";
-	if (c && usbodd_port(c - 1) >= 0) snprintf(drive, sizeof(drive), T(STR_SRC_USB_PORT), usbodd_port(c - 1));
-	else if (c) snprintf(drive, sizeof(drive), "USB");
-	else snprintf(drive, sizeof(drive), "%s", T(STR_SRC_BD));
-	if (c) snprintf(model, sizeof(model), "%s", usbodd_name(c - 1)[0] ? usbodd_name(c - 1) : "CD/DVD");
-	if (known) snprintf(idl, sizeof(idl), "%s  ·  %u MB", k.serial, k.mb);
-	int isz = ls * 3 / 4, igap = ls / 3;
-	const char *dicon = c ? "usb" : "drive";
-	int rw = 0;   // width the right column takes from the left one
-	if (single) {   // above the title, centred: the drive and its model on one line
-		char both[160];
-		snprintf(both, sizeof(both), model[0] ? "%s · %s" : "%s", drive, model);
-		int bw = ui_text_width(UI_SMALL, both), tx = cx - (bw + isz + igap) / 2 + isz + igap;
-		ui_icon(dicon, tx - igap - isz, y - ls + (ls - isz) / 2, isz, 0x8890A8);
-		ui_text(UI_SMALL, tx, y - ls, 0x8890A8, both);
-	} else {
-		rw = drive_column(c, right, y, idl) + gap;
+	int ls = ui_line(UI_SMALL), L = ui_w() / 8, R = ui_w() * 7 / 8;
+	int pad = ls * 2 / 3, isz = ls * 3 / 4, igap = ls / 3, gap = ls / 2, th = ls * 2;
+	// L1/R1 reminder on the right
+	char keys[32];
+	snprintf(keys, sizeof(keys), "L1  ◂  ▸  R1");
+	int kw = ui_text_width(UI_SMALL, keys);
+	ui_text(UI_SMALL, R, y + (th - ls) / 2, 0x8890A8, keys, UI_RIGHT);
+	int room = R - L - kw - gap * 2;
+	char name[NCARDS][32], stt[NCARDS][24];
+	uint32_t scol[NCARDS];
+	int w[NCARDS], si = 0;
+	for (int i = 0; i < nc; i++) {
+		int c = list[i];
+		Card &k = g_cards[c];
+		if (list[i] == sel) si = i;
+		if (c == 0) snprintf(name[i], sizeof(name[0]), "%s", T(STR_TAB_INTERNAL));
+		else if (usbodd_port(c - 1) >= 0) snprintf(name[i], sizeof(name[0]), T(STR_SRC_USB_PORT), usbodd_port(c - 1));
+		else snprintf(name[i], sizeof(name[0]), "USB");
+		scol[i] = 0x8890A8;
+		if (k.job) {
+			OnCard o(c);
+			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
+			snprintf(stt[i], sizeof(stt[0]), "%u %%", g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
+			scol[i] = 0xC8E05A;
+		} else if (k.res[0] && (k.state == DISC_READY || k.state == DISC_NONE)) {
+			snprintf(stt[i], sizeof(stt[0]), "%s", T(k.res_failed ? STR_TAB_FAILED : STR_TAB_DONE));
+			scol[i] = k.res_failed ? 0xF0C060 : k.res_col;
+		} else if (k.state == DISC_READING) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_READING)); }
+		else if (k.state == DISC_READY) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_READY)); scol[i] = 0xC8D0E0; }
+		else if (k.state == DISC_ERROR) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_NOTPSX)); scol[i] = 0xFF8A80; }
+		else snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_EMPTY));
+		w[i] = pad + isz + igap + ui_text_width(UI_SMALL, name[i]) + gap + ui_text_width(UI_SMALL, stt[i]) + pad;
 	}
-	int ly = y;
-	// title, with the Redump icon after it: medal = verified, warning = does not match, ? = not known yet
+	// the first tab shown: as far left as possible with the selected one still in view
+	int first = 0;
+	for (;;) {
+		int x = 0;
+		for (int i = first; i <= si; i++) x += w[i] + gap;
+		if (x - gap <= room || first == si) break;
+		first++;
+	}
+	int x = L, last = first - 1;
+	for (int i = first; i < nc; i++) {
+		if (x + w[i] > L + room) break;
+		bool on = list[i] == sel;
+		ui_rect(x, y, w[i], th, on ? 0xFF3D6FD9 : 0x30FFFFFF);
+		int tx = x + pad;
+		ui_icon(list[i] ? "usb" : "drive", tx, y + (th - isz) / 2, isz, on ? 0xFFFFFF : 0x8890A8);
+		tx += isz + igap;
+		tx += ui_text(UI_SMALL, tx, y + (th - ls) / 2, on ? 0xFFFFFF : 0xC8D0E0, name[i]) + gap;
+		ui_text(UI_SMALL, tx, y + (th - ls) / 2, scol[i], stt[i]);
+		x += w[i] + gap;
+		last = i;
+	}
+	int asz = ls / 2;   // more tabs than fit: small arrows at the row's ends
+	if (first > 0) ui_icon("left", L - asz - gap / 2, y + (th - asz) / 2, asz, 0xC8D0E0);
+	if (last < nc - 1) ui_icon("right", x, y + (th - asz) / 2, asz, 0xC8D0E0);
+	ui_rect(L, y + th + ls / 2, R - L, 2, 0x50FFFFFF);
+	return th + ls;
+}
+
+// One drive's page under the tabs: title (Redump's name) with the Redump icon | drive column;
+// the destination; ripping: a wide bar, percentage and time, what it does, the latest events;
+// not ripping: what is known about the disc here, how the last rip went, the destination to pick.
+static void draw_page(int c, int y)
+{
+	Card &k = g_cards[c];
+	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL), L = ui_w() / 8, R = ui_w() * 7 / 8;
+	int st = k.state, known = k.job || st == DISC_READY, gap = ui_w() / 60;
+	char idl[64] = "";
+	if (known) snprintf(idl, sizeof(idl), "%s  ·  %u MB", k.serial, k.mb);
+	int rw = drive_column(c, R, y, idl) + gap;
+	int lw = R - L - rw;
 	if (known) {
 		const char *title = k.rd_name[0] ? k.rd_name : k.title;
 		const char *icon = k.rd_state == 1 ? "medal" : k.rd_state == 0 ? "warn" : "question";
 		uint32_t icol = k.rd_state == 1 ? 0xE8C870 : k.rd_state == 0 ? 0xFF8A80 : 0x8890A8;
-		int bsz = lb * 3 / 4, room = maxw - rw - bsz - igap;
-		char t[200];
-		snprintf(t, sizeof(t), "%s", title);
-		int w = ui_text_width(UI_BODY, t);
+		int bsz = lb * 3 / 4, igap = ls / 3, room = lw - bsz - igap;
+		int w = ui_text_width(UI_BODY, title);
 		if (w > room) w = room;
-		int tx = single ? cx - (w + igap + bsz) / 2 : left;
-		ui_text_fit(UI_BODY, tx, ly, 0xFFFFFF, t, room);
-		ui_icon(icon, tx + w + igap, ly + (lb - bsz) / 2, bsz, icol);
-		ly += lb;
-		if (single) {
-			int iw = ui_text_width(UI_SMALL, idl), tx = cx - (iw + isz + igap) / 2 + isz + igap;
-			ui_icon("disc", tx - igap - isz, ly + (ls - isz) / 2, isz, 0x8890A8);
-			ui_text(UI_SMALL, tx, ly, 0x8890A8, idl);
-			ly += ls;
-		}
+		ui_text_fit(UI_BODY, L, y, 0xFFFFFF, title, room);
+		ui_icon(icon, L + w + igap, y + (lb - bsz) / 2, bsz, icol);
 	} else {
 		const char *msg = st == DISC_READING ? T(c ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
-		ui_text_fit(UI_BODY, ax, ly, 0xFFFFFF, msg, maxw - rw, al);
-		ly += lb;
+		ui_text_fit(UI_BODY, L, y, 0xFFFFFF, msg, lw);
 	}
-	int lw = single ? maxw : maxw - rw;   // the left column next to serial and size
-	if (k.job) {   // ripping: bar, percentage and time left; below it what the rip is doing
+	y += lb + ls / 2;
+	char dl[420];
+	if (k.job) {
+		dest_line(k.dest[0] ? k.dest : HDD_DIR, k.fname, dl, sizeof(dl), lw);
+		ui_text_fit(UI_SMALL, L, y, 0x8890A8, dl, lw);
+		y += ls * 3;
 		OnCard o(c);
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done, tot = g_total ? g_total : 1;
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / tot);
 		if (pct > 100) pct = 100;
-		int bw = (right - left) / 3, bh = ls / 2, bx = single ? cx - bw / 2 : left;
-		ui_rect(bx, ly + ls / 4, bw, bh, 0x50FFFFFF);
-		ui_rect(bx, ly + ls / 4, (int)((uint64_t)bw * pct / 100), bh, 0xFFC8E05A);
+		int bh = ls * 2 / 3;
+		ui_rect(L, y, R - L, bh, 0x50FFFFFF);
+		ui_rect(L, y, (int)((uint64_t)(R - L) * pct / 100), bh, 0xFFC8E05A);
+		y += bh + ls / 2;
 		Eta e = {k.eta_t0, k.eta_tw, k.eta_pw, k.eta_rate};
 		if (!k.eta_t0 || g_phase != k.eta_phase) { uint64_t t0 = k.eta_t0; eta_start(&e); if (t0) e.t0 = t0; k.eta_phase = g_phase; }
-		char tl[96], pl[140];
+		char tl[96], pc[16];
 		if (g_pass2_total && g_phase) eta_line(&e, g_pass2_done, g_pass2_total, tl, sizeof(tl));
 		else eta_line(&e, pos, g_total, tl, sizeof(tl));
 		k.eta_t0 = e.t0; k.eta_tw = e.tw; k.eta_pw = e.pw; k.eta_rate = e.rate;
-		snprintf(pl, sizeof(pl), "%u %%  ·  %s", pct, tl);
-		if (single) { ly += ls; ui_text_fit(UI_SMALL, cx, ly, 0xE8E8F0, pl, maxw, UI_CENTER); }
-		else ui_text_fit(UI_SMALL, bx + bw + gap, ly, 0xE8E8F0, pl, left + lw - (bx + bw + gap));
-		ly += ls;
-		char note[200] = "";
-		if (g_abort) snprintf(note, sizeof(note), "%s", T(STR_CANCELLING));
-		else if (g_phase == 3) snprintf(note, sizeof(note), "%s", T(STR_FINISHING));
-		else if (g_pass2_total) snprintf(note, sizeof(note), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
-		if (!g_abort && g_rr_max) snprintf(note + strlen(note), sizeof(note) - strlen(note), T(STR_REREAD), g_rr_lba, g_rr_max ? g_rr_try : 0, g_rr_max);
-		if (!g_abort && (g_readerrs || g_recovered)) {
-			size_t o2 = strlen(note);
-			snprintf(note + o2, sizeof(note) - o2, T(STR_READ_STATS), o2 ? " · " : "", g_readerrs, g_recovered);
+		snprintf(pc, sizeof(pc), "%u %%", pct);
+		ui_text(UI_BODY, L, y, 0xFFFFFF, pc);
+		ui_text(UI_BODY, R, y, 0xC8D0E0, tl, UI_RIGHT);
+		y += lb + ls / 2;
+		// what it does: the phase, a re-read, the counts
+		char ph[160];
+		if (g_abort) snprintf(ph, sizeof(ph), "%s", T(STR_CANCELLING));
+		else if (g_phase == 3) snprintf(ph, sizeof(ph), "%s", T(STR_FINISHING));
+		else if (g_pass2_total) snprintf(ph, sizeof(ph), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
+		else snprintf(ph, sizeof(ph), T(STR_PROGRESS), pos, g_total);
+		ui_text_fit(UI_BODY, L, y, 0xC8D0E0, ph, R - L);
+		y += lb;
+		if (!g_abort && g_rr_max) {
+			char rr[160];
+			snprintf(rr, sizeof(rr), T(STR_REREAD), g_rr_lba, g_rr_try, g_rr_max);
+			const char *r0 = rr;
+			while (*r0 == ' ' || *r0 == '\xc2' || *r0 == '\xb7') r0++;   // the re-read text starts with " · " when it follows another
+			ui_text_fit(UI_BODY, L, y, 0xF0C060, r0, R - L);
 		}
-		if (!note[0] && g_nev > 0) ui_text_fit(UI_SMALL, ax, ly, g_ev[g_nev - 1].col, g_ev[g_nev - 1].text, maxw, al);   // the latest event
-		else ui_text_fit(UI_SMALL, ax, ly, 0xF0C060, note, maxw, al);
-		ly += ls;
-	} else {
-		if (k.res[0] && k.res_failed && st == DISC_READY && k.prev_rip) {
-			// cancelled or failed over an earlier rip: that one is still there, say so on the same line
-			char p2[160], both[360];
-			if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_PREV_KEPT_ERRORS), k.repair_n);
-			else snprintf(p2, sizeof(p2), "%s", T(STR_PREV_KEPT));
-			snprintf(both, sizeof(both), "%s%s", k.res, p2);
-			ui_text_fit(UI_SMALL, ax, ly, k.res_col, both, lw, al);
-		} else if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // how the last rip on this drive went
-			ui_text_fit(UI_SMALL, ax, ly, k.res_col, k.res, lw, al);
-		} else if (st == DISC_READY && k.prev_rip) {   // already ripped here: one line, "known errors" in yellow
-			char p2[96], as[300];
-			if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), k.repair_n);
-			else if (k.rd_state == 1) snprintf(p2, sizeof(p2), "%s", T(STR_HERE_VERIFIED));   // the medal says the rest
-			else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
-			const char *en = strrchr(k.exist, '/');
-			en = en ? en + 1 : k.exist;
-			const char *p1 = T(STR_ALREADY_HERE);   // "Redan rippad hit" + och verifierad / utan / med kända fel
-			if (strcmp(en, k.fname)) { snprintf(as, sizeof(as), T(STR_ALREADY_AS), en); p1 = as; }   // under another name
-			int w1 = ui_text_width(UI_SMALL, p1), w2 = ui_text_width(UI_SMALL, p2), x0 = single ? (ui_w() - w1 - w2) / 2 : left;
-			ui_text(UI_SMALL, x0, ly, 0x8FA8D8, p1);
-			ui_text_fit(UI_SMALL, x0 + w1, ly, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2, lw - w1);
-		} else if (st == DISC_READY && k.space_short) {   // will not fit (a re-rip replaces the old image)
-			char sl[200];
-			snprintf(sl, sizeof(sl), T(STR_NO_SPACE), k.mb, (unsigned)(k.mb + 2 - k.space_short));
-			ui_text_fit(UI_SMALL, ax, ly, 0xFF8A80, sl, lw, al);
+		y += lb;
+		char cnt[160] = "";
+		snprintf(cnt, sizeof(cnt), T(STR_READ_STATS), "", g_readerrs, g_recovered);
+		ui_text_fit(UI_BODY, L, y, g_readerrs ? 0xF0C060 : 0xC8D0E0, cnt, R - L);
+		y += lb + ls;
+		// the latest events, newest at the bottom
+		if (g_nev > 0) {
+			y += section_head(L, R, y, T(STR_EVENTS));
+			for (int i = 0; i < g_nev; i++) { ui_text_fit(UI_SMALL, L, y, g_ev[i].col, g_ev[i].text, R - L); y += ls + ls / 4; }
 		}
-		ly += ls;
+		return;
 	}
-	// ←→ chooses where this drive saves; not ripping, the disc's ID and size sit on the same row on
-	// the right, so the line stops before them (the file name is shortened, never the free space)
-	char v[420];
-	int dw2 = k.job || single ? maxw : lw;
-	dest_line(k.dest[0] ? k.dest : HDD_DIR, known ? k.fname : "", v, sizeof(v), dw2, focused && !k.job ? "‹ %s ›" : "%s");
-	ui_text_fit(UI_SMALL, ax, ly, focused ? 0xC8D0E0 : 0x8890A8, v, dw2, al);
-	return h;
+	// not ripping
+	if (st == DISC_READY && k.prev_rip) {   // already ripped here
+		char p2[96], as[300], line[400];
+		if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), k.repair_n);
+		else if (k.rd_state == 1) snprintf(p2, sizeof(p2), "%s", T(STR_HERE_VERIFIED));
+		else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
+		const char *en = strrchr(k.exist, '/');
+		en = en ? en + 1 : k.exist;
+		const char *p1 = T(STR_ALREADY_HERE);
+		if (strcmp(en, k.fname)) { snprintf(as, sizeof(as), T(STR_ALREADY_AS), en); p1 = as; }
+		int w1 = ui_text_width(UI_BODY, p1);
+		snprintf(line, sizeof(line), "%s", p1);
+		ui_text_fit(UI_BODY, L, y, 0x8FA8D8, line, lw);
+		if (w1 < lw) ui_text_fit(UI_BODY, L + w1, y, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2, lw - w1);
+		y += lb + ls / 3;
+	}
+	if (st == DISC_READY && k.rd_state == 0) {   // Redump said no
+		ui_text_fit(UI_BODY, L, y, 0xFF8A80, T(STR_RD_NOMATCH), R - L);
+		y += lb + ls / 3;
+	}
+	if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // the last rip on this drive
+		char last[260];
+		snprintf(last, sizeof(last), T(STR_LAST_RIP), k.res);
+		ui_text_fit(UI_SMALL, L, y + (lb - ls) / 2, k.res_col, last, R - L);
+		y += lb + ls / 3;
+	}
+	if (st == DISC_READY && k.space_short && !k.prev_rip) {
+		char sl[200];
+		snprintf(sl, sizeof(sl), T(STR_NO_SPACE), k.mb, (unsigned)(k.mb + 2 - k.space_short));
+		ui_text_fit(UI_BODY, L, y, 0xFF8A80, sl, R - L);
+		y += lb + ls / 3;
+	}
+	y += ls / 2;
+	dest_line(k.dest[0] ? k.dest : HDD_DIR, known ? k.fname : "", dl, sizeof(dl), R - L, "‹ %s ›");   // ←→ where this drive saves
+	ui_text_fit(UI_BODY, L, y, 0xC8D0E0, dl, R - L);
+	y += lb + ls;
+	if (st == DISC_READY && k.prev_rip && k.repair_n) {   // what square does
+		char tip[200];
+		snprintf(tip, sizeof(tip), T(STR_REPAIR_TIP), k.repair_n);
+		ui_text_fit(UI_SMALL, L, y, 0x8890A8, tip, R - L);
+	}
 }
 
 static void rip_job_start(int c, int fresh);
 
-// Cards that fit on the home screen at once (room for ripping cards, the tallest). More drives
-// than that: pages, L1/R1. Flag file psxrip.page1: one card per page, to try the paging.
-static int cards_per_page()
-{
-	static int forced = -1;
-	if (forced < 0) { struct stat st; forced = stat("/dev_hdd0/tmp/psxrip.page1", &st) == 0; }
-	if (forced) return 1;
-	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
-	int top = ui_h() / 10 + ui_line(UI_TITLE) + lb * 2, bottom = hint_y() - lb * 2;
-	int n = (bottom - top) / (lb + ls * 3 + lb);
-	return n < 1 ? 1 : n;
-}
 
 // Home screen: a card per drive. Up/down picks a card; left/right its destination; X, square and
 // triangle act on it. Returns 1 = rip the disc in g_card's drive, 2 = rip a freshly inserted disc,
@@ -3848,25 +3873,10 @@ static int home_screen()
 			g_redraw = 0;
 			g_drawn = 2;
 			draw_backdrop();
-			int per = cards_per_page(), pg = si / per, npg = (nc + per - 1) / per;
-			if (nc == 1) {   // one drive: the card without a frame, in the middle as before
-				draw_card(sel, ui_h() * 2 / 5 - ui_line(UI_BODY), 1, 1);
-			} else {
-				int y0 = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, y = y0;
-				for (int i = pg * per; i < nc && i < pg * per + per; i++) y += draw_card(list[i], y, list[i] == sel, 0) + ui_line(UI_BODY) / 2;
-				if (npg > 1) {   // more cards to the side: a faint edge of the next card and an arrow, L1/R1
-					int asz = ui_line(UI_BODY) * 2 / 3, my = y0 + (y - y0) / 2 - asz / 2 - ui_line(UI_BODY) / 3;
-					int el = ui_w() / 8 - ui_w() / 60, er = ui_w() * 7 / 8 + ui_w() / 60, peek = ui_w() / 90;
-					if (pg > 0) {
-						ui_rect(0, y0 - ui_line(UI_BODY) / 3, peek, y - y0 - ui_line(UI_BODY) / 2, 0x28FFFFFF);
-						ui_icon("left", (el - asz) / 2, my, asz, 0xC8D0E0);
-					}
-					if (pg < npg - 1) {
-						ui_rect(ui_w() - peek, y0 - ui_line(UI_BODY) / 3, peek, y - y0 - ui_line(UI_BODY) / 2, 0x28FFFFFF);
-						ui_icon("right", er + (ui_w() - er - asz) / 2, my, asz, 0xC8D0E0);
-					}
-				}
-			}
+			int py = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY);
+			if (nc > 1) py += draw_tabs(list, nc, sel, py);   // one drive: no tabs, just its page
+			else py += ui_line(UI_BODY);
+			draw_page(sel, py);
 			// above the bottom row, the general things: webhooks on the left, settings and exit on the right
 			int gy = hint_y() - ui_line(UI_BODY) * 3 / 2;
 			if (g_webhook_on && g_webhook[0]) {   // just a hint that webhooks are on; details in the settings
@@ -3878,9 +3888,7 @@ static int home_screen()
 			}
 			{
 				int w1 = ui_hint_width("start", T(STR_HINT_SETTINGS)), w2 = f.job ? 0 : ui_hint_width("circle", T(STR_HINT_EXIT)), gap = ui_w() / 40;
-				int w0 = npg > 1 ? ui_hint_width("l1r1", T(STR_HINT_PAGE)) + gap : 0;   // pages of cards: L1/R1
-				int x = ui_w() * 7 / 8 - w1 - (w2 ? gap + w2 : 0) - w0;
-				if (w0) x += ui_hint(x, gy, "l1r1", T(STR_HINT_PAGE)) + gap;
+				int x = ui_w() * 7 / 8 - w1 - (w2 ? gap + w2 : 0);
 				x += ui_hint(x, gy, "start", T(STR_HINT_SETTINGS)) + gap;
 				if (w2) ui_hint(x, gy, "circle", T(STR_HINT_EXIT));   // O on a ripping card cancels its rip instead
 			}
@@ -3909,13 +3917,10 @@ static int home_screen()
 		}
 		flip_frame();
 		int p = pad_pressed();
-		if ((p & B_UP) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }   // over the page edge too
+		if ((p & B_UP) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }   // also up/down change the tab
 		if ((p & B_DOWN) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }
-		{
-			int per = cards_per_page(), pg = si / per, npg = (nc + per - 1) / per;
-			if ((p & B_R1) && pg < npg - 1) { sel = list[(pg + 1) * per]; g_redraw = 2; }   // next page: its first card
-			if ((p & B_L1) && pg > 0) { sel = list[(pg - 1) * per]; g_redraw = 2; }
-		}
+		if ((p & B_R1) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }   // the next / previous tab
+		if ((p & B_L1) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }
 		if (f.job) {   // a ripping card: only cancel, and the general settings (they apply to the next rips)
 			if (p & B_CIRCLE) {
 				char m[300];

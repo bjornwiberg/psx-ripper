@@ -238,6 +238,16 @@ static const char *en[STR_COUNT] = {
 	" and verified against Redump.",
 	"Already ripped here",
 	"Page",
+	"Internal",
+	"Done",
+	"Failed",
+	"Reading",
+	"Ready",
+	"Not PS1",
+	"Empty",
+	"Events",
+	"Last rip: %s",
+	"Square repairs: only these %d sectors are read again (clean the disc first).",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -472,6 +482,16 @@ static const char *sv[STR_COUNT] = {
 	" och verifierad mot Redump.",
 	"Redan rippad hit",
 	"Sida",
+	"Intern",
+	"Klar",
+	"Fel",
+	"Läser",
+	"Redo",
+	"Inte PS1",
+	"Tom",
+	"Händelser",
+	"Senaste rippningen: %s",
+	"Tryck □ Laga efter att skivan har rengjorts: bara de %d sektorerna läses om.",
 };
 
 static const char **table = en;
