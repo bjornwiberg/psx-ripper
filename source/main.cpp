@@ -26,6 +26,7 @@
 #include "lang.h"
 #include "ui.h"
 #include "md5.h"
+#include "redump.h"
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
 // Output locations; the mount test redirects both so a mounted image is never overwritten
@@ -40,6 +41,7 @@ static int g_retries = 4;          // attempts per READ CD before falling back /
 static int g_speed = 0;            // 0 = max, 1 = 8x, 2 = 4x, 3 = 2x
 static int g_eject = 1;            // eject the disc after a successful rip
 static int g_autostart = 0;        // rip an inserted disc without the confirmation
+static int g_redump = RD_OFF;      // verification against Redump: off, online or local copy
 static const int speed_x[4] = {0, 8, 4, 2};
 
 static void cfg_load()
@@ -54,6 +56,7 @@ static void cfg_load()
 		else if (!strncmp(line, "speed=", 6)) { int v = atoi(line + 6); if (v >= 0 && v <= 3) g_speed = v; }
 		else if (!strncmp(line, "eject=", 6)) g_eject = atoi(line + 6) ? 1 : 0;
 		else if (!strncmp(line, "autostart=", 10)) g_autostart = atoi(line + 10) ? 1 : 0;
+		else if (!strncmp(line, "redump=", 7)) { int v = atoi(line + 7); if (v >= RD_OFF && v <= RD_LOCAL) g_redump = v; }
 	}
 	fclose(f);
 }
@@ -62,7 +65,7 @@ static void cfg_save()
 {
 	FILE *f = fopen(CFG_PATH, "w");
 	if (!f) return;
-	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\n", g_outdir, g_retries, g_speed, g_eject, g_autostart);
+	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\n", g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump);
 	fclose(f);
 }
 
@@ -663,6 +666,34 @@ static int track_is_audio(uint32_t lba)
 // MD5 per track, computed by the writer thread (Redump hashes each track separately)
 static Md5 g_md5[MAX_TRACKS + 1];
 static char g_track_md5[MAX_TRACKS + 1][33];
+static uint8_t g_track_md5bin[MAX_TRACKS + 1][16];
+// First sector of each track as Redump splits a disc: tracks after the first start at their
+// pregap (INDEX 00), not at INDEX 01 from the TOC. Starts with the usual 2 s pregap after a data
+// track and is corrected from the Q subchannel (absolute time + track number) while reading.
+static volatile uint32_t g_tstart[MAX_TRACKS + 1];
+
+static void tstart_init()
+{
+	g_tstart[0] = 0;
+	for (int t = 1; t < g_ntracks; t++) {
+		uint32_t l = g_tracks[t].lba;
+		int audio = !(g_tracks[t].ctrl & 0x4);
+		g_tstart[t] = (audio && l >= 150 && (g_tracks[t - 1].ctrl & 0x4)) ? l - 150 : l;
+	}
+}
+
+static void tstart_from_q(const uint8_t *q)
+{
+	if ((q[0] & 0x0F) != 1) return;   // ADR 1: position data
+	int num = bcd2(q[1]);
+	int abs_lba = (bcd2(q[7]) * 60 + bcd2(q[8])) * 75 + bcd2(q[9]) - 150;
+	for (int t = 1; t < g_ntracks; t++) {
+		int l = (int)g_tracks[t].lba;
+		if (abs_lba >= l || abs_lba + 750 < l) continue;      // only look within 10 s before INDEX 01
+		if (num == g_tracks[t].num && abs_lba < (int)g_tstart[t]) g_tstart[t] = abs_lba;            // pregap starts earlier
+		else if (num == g_tracks[t - 1].num && abs_lba >= (int)g_tstart[t]) g_tstart[t] = abs_lba + 1;   // or later
+	}
+}
 
 static uint8_t *g_bufs[2];
 static volatile uint32_t g_buf_len[2];   // sectors in buffer, 0 = empty
@@ -683,8 +714,8 @@ static void writer_thread(void *arg)
 		for (uint32_t i = 0; i < n;) {
 			uint32_t lba = first + i;
 			int t = g_ntracks - 1;
-			while (t > 0 && lba < g_tracks[t].lba) t--;
-			uint32_t end = (t + 1 < g_ntracks) ? g_tracks[t + 1].lba : g_leadout;
+			while (t > 0 && lba < g_tstart[t]) t--;
+			uint32_t end = (t + 1 < g_ntracks) ? g_tstart[t + 1] : g_leadout;
 			uint32_t cnt = end - lba;
 			if (cnt > n - i) cnt = n - i;
 			md5_update(&g_md5[t], g_bufs[k] + i * RAW_SIZE, cnt * RAW_SIZE);
@@ -708,6 +739,7 @@ static void rip_thread(void *arg)
 	g_bufs[1] = (uint8_t *)memalign(128, CHUNK * SECT_Q);
 	g_buf_len[0] = g_buf_len[1] = 0;
 	for (int t = 0; t < g_ntracks; t++) md5_init(&g_md5[t]);
+	tstart_init();
 	g_reader_done = 0; g_write_failed = 0;
 	uint32_t data_end = (g_ntracks > 1) ? g_tracks[1].lba : g_leadout;  // LibCrypt lives in track 1
 
@@ -737,8 +769,10 @@ static void rip_thread(void *arg)
 			}
 		}
 		// check Q first, then pack the 2352-byte sectors in place for a single write
-		for (uint32_t i = 0; i < n; i++)
+		for (uint32_t i = 0; i < n; i++) {
 			if (g_is_pal && lba + i < data_end && !track_is_audio(lba + i)) check_subq(lba + i, buf + i * SECT_Q + RAW_SIZE);
+			if (g_ntracks > 1) tstart_from_q(buf + i * SECT_Q + RAW_SIZE);
+		}
 		for (uint32_t i = 1; i < n; i++) memmove(buf + i * RAW_SIZE, buf + i * SECT_Q, RAW_SIZE);
 		lba += n;
 		g_buf_end[k] = lba;
@@ -751,10 +785,9 @@ static void rip_thread(void *arg)
 	sysThreadJoin(wtid, &rv);
 	fclose(g_out);
 	for (int t = 0; t < g_ntracks; t++) {
-		uint8_t d[16];
-		md5_final(&g_md5[t], d);
-		md5_hex(d, g_track_md5[t]);
-		logf("track %d md5 %s", g_tracks[t].num, g_track_md5[t]);
+		md5_final(&g_md5[t], g_track_md5bin[t]);
+		md5_hex(g_track_md5bin[t], g_track_md5[t]);
+		logf("track %d start %u (index 01 %u) md5 %s", g_tracks[t].num, g_tstart[t], g_tracks[t].lba, g_track_md5[t]);
 	}
 	free(g_bufs[0]);
 	free(g_bufs[1]);
@@ -777,8 +810,8 @@ static void write_cue(const char *binname)
 		int audio = !(g_tracks[t].ctrl & 0x4);
 		fprintf(f, "  TRACK %02d %s\r\n", g_tracks[t].num, audio ? "AUDIO" : "MODE2/2352");
 		uint32_t l = g_tracks[t].lba;
-		if (t > 0 && audio && l >= 150 && (g_tracks[t - 1].ctrl & 0x4)) {
-			uint32_t p = l - 150;   // 2 s pregap after the data track
+		if (t > 0 && g_tstart[t] < l) {
+			uint32_t p = g_tstart[t];   // pregap, from the Q subchannel
 			fprintf(f, "    INDEX 00 %02u:%02u:%02u\r\n", p / 4500, (p / 75) % 60, p % 75);
 		}
 		fprintf(f, "    INDEX 01 %02u:%02u:%02u\r\n", l / 4500, (l / 75) % 60, l % 75);
@@ -954,6 +987,111 @@ static volatile int g_ident_busy = 0;
 static char g_disc_title[128], g_disc_serial[16];
 static uint32_t g_disc_mb;
 
+// Redump lookup for the home screen; runs after identification (network only, no drive access).
+static char g_disc_rd[RD_NAME + 48];   // line shown on the home screen, empty = none
+static volatile int g_rd_seq = 0;      // bumped when g_disc_rd changes
+static volatile int g_rd_busy = 0;     // a lookup is running (redump.cpp uses static buffers)
+static RdDisc g_rd_discs[4];           // online results, reused to verify the rip
+static int g_rd_ndiscs = -1;           // -1 = no online lookup for the current disc
+static char g_rd_serial[16];           // serial the online results belong to
+
+static void rd_set(const char *text)
+{
+	snprintf(g_disc_rd, sizeof(g_disc_rd), "%s", text);
+	__sync_synchronize();
+	g_rd_seq++;
+}
+
+static void rd_guess_names(int hits, char (*names)[RD_NAME])
+{
+	char line[RD_NAME + 48];
+	if (hits <= 0) snprintf(line, sizeof(line), "%s", T(STR_RD_GUESS_NONE));
+	else if (hits == 1) snprintf(line, sizeof(line), T(STR_RD_GUESS), names[0]);
+	else snprintf(line, sizeof(line), T(STR_RD_GUESS_MORE), names[0], hits - 1);
+	rd_set(line);
+}
+
+// What Redump says about the identified disc: by size (local copy) or by serial (online).
+static void redump_lookup(const char *serial, uint64_t total, int ntracks)
+{
+	while (g_rd_busy) usleep(10000);
+	g_rd_busy = 1;
+	g_rd_ndiscs = -1;
+	if (g_redump == RD_LOCAL) {
+		char names[1][RD_NAME];
+		int hits = rd_local_by_size(total, ntracks, names, 1);
+		if (hits < 0) rd_set(T(STR_RD_UNCHECKED));
+		else rd_guess_names(hits, names);
+		logf("redump local: %d disc(s) with %d track(s) and %llu bytes", hits, ntracks, (unsigned long long)total);
+	} else if (g_redump == RD_ONLINE && serial[0]) {
+		rd_set(T(STR_RD_SEARCHING));
+		int nd = rd_online(serial, g_rd_discs, 4);
+		if (nd < 0) { rd_set(T(STR_RD_UNCHECKED)); }
+		else if (nd == 0) { rd_set(T(STR_RD_NOTFOUND)); g_rd_ndiscs = 0; }
+		else {
+			char names[4][RD_NAME];
+			for (int i = 0; i < nd; i++) snprintf(names[i], RD_NAME, "%s", g_rd_discs[i].name);
+			rd_guess_names(nd, names);
+			g_rd_ndiscs = nd;
+		}
+		snprintf(g_rd_serial, sizeof(g_rd_serial), "%s", serial);
+	}
+	g_rd_busy = 0;
+}
+
+// Re-run the lookup for the disc already shown (the Redump setting was changed).
+static char g_id_serial[16];
+static uint64_t g_id_total;
+static int g_id_ntracks;
+static void lookup_thread(void *arg)
+{
+	rd_set("");
+	if (g_redump != RD_OFF) redump_lookup(g_id_serial, g_id_total, g_id_ntracks);
+	sysThreadExit(0);
+}
+
+static void lookup_start()
+{
+	sys_ppu_thread_t t;
+	sysThreadCreate(&t, lookup_thread, NULL, 1000, 0x10000, 0, (char *)"psxlookup");
+}
+
+// Compares the track MD5s of the finished rip with Redump. Fills `out` with the result line.
+static void redump_verify(char *out, size_t n)
+{
+	char name[RD_NAME] = "";
+	int r;   // 1 = verified, 0 = no match, -1 = could not check, -2 = serial unknown to Redump
+	while (g_rd_busy) usleep(10000);
+	if (g_redump == RD_LOCAL) {
+		r = rd_local_verify(g_track_md5bin, g_ntracks, name, sizeof(name));
+	} else if (!g_serial[0]) {
+		r = -1;
+	} else {
+		g_rd_busy = 1;
+		if (g_rd_ndiscs < 0 || strcmp(g_rd_serial, g_serial)) {
+			g_rd_ndiscs = rd_online(g_serial, g_rd_discs, 4);
+			snprintf(g_rd_serial, sizeof(g_rd_serial), "%s", g_serial);
+		}
+		g_rd_busy = 0;
+		if (g_rd_ndiscs < 0) r = -1;
+		else if (g_rd_ndiscs == 0) r = -2;
+		else {
+			r = 0;
+			for (int i = 0; i < g_rd_ndiscs && r == 0; i++) {
+				const RdDisc *d = &g_rd_discs[i];
+				int ok = d->n == g_ntracks;
+				for (int t = 0; t < g_ntracks && ok; t++) ok = !memcmp(d->md5[t], g_track_md5bin[t], 16);
+				if (ok) { r = 1; snprintf(name, sizeof(name), "%s", d->name); }
+			}
+		}
+	}
+	if (r == 1) snprintf(out, n, T(STR_RD_VERIFIED), name);
+	else if (r == 0) snprintf(out, n, "%s", T(STR_RD_NOMATCH));
+	else if (r == -2) snprintf(out, n, "%s", T(STR_RD_NOTFOUND));
+	else snprintf(out, n, "%s", T(STR_RD_UNCHECKED));
+	logf("redump verify (%s) -> %d %s", g_redump == RD_LOCAL ? "local" : "online", r, name);
+}
+
 static void identify_thread(void *arg)
 {
 	if ((long)arg) usleep(2000 * 1000);   // freshly inserted: let the drive spin up
@@ -963,6 +1101,7 @@ static void identify_thread(void *arg)
 	// Undo the lv1 patch straight away: if the app is then killed (webMAN exit, XMB quit) the
 	// hypervisor would stay patched and the next system storage operation (pkg install) hangs.
 	lv1_storage_unpatch();
+	rd_set("");
 	if (r == 0) {
 		snprintf(g_disc_title, sizeof(g_disc_title), "%s", g_name);
 		snprintf(g_disc_serial, sizeof(g_disc_serial), "%s", g_serial[0] ? g_serial : T(STR_UNKNOWN));
@@ -973,7 +1112,11 @@ static void identify_thread(void *arg)
 		g_disc_state = (r == -2) ? DISC_NONE : DISC_ERROR;
 	}
 	logf("identify -> %d (state %d)", r, g_disc_state);
-	g_ident_busy = 0;
+	snprintf(g_id_serial, sizeof(g_id_serial), "%s", g_serial);
+	g_id_total = (uint64_t)g_leadout * RAW_SIZE;
+	g_id_ntracks = g_ntracks;
+	g_ident_busy = 0;   // the drive is free; the lookup below only uses the network
+	if (r == 0 && g_redump != RD_OFF) redump_lookup(g_id_serial, g_id_total, g_id_ntracks);
 	sysThreadExit(0);
 }
 
@@ -1044,13 +1187,64 @@ static void flip_frame()
 	present();
 }
 
+// Downloads the Redump dat to the console and builds the local index (progress dialog, O cancels).
+static volatile uint32_t g_dl_done, g_dl_total;
+static volatile int g_dl_phase, g_dl_abort, g_dl_result, g_dl_finished;
+static void download_thread(void *arg)
+{
+	while (g_rd_busy) usleep(10000);
+	g_rd_busy = 1;
+	g_dl_result = rd_download(&g_dl_done, &g_dl_total, &g_dl_phase, &g_dl_abort);
+	g_rd_busy = 0;
+	g_dl_finished = 1;
+	sysThreadExit(0);
+}
+
+static void redump_download_screen()
+{
+	g_dl_done = g_dl_total = 0; g_dl_phase = 0; g_dl_abort = 0; g_dl_finished = 0;
+	sys_ppu_thread_t tid;
+	sysThreadCreate(&tid, download_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxredump");
+	dialog_action = 0;
+	msgDialogOpen2((msgType)(MSG_DIALOG_SINGLE_PROGRESSBAR | MSG_DIALOG_MUTE_ON), T(STR_RD_DOWNLOADING), dialog_handler, NULL, NULL);
+	uint32_t shown = 0;
+	int last_phase = -1;
+	time_t last_msg = 0;
+	while (!g_dl_finished) {
+		if (dialog_action == 2 || exit_requested) g_dl_abort = 1;
+		uint32_t tot = g_dl_total ? g_dl_total : 1;
+		uint32_t pct = (uint32_t)((uint64_t)g_dl_done * 50 / tot) + (g_dl_phase ? 50 : 0);   // half download, half index
+		if (pct > 100) pct = 100;
+		if (pct > shown) { msgDialogProgressBarInc(MSG_PROGRESSBAR_INDEX0, pct - shown); shown = pct; }
+		if (g_dl_phase != last_phase || time(NULL) != last_msg) {
+			char pm[96];
+			if (g_dl_phase) snprintf(pm, sizeof(pm), "%s", T(STR_RD_INDEXING));
+			else snprintf(pm, sizeof(pm), T(STR_RD_DL_PROGRESS), g_dl_done / 1024, g_dl_total / 1024);
+			msgDialogProgressBarSetMsg(MSG_PROGRESSBAR_INDEX0, pm);
+			last_phase = g_dl_phase; last_msg = time(NULL);
+		}
+		do_flip();
+	}
+	u64 rv;
+	sysThreadJoin(tid, &rv);
+	msgDialogAbort();
+	logf("redump download result %d", g_dl_result);
+	if (g_dl_result == -7 || exit_requested) return;   // cancelled
+	char msg[256], ver[64] = "";
+	if (g_dl_result > 0) { rd_local_info(ver, sizeof(ver)); snprintf(msg, sizeof(msg), T(STR_RD_DL_DONE), g_dl_result, ver); }
+	else snprintf(msg, sizeof(msg), T(STR_RD_DL_FAILED), g_dl_result);
+	tell(msg);
+}
+
 static void settings_screen()
 {
 	// edit locally; each change is applied and saved at once, O goes back
 	char outdir[64];
 	snprintf(outdir, sizeof(outdir), "%s", g_outdir);
-	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, row = 0;
-	const int NROWS = 5;
+	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, redump = g_redump, row = 0;
+	const int NROWS = 7;
+	char rdver[64] = "";
+	int rdcount = rd_local_info(rdver, sizeof(rdver));
 	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	pad_pressed();
 	g_redraw = 2;
@@ -1060,7 +1254,7 @@ static void settings_screen()
 		g_drawn = 2;
 		draw_backdrop();
 		ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_SETTINGS_TITLE), UI_CENTER);
-		char vals[5][96];
+		char vals[7][96];
 		char save_dir[64]; snprintf(save_dir, sizeof(save_dir), "%s", g_outdir);
 		snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
 		target_name(outdir, vals[0], sizeof(vals[0]));
@@ -1069,18 +1263,26 @@ static void settings_screen()
 		if (speed) snprintf(vals[2], sizeof(vals[2]), "%d\xC3\x97", speed_x[speed]); else snprintf(vals[2], sizeof(vals[2]), "%s", T(STR_SPEED_MAX));
 		snprintf(vals[3], sizeof(vals[3]), "%s", eject ? T(STR_ON) : T(STR_OFF));
 		snprintf(vals[4], sizeof(vals[4]), "%s", autostart ? T(STR_ON) : T(STR_OFF));
-		const char *labels[5] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART)};
-		int top = ui_h() / 3, lh = ui_line(UI_BODY) * 2, left = ui_w() / 6, right = ui_w() * 5 / 6;
+		snprintf(vals[5], sizeof(vals[5]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
+		if (rdcount > 0) {
+			char date[16];
+			snprintf(date, sizeof(date), "%.10s", rdver);   // "2026-06-15 11-55-46" -> date only
+			snprintf(vals[6], sizeof(vals[6]), T(STR_RD_COPY_VALUE), date, rdcount);
+		} else {
+			snprintf(vals[6], sizeof(vals[6]), "%s", T(STR_RD_MISSING));
+		}
+		const char *labels[7] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY)};
+		int top = ui_h() * 3 / 10, lh = ui_line(UI_BODY) * 2, left = ui_w() / 6, right = ui_w() * 5 / 6;
 		for (int r = 0; r < NROWS; r++) {
 			int y = top + r * lh;
 			if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
 			ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
 			char v[128];
-			snprintf(v, sizeof(v), r == row ? "‹ %s ›" : "%s", vals[r]);
+			snprintf(v, sizeof(v), r == row && r != 6 ? "‹ %s ›" : "%s", vals[r]);   // row 6 is an action
 			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 		}
-		const char *b[] = {"updown", "leftright", "circle"};
-		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
+		const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "circle"};
+		const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
 		hint_bar(b, l, 3);
 		}
 		flip_frame();
@@ -1088,7 +1290,15 @@ static void settings_screen()
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
+		if ((p & B_CROSS) && row == 6) {
+			redump_download_screen();
+			rdcount = rd_local_info(rdver, sizeof(rdver));
+			pad_pressed();
+			g_redraw = 2;
+			continue;
+		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
+		if (row == 6) d = 0;
 		if (d) {
 			if (row == 0) {
 				char save_dir2[64]; snprintf(save_dir2, sizeof(save_dir2), "%s", g_outdir);
@@ -1103,15 +1313,17 @@ static void settings_screen()
 				speed = (speed + (d > 0 ? 1 : 3)) % 4;
 			} else if (row == 3) {
 				eject = !eject;
-			} else {
+			} else if (row == 4) {
 				autostart = !autostart;
+			} else {
+				redump = (redump + (d > 0 ? 1 : 2)) % 3;
 			}
 			// every change is applied and saved immediately
 			snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
-			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart;
+			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump;
 			OUT_DIR = g_outdir;
 			cfg_save();
-			logf("settings saved: outdir=%s retries=%d speed=%d eject=%d autostart=%d", g_outdir, g_retries, g_speed, g_eject, g_autostart);
+			logf("settings saved: outdir=%s retries=%d speed=%d eject=%d autostart=%d redump=%d", g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump);
 		}
 		if (p & B_CIRCLE) return;
 	}
@@ -1136,8 +1348,9 @@ static int home_screen()
 	g_redraw = 2;
 	pad_pressed();   // swallow buttons still held from a previous screen
 	if (g_disc_state != DISC_READY && !g_ident_busy) identify_start(0);
-	int last_state = -1, inserted = 0;
+	int last_state = -1, inserted = 0, last_rd = -1;
 	while (!exit_requested) {
+		if (g_rd_seq != last_rd) { last_rd = g_rd_seq; g_redraw = 2; }
 		if (disc_inserted) { disc_inserted = 0; inserted = 1; while (g_ident_busy) usleep(10000); identify_start(1); }
 		if (!disc_present) { if (g_disc_state != DISC_NONE && !g_ident_busy) g_disc_state = DISC_NONE; inserted = 0; }
 		int st = g_disc_state;
@@ -1161,7 +1374,9 @@ static int home_screen()
 				const char *msg = st == DISC_READING ? T(STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
 				ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, msg, UI_CENTER);
 			}
-			ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, 0x8890A8, saving, UI_CENTER);
+			if (st == DISC_READY && g_disc_rd[0])
+				ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 3 / 2 - ui_line(UI_SMALL) / 2, 0x9AD0A8, g_disc_rd, UI_CENTER);
+			ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2 + (st == DISC_READY && g_disc_rd[0] ? ui_line(UI_SMALL) : 0), 0x8890A8, saving, UI_CENTER);
 			if (st == DISC_READY) {
 				const char *b[] = {"cross", "triangle", "square", "circle"};
 				const char *l[] = {T(STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
@@ -1180,14 +1395,19 @@ static int home_screen()
 		int p = pad_pressed();
 		if ((p & B_CROSS) && st == DISC_READY) return inserted ? 2 : 1;
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
-		if (p & (B_SQUARE | B_START)) { settings_screen(); g_redraw = 2; }
+		if (p & (B_SQUARE | B_START)) {
+			int old = g_redump;
+			settings_screen();
+			if (g_redump != old && g_disc_state == DISC_READY && !g_ident_busy) lookup_start();
+			g_redraw = 2;
+		}
 		if (p & B_CIRCLE) return 0;
 	}
 	return 0;
 }
 
 // ---------------------------------------------------------------- one disc
-static char g_done_msg[512];   // summary of the last successful rip
+static char g_done_msg[768];   // summary of the last successful rip
 
 // Returns 1 when the disc was ripped successfully. `autorip` skips the confirmation.
 // Opens the drive, unlocks raw reads, reads the TOC and identifies the disc (g_serial, g_name, g_base).
@@ -1242,7 +1462,7 @@ static int prepare_disc(int *err, int *code)
 
 static int rip_disc_inner(int fresh, int autorip)
 {
-	char msg[512];
+	char msg[768];
 	int err = 0, code = 0;
 	if (prepare_disc(&err, &code)) {
 		if (err == STR_OPEN_FAILED) snprintf(msg, sizeof(msg), T(STR_OPEN_FAILED), code);
@@ -1330,6 +1550,9 @@ static int rip_disc_inner(int fresh, int autorip)
 		}
 	}
 
+	char rdinfo[RD_NAME + 80] = "";
+	if (g_redump != RD_OFF) redump_verify(rdinfo, sizeof(rdinfo));
+
 	// Only discs on the known LibCrypt list get an SBI and a LibCrypt line in the dialog.
 	// Other PAL discs are still checked, but a hit is only logged as a hint.
 	char lcinfo[200] = "";
@@ -1366,8 +1589,9 @@ static int rip_disc_inner(int fresh, int autorip)
 		     g_lc[i].q[6], g_lc[i].q[7], g_lc[i].q[8], g_lc[i].q[9]);
 
 	g_ripped++;
-	char lcline[208] = "";
+	char lcline[480] = "";
 	if (lcinfo[0]) snprintf(lcline, sizeof(lcline), "\n%s", lcinfo);
+	if (rdinfo[0]) snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), "\n%s", rdinfo);
 	snprintf(msg, sizeof(msg), T(STR_DONE),
 	         g_base, lcline, g_readerrs);
 	logf("done: %s errs=%u", g_base, g_readerrs);
@@ -1446,7 +1670,7 @@ int main(int argc, char *argv[])
 		// auto mode: show the result and wait for the next disc. X hides the summary, O leaves auto mode.
 		int show_summary = 1;
 		while (!exit_requested) {
-			char text[700];
+			char text[1024];
 			if (show_summary) snprintf(text, sizeof(text), "%s\n\n%s", g_done_msg, T(g_eject ? STR_NEXT_DISC : STR_NEXT_DISC_NOEJECT));
 			else snprintf(text, sizeof(text), "%s", T(g_eject ? STR_NEXT_DISC : STR_NEXT_DISC_NOEJECT));
 			disc_inserted = 0;

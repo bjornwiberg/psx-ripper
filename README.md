@@ -33,12 +33,32 @@ straight to the internal hard disk, ready to play with webMAN MOD / Cobra.
 
 1. Install `psxripper.pkg` (Package Manager → Install Package Files, or webMAN *Install PKG*).
 2. Start **PSX Ripper** from the Game column.
-3. Insert a PS1 disc, or select *Yes* if it is already in the drive.
-4. Confirm the detected title and serial, and wait. A full CD takes about 3.5–4 minutes.
-5. The disc is ejected when done. Insert the next disc to rip it automatically, or press O to
-   go back; select *No* on the start screen to exit and refresh webMAN's game list.
+3. Insert a PS1 disc. The start screen identifies it (title, serial, size).
+4. ✕ rips, △ ejects, □ opens the settings, ○ exits. A full CD takes about 3.5–4 minutes.
+5. When done the disc is ejected; insert the next disc to rip it automatically.
 
-A log is written to `/dev_hdd0/tmp/psxrip.log`.
+Settings (saved as soon as they are changed): destination (internal HDD or a USB drive),
+re-reads on read errors, read speed, eject when done, rip immediately on insert, and the
+Redump check described below.
+
+Each rip gets a `.md5` file with the MD5 of every track. A log is written to
+`/dev_hdd0/tmp/psxrip.log`.
+
+## Verification against Redump
+
+PSX Ripper can compare a rip with the [Redump](http://redump.org/) database. No Redump data
+is included in the app; it is fetched at runtime. Setting *Check against Redump*:
+
+- **Off**: no network access.
+- **Online**: the disc is looked up on redump.org by its serial. The start screen shows the
+  Redump name; after ripping, the track MD5s are compared with Redump's.
+- **Local copy**: select *Local Redump copy* in the settings and press ✕ to download the
+  PlayStation dat (about 4 MB) to `/dev_hdd0/tmp/psxrip/`, where it is reduced to a compact
+  index (about 1.4 MB). The start screen then names the disc by its size before ripping,
+  and the MD5s are checked afterwards, without internet access.
+
+Tracks are split the way Redump splits them: every track after the first starts at its
+pregap (INDEX 00), which is read from the Q subchannel, so multi-track discs compare too.
 
 ## How it works
 
@@ -109,6 +129,8 @@ python3 tools/gen_font.py fonts source/font.inc
 - [GameDB-PSX](https://github.com/niemasd/GameDB-PSX) (GPL-3.0): serial → title database
 - [PSL1GHT](https://github.com/ps3dev/PSL1GHT) and bucanero's prebuilt toolchain
 - [DejaVu fonts](https://dejavu-fonts.github.io/) (see `fonts/DejaVu-LICENSE`) for the on-screen UI
+- [zlib](https://zlib.net/) (zlib license, from the PSL1GHT portlibs) to unpack the Redump dat
+- [Redump](http://redump.org/): disc data used for verification, downloaded at runtime only
 
 ## License
 
