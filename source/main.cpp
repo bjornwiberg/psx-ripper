@@ -61,6 +61,7 @@ static char g_webhook_hdr[WH_HEADERS][256];    // extra headers "Name: value" (o
 static int g_webhook_hdr_on = 0;               // send them (off keeps them stored)
 enum { SRC_BD, SRC_USB };
 static int g_src = SRC_BD;                     // drive to rip from: the PS3's own or a USB SuperDrive (usbodd)
+static int g_usb = 0;                          // which SuperDrive (usbodd drive number)
 
 // "Name: value" cleaned of CR/LF, so a header can never add lines to the request
 static void clean_header(char *h)
@@ -273,7 +274,7 @@ static int cdb_len(const uint8_t *) { return 12; }
 
 static int atapi(const uint8_t *cdb, uint8_t *buf, uint32_t len, uint32_t proto)
 {
-	if (g_src == SRC_USB) return usbodd_cmd(cdb, cdb_len(cdb), buf, len, 1);
+	if (g_src == SRC_USB) return usbodd_cmd(g_usb, cdb, cdb_len(cdb), buf, len, 1);
 	struct lv2_atapi_cmnd_block cmd;
 	atapi_init(&cmd, len, proto, len ? ATAPI_DIR_READ : ATAPI_DIR_WRITE);
 	if (!len) cmd.proto = ATAPI_NON_DATA_PROTO;
@@ -382,9 +383,10 @@ static int debug_cmd(const char *q, char *out, int n)
 	if (!g_debug_on) { snprintf(out, n, "debug mode off (create /dev_hdd0/tmp/psxrip.debug)\n"); return 0; }
 	if (g_state_busy()) { snprintf(out, n, "busy: the app is using the drive\n"); return 0; }
 	const char *op = qget(q, "op", opbuf, sizeof(opbuf));   // own buffer: v is reused below
-	if (!op) { snprintf(out, n, "ops: list | usb | usbscsi&cdb=hex&len=&dir=in|out | scsi&id=&sc=616|604&proto=0|1|3&dir=0|1&cdb=hex&len= | devcmd&id=&cmd=&in=hex&len= | read&id=&lba=\n"); return 0; }
+	if (!op) { snprintf(out, n, "ops: list | usb | usbscsi&cdb=hex&len=&dir=in|out[&drive=n] | scsi&id=&sc=616|604&proto=0|1|3&dir=0|1&cdb=hex&len= | devcmd&id=&cmd=&in=hex&len= | read&id=&lba=\n"); return 0; }
 	if (!strcmp(op, "usb")) { usbodd_status(out, n); return 0; }
-	if (!strcmp(op, "usbreset")) { snprintf(out, n, "bulk-only reset -> %d\n", usbodd_reset()); return 0; }
+	int dv = qget(q, "drive", v, sizeof(v)) ? atoi(v) : g_usb;   // which SuperDrive
+	if (!strcmp(op, "usbreset")) { snprintf(out, n, "bulk-only reset -> %d\n", usbodd_reset(dv)); return 0; }
 	if (!strcmp(op, "usbscsi")) {   // SCSI to the USB optical drive over our own Bulk-Only Transport
 		uint8_t cdb[16] = {0};
 		int cl = unhex(qget(q, "cdb", v2, sizeof(v2)) ? v2 : "", cdb, 16);
@@ -394,7 +396,7 @@ static int debug_cmd(const char *q, char *out, int n)
 		memset(data, 0, sizeof(data));
 		int st = -1, got = 0;
 		char lg[600] = "";
-		int r = usbodd_scsi(cdb, cl ? cl : 12, data, len < 0 || len > 65536 ? 0 : len, din, &st, &got, lg, sizeof(lg));
+		int r = usbodd_scsi(dv, cdb, cl ? cl : 12, data, len < 0 || len > 65536 ? 0 : len, din, &st, &got, lg, sizeof(lg));
 		snprintf(out, n, "%susbscsi -> %d, CSW status %d, data %d\n", lg, r, st, got);
 		if (got > 0) hexdump(out, n, data, got < 512 ? got : 512);
 		logf("debug: %s -> %d status %d", q, r, st);
@@ -461,7 +463,7 @@ static int debug_cmd(const char *q, char *out, int n)
 // Data-out command (MODE SELECT).
 static int atapi_out(const uint8_t *cdb, uint8_t *buf, uint32_t len)
 {
-	if (g_src == SRC_USB) return usbodd_cmd(cdb, cdb_len(cdb), buf, len, 0);
+	if (g_src == SRC_USB) return usbodd_cmd(g_usb, cdb, cdb_len(cdb), buf, len, 0);
 	struct lv2_atapi_cmnd_block cmd;
 	atapi_init(&cmd, len, ATAPI_PIO_DATA_OUT_PROTO, ATAPI_DIR_WRITE);
 	memcpy(cmd.pkt, cdb, 12);
@@ -582,9 +584,9 @@ static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, 
 			uint32_t n = count - done < per ? count - done : per, l = lba + done;
 			uint8_t c[12] = {0xBE, 0, (uint8_t)(l >> 24), (uint8_t)(l >> 16), (uint8_t)(l >> 8), (uint8_t)l,
 			                 (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n, 0xF8, sub, 0};
-			int r = usbodd_cmd(c, 12, buf + (size_t)done * blk, n * blk, 1);
+			int r = usbodd_cmd(g_usb, c, 12, buf + (size_t)done * blk, n * blk, 1);
 			if (r) return r;
-			if (usbodd_last_got() != (int)(n * blk)) return -1;   // fewer sectors than asked for
+			if (usbodd_last_got(g_usb) != (int)(n * blk)) return -1;   // fewer sectors than asked for
 			done += n;
 		}
 		return 0;
@@ -2470,7 +2472,7 @@ static void settings_screen()
 			snprintf(vals[1], sizeof(vals[1]), "%s", t);
 		}
 		snprintf(g_outdir, sizeof(g_outdir), "%s", save_dir);
-		snprintf(vals[0], sizeof(vals[0]), "%s", src == SRC_BD ? T(STR_SRC_BD) : usbodd_attached() ? T(STR_SRC_USB) : T(STR_SRC_USB_NONE));
+		snprintf(vals[0], sizeof(vals[0]), "%s", src == SRC_BD ? T(STR_SRC_BD) : usbodd_attached(g_usb) ? T(STR_SRC_USB) : T(STR_SRC_USB_NONE));
 		snprintf(vals[2], sizeof(vals[2]), "%d", retries);
 		if (speed) snprintf(vals[3], sizeof(vals[3]), "%d\xC3\x97", speed_x[speed]); else snprintf(vals[3], sizeof(vals[3]), "%s", T(STR_SPEED_MAX));
 		snprintf(vals[4], sizeof(vals[4]), "%s", eject ? T(STR_ON) : T(STR_OFF));
@@ -2612,7 +2614,7 @@ static void eject_disc()
 {
 	while (g_ident_busy) usleep(10000);
 	if (g_src == SRC_USB) {
-		usbodd_eject();
+		usbodd_eject(g_usb);
 		fire_event("disc_ejected");
 		g_disc_state = DISC_NONE;
 		disc_present = 0;
@@ -2636,10 +2638,10 @@ static void usb_presence_thread(void *arg)
 		usleep(2000 * 1000);
 		if (g_src != SRC_USB || g_state_busy()) { was = -1; continue; }
 		const uint8_t tur[6] = {0};
-		int r = usbodd_attached() ? usbodd_cmd(tur, 6, NULL, 0, 0) : -1;
+		int r = usbodd_attached(g_usb) ? usbodd_cmd(g_usb, tur, 6, NULL, 0, 0) : -1;
 		// a disc that is still spinning up (not ready, unit attention) counts as present
 		int now = r == 0 || (r != -1 && !((r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A));
-		if (!now && was != 0 && usbodd_attached()) usbodd_unlock();   // lets the slot take the next disc
+		if (!now && was != 0 && usbodd_attached(g_usb)) usbodd_unlock(g_usb);   // lets the slot take the next disc
 		if (was == 0 && now) { disc_present = 1; disc_inserted = 1; logf("usb drive: disc inserted"); }
 		if (was == 1 && !now) { disc_present = 0; disc_inserted = 0; logf("usb drive: disc removed"); }
 		if (was == -1) disc_present = now;
@@ -2817,9 +2819,9 @@ static int prepare_disc(int *err, int *code)
 	int ret;
 	if (g_src == SRC_USB) {   // no lv2 device and no lv1 patch: our own driver talks to the drive
 		g_fd = -1;
-		if (!usbodd_attached()) { *err = STR_OPEN_FAILED; *code = -1; return -2; }
-		usbodd_unlock();          // harmless when it is already unlocked; lets the slot take a disc
-		ret = usbodd_ready(90000);
+		if (!usbodd_attached(g_usb)) { *err = STR_OPEN_FAILED; *code = -1; return -2; }
+		usbodd_unlock(g_usb);          // harmless when it is already unlocked; lets the slot take a disc
+		ret = usbodd_ready(g_usb, 90000);
 		logf("usb drive ready -> %d", ret);
 		if (ret) { *err = STR_TOC_FAILED; *code = ret; return -2; }
 	} else {
@@ -3550,7 +3552,7 @@ int main(int argc, char *argv[])
 	if (warn[0]) own_dialog(warn, 0);   // what the start-up checks found and fixed
 	{ struct stat ds; g_debug_on = stat("/dev_hdd0/tmp/psxrip.debug", &ds) == 0; if (g_debug_on) logf("debug commands on (/dbg)"); }
 	usbodd_init();   // USB SuperDrive (setting "Läsare")
-	if (g_src == SRC_USB) for (int i = 0; i < 30 && !usbodd_attached(); i++) usleep(100 * 1000);   // let it attach first
+	if (g_src == SRC_USB) for (int i = 0; i < 30 && !usbodd_attached(g_usb); i++) usleep(100 * 1000);   // let it attach first
 	{ sys_ppu_thread_t t; sysThreadCreate(&t, usb_presence_thread, NULL, 1500, 0x4000, 0, (char *)"psxusbpoll"); }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
