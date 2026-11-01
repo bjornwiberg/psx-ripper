@@ -98,6 +98,10 @@ static const char *en[STR_COUNT] = {
 	"Back to the screen",
 	"USB %d (exFAT, %u GB free)",
 	"Uncertain sectors: %u, confirmed: %u",
+	"Done!",
+	"Unreadable sectors: %u",
+	"The disc has been ejected. Insert the next disc and it will be ripped automatically.",
+	"Remove the disc and insert the next one and it will be ripped automatically.",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -192,6 +196,10 @@ static const char *sv[STR_COUNT] = {
 	"Tillbaka till skärmen",
 	"USB %d (exFAT, %u GB ledigt)",
 	"Osäkra sektorer: %u, bekräftade: %u",
+	"Klart!",
+	"Oläsbara sektorer: %u",
+	"Skivan har matats ut. Sätt i nästa skiva så rippas den automatiskt.",
+	"Ta ut skivan och sätt i nästa så rippas den automatiskt.",
 };
 
 static const char **table = en;

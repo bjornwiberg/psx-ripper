@@ -1898,6 +1898,20 @@ static int home_screen()
 
 // ---------------------------------------------------------------- one disc
 static char g_done_msg[768];   // summary of the last successful rip
+// The same summary for the own result screen: coloured lines
+struct ResLine { char text[240]; uint32_t col; };
+static ResLine g_res[8];
+static int g_nres = 0;
+static char g_res_title[160], g_res_path[300];
+static void res_add(uint32_t col, const char *fmt, ...)
+{
+	if (g_nres >= 8) return;
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(g_res[g_nres].text, sizeof(g_res[g_nres].text), fmt, ap);
+	va_end(ap);
+	g_res[g_nres++].col = col;
+}
 
 // Returns 1 when the disc was ripped successfully. `autorip` skips the confirmation.
 // Opens the drive, unlocks raw reads, reads the TOC and identifies the disc (g_serial, g_name, g_base).
@@ -2199,6 +2213,15 @@ static int rip_disc_inner(int fresh, int autorip)
 	     g_badsect, g_recovered, g_secure, g_unstable);
 	snprintf(msg, sizeof(msg), T(STR_DONE),
 	         g_base, lcline, g_readerrs);
+	// result screen
+	g_nres = 0;
+	snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", name, g_serial[0] ? g_serial : T(STR_UNKNOWN));
+	snprintf(g_res_path, sizeof(g_res_path), "%s.bin", g_base);
+	if (rdinfo[0]) res_add(g_rd_result == 1 ? 0x7CE0A0 : g_rd_result == 0 ? 0xFF8A80 : 0xA8B0C8, "%s", rdinfo);
+	if (lcinfo[0]) res_add(0xE8E8F0, "%s", lcinfo);
+	if (g_nsuspect) res_add(g_confirmed == g_nsuspect ? 0x7CE0A0 : 0xF0C060, T(STR_CONFIRMED), g_nsuspect, g_confirmed);
+	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
+	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);
 	logf("done: %s errs=%u", g_base, g_readerrs);
 	snprintf(g_done_msg, sizeof(g_done_msg), "%s", msg);
 	g_state = ST_HOME;
@@ -2212,6 +2235,44 @@ static int rip_disc(int fresh, int autorip)
 	int ok = rip_disc_inner(fresh, autorip);
 	lv1_storage_unpatch();
 	return ok;
+}
+
+// Own result screen after a rip (instead of the system dialog). Returns 1 when a new disc was
+// inserted (rip it right away), 0 for O (back to the start screen).
+static int result_screen()
+{
+	disc_inserted = 0;
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			draw_backdrop();
+			int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
+			int y = ui_h() / 10 + ui_line(UI_TITLE) + lb;
+			ui_text(UI_TITLE, ui_w() / 2, y, 0x7CE0A0, T(STR_RES_DONE), UI_CENTER);
+			y += ui_line(UI_TITLE) + lb / 2;
+			ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, g_res_title, UI_CENTER);
+			y += lb + ls / 2;
+			ui_text(UI_SMALL, ui_w() / 2, y, 0x8890A8, g_res_path, UI_CENTER);
+			y += ls * 2;
+			for (int i = 0; i < g_nres; i++) {
+				ui_text(UI_BODY, ui_w() / 2, y, g_res[i].col, g_res[i].text, UI_CENTER);
+				y += lb * 13 / 10;
+			}
+			y += lb / 2;
+			ui_text(UI_SMALL, ui_w() / 2, y, 0xA8B0C8, T(g_eject ? STR_RES_NEXT : STR_RES_NEXT_NOEJECT), UI_CENTER);
+			const char *b[] = {"circle"};
+			const char *l[] = {T(STR_HINT_BACK)};
+			hint_bar(b, l, 1);
+			g_drawn = 2;
+			g_backdrop_shown = 0;
+		}
+		flip_frame();
+		if (disc_inserted) return 1;
+		if (pad_pressed() & B_CIRCLE) return 0;
+	}
+	return 0;
 }
 
 int main(int argc, char *argv[])
@@ -2284,19 +2345,8 @@ int main(int argc, char *argv[])
 		autorip = 0;
 		if (!ok) continue;
 
-		// auto mode: show the result and wait for the next disc; X or O goes back to the start screen
-		while (!exit_requested) {
-			char text[1024];
-			snprintf(text, sizeof(text), "%s\n\n%s", g_done_msg, T(g_eject ? STR_NEXT_DISC : STR_NEXT_DISC_NOEJECT));
-			disc_inserted = 0;
-			dialog_action = 0;
-			// no button: O (cancel) is the only way out, so the dialog shows just "O Back"
-			msgDialogOpen2((msgType)MSG_DIALOG_NORMAL, text, dialog_handler, NULL, NULL);
-			while (!dialog_action && !disc_inserted && !exit_requested) do_flip();
-			msgDialogAbort();
-			if (disc_inserted) { autorip = 1; break; }
-			break;   // O: back to the start screen
-		}
+		// auto mode: show the result and wait for the next disc; O goes back to the start screen
+		if (result_screen()) autorip = 1;
 	}
 	sysDiscUnregisterDiscChangeCallback();
 	while (g_ident_busy) usleep(10000);
