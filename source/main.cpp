@@ -290,7 +290,8 @@ static void usb_optical_probe()
 			for (int i = 0; i < 7; i++) if ((unsigned char)name[i] < 32 || (unsigned char)name[i] > 126) name[i] = '.';
 			logf("usbprobe: id %016llx name '%s' sectors %llu size %u writable %u", (unsigned long long)id, name,
 			     (unsigned long long)info.total_sectors, info.sector_size, info.writable);
-			if (id == BD_DEVICE || info.sector_size != 2048) continue;   // not an external optical drive
+			// an optical drive reports 2048-byte sectors, or 0 sectors of size 0 when it has no disc
+			if (id == BD_DEVICE || (info.sector_size != 2048 && !(info.sector_size == 0 && info.total_sectors == 0))) continue;
 			int fd = -1;
 			int r = sys_storage_open(id, &fd);
 			logf("usbprobe: open %016llx -> 0x%x", (unsigned long long)id, r);
