@@ -27,6 +27,7 @@
 #include "ui.h"
 #include "md5.h"
 #include "redump.h"
+#include "devstream.h"
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
 // Output locations; the mount test redirects both so a mounted image is never overwritten
@@ -1781,6 +1782,9 @@ int main(int argc, char *argv[])
 	g_sec = (uint8_t *)memalign(128, 4096);
 	lang_init();
 	netInitialize();
+#ifdef DEV_STREAM
+	{ struct stat ds; if (stat("/dev_hdd0/tmp/psxrip.stream", &ds) == 0) { devstream_start(); logf("dev stream on port 8090"); } }
+#endif
 	cfg_load();
 	OUT_DIR = g_outdir;
 	{ struct stat gs; ui_guides = stat("/dev_hdd0/tmp/psxrip.guides", &gs) == 0; }

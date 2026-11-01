@@ -33,6 +33,10 @@ CFLAGS		=	-O2 -Wall -mcpu=cell $(MACHDEP) $(INCLUDE)
 ifeq ($(PRIVATE_SBI),1)
 CFLAGS	+=	-DPRIVATE_SBI
 endif
+# DEV=1: development build with the screen streamer (flag file /dev_hdd0/tmp/psxrip.stream)
+ifeq ($(DEV),1)
+CFLAGS	+=	-DDEV_STREAM
+endif
 CXXFLAGS	=	$(CFLAGS)
 
 LDFLAGS		=	$(MACHDEP) -Wl,-Map,$(notdir $@).map
