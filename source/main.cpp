@@ -646,6 +646,7 @@ static int write_sbi(const char *path)
 
 // ---------------------------------------------------------------- rip worker
 static volatile uint32_t g_done = 0, g_total = 0;
+static volatile uint32_t g_readpos = 0;   // reader position inside a slow (damaged) chunk
 static volatile int g_abort = 0, g_finished = 0, g_result = 0;
 static volatile uint32_t g_readerrs = 0;
 static int g_ripped = 0;    // discs ripped this session
@@ -802,12 +803,22 @@ static void rip_thread(void *arg)
 		memset(dead, 0, n);
 		for (int tries = 0; tries < g_retries && ret; tries++) ret = read_cd(lba, n, buf);
 		if (ret) {
-			// fall back to single sectors so one bad sector doesn't zero the whole chunk
+			// fall back to single sectors so one bad sector doesn't zero the whole chunk.
+			// In a damaged area (several unreadable sectors in a row) each sector gets one try only,
+			// otherwise a scratch costs hours; cancelling is checked per sector.
+			static int run = 0;   // unreadable sectors in a row
 			for (uint32_t i = 0; i < n; i++) {
 				uint8_t *sp = buf + i * SECT_Q;
-				int r = -1;
-				for (int tries = 0; tries < g_retries && r; tries++) r = read_cd(lba + i, 1, sp);
-				if (r) { memset(sp, 0, SECT_Q); dead[i] = 1; g_readerrs++; logf("unreadable sector %u (0x%x)", lba + i, r); }
+				if (g_abort) { memset(sp, 0, SECT_Q); dead[i] = 1; continue; }
+				int r = -1, tries = run >= 4 ? 1 : g_retries;
+				for (int t = 0; t < tries && r && !g_abort; t++) r = read_cd(lba + i, 1, sp);
+				if (r) {
+					memset(sp, 0, SECT_Q); dead[i] = 1; g_readerrs++; run++;
+					if (g_readerrs <= 64 || g_readerrs % 100 == 0) logf("unreadable sector %u (0x%x, %d tries, %u so far)", lba + i, r, tries, g_readerrs);
+				} else {
+					run = 0;
+				}
+				if (!(i & 15)) g_readpos = lba + i;   // keep the progress bar moving in slow areas
 			}
 		}
 		// data track 1: re-read sectors whose sync, address or EDC is wrong
@@ -818,7 +829,7 @@ static void rip_thread(void *arg)
 				const char *why = dead[i] ? 0 : check_sector(lba + i, sp);
 				if (!why) continue;
 				int fixed = 0, tries = 0;
-				while (!fixed && tries < g_retries) {
+				while (!fixed && tries < g_retries && !g_abort) {
 					tries++;
 					if (read_cd(lba + i, 1, g_sec) == 0 && !check_sector(lba + i, g_sec)) { memcpy(sp, g_sec, SECT_Q); fixed = 1; }
 				}
@@ -1601,7 +1612,7 @@ static int rip_disc_inner(int fresh, int autorip)
 	if (!autorip && !ask_yesno(msg)) { sys_storage_close(g_fd); return 0; }
 
 	mkdir(OUT_DIR, 0777);
-	g_done = 0; g_total = g_leadout; g_abort = 0; g_finished = 0;
+	g_done = 0; g_readpos = 0; g_total = g_leadout; g_abort = 0; g_finished = 0;
 
 	{
 		// SET CD SPEED: maximum read speed
@@ -1618,10 +1629,11 @@ static int rip_disc_inner(int fresh, int autorip)
 	uint32_t shown = 101;
 	while (!g_finished) {
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
-		uint32_t pct = (uint32_t)((uint64_t)g_done * 100 / (g_total ? g_total : 1));
+		uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
+		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / (g_total ? g_total : 1));
 		if (pct != shown) {
 			char pm[96];
-			snprintf(pm, sizeof(pm), T(STR_PROGRESS), g_done, g_total);
+			snprintf(pm, sizeof(pm), T(STR_PROGRESS), pos, g_total);
 			progress_draw(ripmsg, pm, pct);
 			shown = pct;
 		}
