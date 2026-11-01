@@ -2107,9 +2107,6 @@ static void webhook_settings_screen()
 				snprintf(v, sizeof(v), r == row && toggle ? "‹ %s ›" : "%s", val);
 				ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 			}
-			char foot[200];
-			snprintf(foot, sizeof(foot), T(STR_WH_CFG_PATH), CFG_PATH);
-			ui_text(UI_SMALL, ui_w() / 2, top + VIS * lh - lh / 4, 0x8890A8, foot, UI_CENTER);
 			if (row == R_HDR) {   // on/off with left/right, X edits the headers
 				const char *b[] = {"updown", "leftright", "cross", "circle"};
 				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_EDIT), T(STR_HINT_BACK)};
@@ -2228,6 +2225,11 @@ static void settings_screen()
 			char v[128];
 			snprintf(v, sizeof(v), r == row && r != 6 ? "‹ %s ›" : "%s", vals[r]);   // row 6 is an action
 			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
+		}
+		{   // all settings live in one file that can also be edited over FTP
+			char foot[200];
+			snprintf(foot, sizeof(foot), T(STR_WH_CFG_PATH), CFG_PATH);
+			ui_text(UI_SMALL, ui_w() / 2, top + VIS * lh - lh / 4, 0x8890A8, foot, UI_CENTER);
 		}
 		if (row == 8) {
 			const char *b[] = {"updown", "leftright", "cross", "triangle", "circle"};
