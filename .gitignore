@@ -1,0 +1,7 @@
+*.elf
+*.map
+*.pkg
+*.self
+build/
+db/private/
+source/private_sbi.inc
