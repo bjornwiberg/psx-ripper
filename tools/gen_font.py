@@ -56,40 +56,45 @@ for name, fname, size, CHARS in FONTS:
         out.write("\t{%d, %d, %d, %d, %d, %d, %d},\n" % g)
     out.write("};\n")
     out.write("static const Font %s = {%s_glyphs, %d, %s_data, %d};\n\n" % (name, name, len(glyphs), name, ascent + descent))
-# Button symbols, each rendered at the size where its height equals the body font's cap height,
-# so they line up with capital letters (top and baseline) in the hint bar.
+# Button symbols, sized to the body font's cap height and placed by their visible ink, so the
+# bottom of every symbol sits exactly on the baseline of capital letters (the circle may overshoot
+# by one pixel, as round letters do).
+def ink_rows(img, thr=128):
+    w, h = img.size
+    px = img.tobytes()
+    rows = [y for y in range(h) if max(px[y * w:(y + 1) * w]) >= thr]
+    return rows[0], rows[-1]
+
 for name, body in (("f1080_sym", 36), ("f720_sym", 24)):
     bodyfont = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), body)
-    cap = bodyfont.getbbox("E")
-    cap_top, cap_h = cap[1], cap[3] - cap[1]
+    eb = bodyfont.getbbox("E")
+    eimg = Image.new("L", (eb[2] - eb[0], eb[3] - eb[1]), 0)
+    ImageDraw.Draw(eimg).text((-eb[0], -eb[1]), "E", font=bodyfont, fill=255)
+    et, ebot = ink_rows(eimg)
+    cap_top, cap_bottom = eb[1] + et, eb[1] + ebot        # ink rows of a capital, from the text top
+    cap_h = cap_bottom - cap_top + 1
     data = bytearray()
     glyphs = []
-    # optical corrections: (height factor, downward shift as a fraction of cap height)
-    OPTICAL = {"○": (1.04, 0.06), "✕": (1.0, 0.08)}
     for ch in "△○✕□↑↓←→":
-        hf, shift = OPTICAL.get(ch, (1.0, 0.0))
-        target_h = int(round(cap_h * hf))
-        size = body
-        for _ in range(40):   # find the size whose glyph height matches the cap height
+        overshoot = 1 if ch == "○" else 0
+        target_h = cap_h + 2 * overshoot
+        size, img = body, None
+        for _ in range(12):   # find the font size whose ink height matches the target
             f = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), size)
             b = f.getbbox(ch)
-            if abs((b[3] - b[1]) - target_h) <= 0 or size < 6:
+            cand = Image.new("L", (b[2] - b[0], b[3] - b[1]), 0)
+            ImageDraw.Draw(cand).text((-b[0], -b[1]), ch, font=f, fill=255)
+            t, bt = ink_rows(cand)
+            ink_h = bt - t + 1
+            img, ink_top = cand.crop((0, t, cand.width, bt + 1)), 0
+            if ink_h == target_h:
                 break
-            size = max(6, int(round(size * target_h / (b[3] - b[1]))))
-            f2 = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), size)
-            if abs((f2.getbbox(ch)[3] - f2.getbbox(ch)[1]) - target_h) <= 1:
-                f, b = f2, f2.getbbox(ch)
-                break
-        x0, y0, x1, y1 = b
-        w, h = x1 - x0, y1 - y0
-        img = Image.new("L", (w, h), 0)
-        ImageDraw.Draw(img).text((-x0, -y0), ch, font=f, fill=255)
-        if h != target_h:   # snap to the target height
-            img = img.resize((w, target_h), Image.LANCZOS)
-            h = target_h
-        # yoff = cap top, so the symbol's top sits where a capital letter's top sits
-        top = cap_top - (target_h - cap_h) // 2 + int(round(cap_h * shift))
-        glyphs.append((ord(ch), w, h, x0, top, int(round(f.getlength(ch))), len(data)))
+            size = max(6, size + (1 if ink_h < target_h else -1))
+        if img.height != target_h:
+            img = img.resize((max(1, round(img.width * target_h / img.height)), target_h), Image.LANCZOS)   # keep proportions
+        w, h = img.size
+        top = cap_bottom - h + 1 + overshoot     # ink bottom on the capital baseline
+        glyphs.append((ord(ch), w, h, 0, top, int(round(f.getlength(ch))), len(data)))
         data += pack4(img)
     out.write("static const uint8_t %s_data[] = {%s};\n" % (name, ",".join(str(b) for b in data)))
     out.write("static const Glyph %s_glyphs[] = {\n" % name)
@@ -97,5 +102,45 @@ for name, body in (("f1080_sym", 36), ("f720_sym", 24)):
         out.write("\t{%d, %d, %d, %d, %d, %d, %d},\n" % gl)
     out.write("};\n")
     out.write("static const Font %s = {%s_glyphs, %d, %s_data, %d};\n\n" % (name, name, len(glyphs), name, 0))
+    out.write("static const int %s_cap_top = %d, %s_cap_bottom = %d;\n\n" % (name, cap_top, name, cap_bottom))
+# Face-button symbols drawn inside a disc of 1.5x the cap height: about 55 % of the disc,
+# centred on the cap height (the UI centres them horizontally in the disc).
+for name, body in (("f1080_btn", 36), ("f720_btn", 24)):
+    bodyfont = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), body)
+    eb = bodyfont.getbbox("E")
+    eimg = Image.new("L", (eb[2] - eb[0], eb[3] - eb[1]), 0)
+    ImageDraw.Draw(eimg).text((-eb[0], -eb[1]), "E", font=bodyfont, fill=255)
+    et, ebot = ink_rows(eimg)
+    cap_top, cap_bottom = eb[1] + et, eb[1] + ebot
+    cap_h = cap_bottom - cap_top + 1
+    target_h = max(8, int(round(cap_h * 1.5 * 0.55)))
+    centre2 = cap_top + cap_bottom          # twice the cap centre row
+    data = bytearray()
+    glyphs = []
+    for ch in "△○✕□":
+        size, img = body, None
+        for _ in range(16):
+            f = ImageFont.truetype(os.path.join(src, "DejaVuSans.ttf"), size)
+            b = f.getbbox(ch)
+            cand = Image.new("L", (b[2] - b[0], b[3] - b[1]), 0)
+            ImageDraw.Draw(cand).text((-b[0], -b[1]), ch, font=f, fill=255)
+            t, bt = ink_rows(cand)
+            img = cand.crop((0, t, cand.width, bt + 1))
+            if bt - t + 1 == target_h:
+                break
+            size = max(6, size + (1 if bt - t + 1 < target_h else -1))
+        if img.height != target_h:
+            img = img.resize((max(1, round(img.width * target_h / img.height)), target_h), Image.LANCZOS)   # keep proportions
+        w, h = img.size
+        top = (centre2 - h + 1) // 2
+        glyphs.append((ord(ch), w, h, 0, top, w, len(data)))
+        data += pack4(img)
+    out.write("static const uint8_t %s_data[] = {%s};\n" % (name, ",".join(str(b) for b in data)))
+    out.write("static const Glyph %s_glyphs[] = {\n" % name)
+    for gl in glyphs:
+        out.write("\t{%d, %d, %d, %d, %d, %d, %d},\n" % gl)
+    out.write("};\n")
+    out.write("static const Font %s = {%s_glyphs, %d, %s_data, %d};\n\n" % (name, name, len(glyphs), name, 0))
+
 out.close()
 print("wrote", dst)

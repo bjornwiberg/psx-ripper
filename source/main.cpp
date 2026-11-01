@@ -1391,6 +1391,7 @@ int main(int argc, char *argv[])
 	netInitialize();
 	cfg_load();
 	OUT_DIR = g_outdir;
+	{ struct stat gs; ui_guides = stat("/dev_hdd0/tmp/psxrip.guides", &gs) == 0; }
 #ifdef PRIVATE_SBI
 	install_missing_sbis();
 #endif

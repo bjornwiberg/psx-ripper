@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-enum UiFont { UI_SMALL, UI_BODY, UI_TITLE, UI_SYM };   // UI_SYM: button symbols at cap height
+enum UiFont { UI_SMALL, UI_BODY, UI_TITLE, UI_SYM, UI_BTN };   // UI_BTN: symbols inside button discs   // UI_SYM: button symbols at cap height
 enum UiAlign { UI_LEFT, UI_CENTER, UI_RIGHT };
 
 void ui_init();
@@ -20,5 +20,6 @@ int ui_text(UiFont f, int x, int y, uint32_t rgb, const char *utf8, UiAlign alig
 // Draws a PS button symbol ("cross", "circle", "triangle", "square") followed by a label; returns width.
 int ui_hint(int x, int y, const char *button, const char *label);
 int ui_hint_width(const char *button, const char *label);
+extern int ui_guides;
 
 #endif
