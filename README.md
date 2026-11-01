@@ -60,6 +60,35 @@ is included in the app; it is fetched at runtime. Setting *Check against Redump*
 Tracks are split the way Redump splits them: every track after the first starts at its
 pregap (INDEX 00), which is read from the Q subchannel, so multi-track discs compare too.
 
+## Remote view and webhooks
+
+- **Remote view** (setting): a small web server on port 8090. `http://<ps3>:8090/` shows the
+  app's screen as an MJPEG stream (about 2 frames per second), `/shot.jpg` a single frame and
+  `/status.json` the current state (title, serial, progress, unreadable/fixed sectors, Redump
+  result). System dialogs are drawn by the PS3 on top of the app and are not in the stream.
+  JPEG encoding uses [stb_image_write](https://github.com/nothings/stb) (public domain / MIT).
+- **Webhook** (setting): `rip_started`, `rip_finished`, `rip_cancelled` and `rip_failed` are
+  sent as an HTTP POST with a JSON body, for example to a Home Assistant webhook
+  (`http://homeassistant.local:8123/api/webhook/<id>`). The address is set on
+  `http://<ps3>:8090/webhook`, which also sends a test. Only `http://` is supported.
+
+Example payload:
+
+```json
+{"event":"rip_finished","app":"PSX Ripper","title":"Alundra","serial":"SLES_011.35",
+ "sectors_done":257659,"sectors_total":257659,"unreadable":0,"fixed":1,"bad":0,
+ "redump":"verified","redump_name":"Alundra (Europe)","seconds":221,
+ "path":"/dev_hdd0/PSXISO/Alundra [SLES_011.35].bin"}
+```
+
+## Damaged discs
+
+Every data sector is checked (sync, address, EDC) while reading; the drive can return a
+damaged sector as a successful read. Bad sectors are re-read. The first pass keeps moving
+through scratches (the drive's own retries are set low, a damaged area gets one try per
+sector); afterwards a second pass retries the failed sectors at 2x with the drive's normal
+retries and patches them into the image. O during the second pass keeps the image as it is.
+
 ## How it works
 
 On 4.2x+ firmwares a homebrew process is not allowed to read raw sectors from the BD drive
