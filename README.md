@@ -70,6 +70,7 @@ app writes the whole file again.
 
 | Key | Values | Setting |
 |---|---|---|
+| `source` | `bd` = the PS3's drive, `usb` = Apple USB SuperDrive | Drive |
 | `outdir` | `/dev_hdd0/PSXISO`, `/dev_usbNNN/PSXISO`, `exfatN:/PSXISO` | Save to |
 | `retries` | 1, 2, 4, 8, 16, 32 | Re-reads on read errors |
 | `speed` | 0 = max, 1 = 8x, 2 = 4x, 3 = 2x | Read speed |
@@ -162,12 +163,18 @@ Verify your rips against [Redump](http://redump.org) (webMAN can compute MD5 wit
 
 ## Ideas
 
-- **USB DVD drives in parallel** (for example two Apple SuperDrives next to the internal drive,
-  three discs at once). The PS3 system does not use USB optical drives, but PSL1GHT's USB driver
-  API (`usbd`) lets an app drive such a device itself: USB Mass Storage bulk-only transport and
-  the same SCSI READ CD (0xBE) the internal drive uses. A SuperDrive needs its vendor unlock
-  command first. To find out: whether the system claims the drive before the app, and `usbd`
-  bulk transfer limits. Each drive would get its own reader/writer threads and progress bar.
+- **Several drives in parallel** (the PS3 drive and up to two Apple SuperDrives, three discs at
+  once): see [docs/PARALLEL.md](docs/PARALLEL.md).
+
+## USB SuperDrive
+
+An Apple USB SuperDrive (05AC:1500) can be used instead of the PS3's drive: *Settings → Drive*.
+The PS3 system lists USB optical drives but passes no commands to them, so the app has its own
+USB driver (`source/usbodd.cpp`, USB Mass Storage Bulk-Only Transport). It sends Apple's unlock
+command so the slot takes a disc, waits for the drive to spin up (up to a minute on the PS3's bus
+power, no Y-cable needed), reads with the same READ CD and sector checks as the internal drive,
+and ejects with START STOP UNIT (the drive has no button). Its Q subchannel trails by one sector;
+the ripper's Q calibration accounts for that.
 
 ## Building
 
