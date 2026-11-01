@@ -2978,11 +2978,13 @@ static int repair_disc_inner()
 		snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", g_name, g_serial);
 		snprintf(g_res_path, sizeof(g_res_path), "%s.bin", g_base);
 		const char *rd = strstr(buf, "redump=");
-		if (rd) {
-			char line[200];
-			size_t k = strcspn(rd + 7, "\n");
-			snprintf(line, sizeof(line), "Redump: %.*s", (int)(k < 180 ? k : 180), rd + 7);
-			res_add(!strncmp(rd + 7, "verified", 8) ? 0x7CE0A0 : 0xA8B0C8, "%s", line);
+		if (rd) {   // "redump=verified Alundra (Europe)" -> the same line as after a rip
+			char code[16] = "", name[RD_NAME] = "";
+			sscanf(rd + 7, "%15[^ \n] %159[^\n]", code, name);
+			if (!strcmp(code, "verified")) res_add(0x7CE0A0, T(STR_RD_VERIFIED), name);
+			else if (!strcmp(code, "no_match")) res_add(0xFF8A80, "%s", T(STR_RD_NOMATCH));
+			else if (!strcmp(code, "not_found")) res_add(0xA8B0C8, "%s", T(STR_RD_NOTFOUND));
+			else if (!strcmp(code, "unchecked")) res_add(0xA8B0C8, "%s", T(STR_RD_UNCHECKED));
 		}
 		res_add(0x7CE0A0, "%s", T(STR_NOTHING_TO_REPAIR));
 		logf("repair %s: nothing to repair", g_base);
