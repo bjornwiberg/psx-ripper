@@ -2653,14 +2653,11 @@ static void usb_presence_thread(void *arg)
 		if (g_state_busy()) { was = -1; continue; }
 		if (usbodd_attached(g_usb) && !usbodd_name(g_usb)[0]) {   // a drive just connected: model and port
 			usbodd_identify(g_usb);
-			g_usb_port = -1;
-			for (int port = 0; port < 8 && g_usb_port < 0; port++) {   // the optical one in the system's list
-				struct storage_device_info info __attribute__((aligned(16)));
-				memset(&info, 0, sizeof(info));
-				if (sys_storage_get_device_info(usb_device_id(port), (uint8_t *)&info)) continue;
-				if (info.sector_size == 2048 || (info.sector_size == 0 && info.total_sectors == 0)) g_usb_port = port;
-			}
+			// root port, counted from 1; "Spara till" counts the same ports from 0
+			unsigned char loc[8];
+			g_usb_port = usbodd_location(g_usb, loc) == 0 && loc[0] ? loc[0] - 1 : -1;
 			logf("usb drive %d: %s, port %d", g_usb, usbodd_name(g_usb), g_usb_port);
+			g_redraw = 2;   // the screens show the name and port
 		}
 		// the chosen drive came or went: switch and identify what the drive now in use holds
 		int use = g_src == SRC_USB && usbodd_attached(g_usb) ? SRC_USB : SRC_BD;

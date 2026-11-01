@@ -42,6 +42,8 @@ struct UsbDrive {
 	volatile s32 res, cnt;
 	volatile int last_got;
 	usbDeviceRequest req;          // control request in flight (must stay valid until done)
+	int apple;                     // 05AC:1500
+	unsigned char loc[8];          // usbGetDeviceLocation: root port, then hub ports
 	char name[40];                 // "Apple SuperDrive" from INQUIRY, empty until asked
 	char trace[1024];              // step trace of the last command (the callers that want it pass their own)
 };
@@ -117,6 +119,11 @@ static s32 odd_attach(s32 dev)
 	d->out = usbOpenPipe(dev, eout);
 	d->ep_in = ein->bEndpointAddress; d->ep_out = eout->bEndpointAddress; d->ifnum = ifc->bInterfaceNumber;
 	d->dev = dev;
+	d->apple = 1;   // the only id registered so far
+	memset(d->loc, 0, sizeof(d->loc));
+	s32 lr = usbGetDeviceLocation(dev, d->loc);
+	ulog("usbodd: dev %d location -> 0x%x %02x %02x %02x %02x %02x %02x %02x", dev, lr, d->loc[0], d->loc[1], d->loc[2], d->loc[3],
+	     d->loc[4], d->loc[5], d->loc[6]);
 	if (!d->tag) d->tag = 1;
 	d->attached = d->ctrl >= 0 && d->in >= 0 && d->out >= 0;
 	ulog("usbodd: attach dev %d: pipes ctrl %d in %d (ep %02x) out %d (ep %02x)", dev, d->ctrl, d->in, ein->bEndpointAddress,
@@ -365,9 +372,13 @@ int usbodd_identify(int i)
 	UsbDrive *d = drive(i);
 	if (!d) return -1;
 	uint8_t inq[36];
-	const uint8_t cdb[12] = {0x12, 0, 0, 0, sizeof(inq), 0, 0, 0, 0, 0, 0, 0};
+	const uint8_t cdb[6] = {0x12, 0, 0, 0, sizeof(inq), 0};
 	memset(inq, 0, sizeof(inq));
-	int r = usbodd_cmd(i, cdb, 12, inq, sizeof(inq), 1);
+	int r = usbodd_cmd(i, cdb, 6, inq, sizeof(inq), 1);
+	if (d->apple) {   // INQUIRY names the mechanism inside ("HL-DT-ST DVDRW GX30N"): use the product's name
+		snprintf(d->name, sizeof(d->name), "Apple SuperDrive");
+		return 0;
+	}
 	if (r) { snprintf(d->name, sizeof(d->name), "CD/DVD"); return r; }
 	char v[9], p[17];
 	memcpy(v, inq + 8, 8); v[8] = 0;
@@ -380,3 +391,10 @@ int usbodd_identify(int i)
 }
 
 const char *usbodd_name(int i) { return i >= 0 && i < USBODD_DRIVES ? g_drv[i].name : ""; }
+
+int usbodd_location(int i, unsigned char *loc8)
+{
+	if (!drive(i)) return -1;
+	memcpy(loc8, g_drv[i].loc, 8);
+	return 0;
+}
