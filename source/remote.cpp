@@ -118,7 +118,7 @@ static void webhook_page(int s, const char *msg)
 	for (int i = 0; i < WH_COUNT; i++) {
 		size_t o = strlen(boxes);
 		snprintf(boxes + o, sizeof(boxes) - o, "<label style='display:block;padding:4px 0'><input type=checkbox name=ev_%s%s> %s <span style='color:#8890a8'>(%s)</span>",
-		         WEBHOOK_EVENTS[i], (mask >> i) & 1 ? " checked" : "", T((StrId)(STR_WH_EV_0 + i)), WEBHOOK_EVENTS[i]);
+		         WEBHOOK_EVENTS[i], (mask >> i) & 1 ? " checked" : "", T(wh_label(i)), WEBHOOK_EVENTS[i]);
 		if (i == WH_RIP_PROGRESS) {   // how often: every 1 ... 50 percent
 			static const int steps[] = {1, 2, 5, 10, 15, 25, 50};
 			int cur = g_hooks.get_step ? g_hooks.get_step() : 5;
@@ -212,7 +212,8 @@ static void client_thread(void *arg)
 		char step[8];
 		form_value(body, "step", step, sizeof(step));
 		if (step[0] && g_hooks.set_step) g_hooks.set_step(atoi(step));
-		if (g_hooks.set_webhook) g_hooks.set_webhook(url);
+		// only change the address when the form sent the field (an empty field clears it)
+		if (g_hooks.set_webhook && (!strncmp(body, "url=", 4) || strstr(body, "&url="))) g_hooks.set_webhook(url);
 		webhook_page(s, T(STR_WEB_SAVED));
 	} else if (!strncmp(req, "GET /webhook", 12)) {
 		webhook_page(s, NULL);

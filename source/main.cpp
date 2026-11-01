@@ -1627,6 +1627,10 @@ static void identify_thread(void *arg)
 		g_disc_state = DISC_READY;
 	} else {
 		g_disc_state = (r == -2) ? DISC_NONE : DISC_ERROR;
+		if (r != -2) {   // a disc is in the drive but is not a readable PS1 disc
+			g_state_title[0] = 0; g_state_serial[0] = 0;
+			fire_event("disc_not_identified");
+		}
 	}
 	logf("identify -> %d (state %d)", r, g_disc_state);
 	snprintf(g_id_serial, sizeof(g_id_serial), "%s", g_serial);
@@ -2091,7 +2095,7 @@ static int home_screen()
 				char host[96], evs[200] = "", wl[320];
 				webhook_host(g_webhook, host, sizeof(host));
 				for (int i = 0; i < WH_COUNT; i++)
-					if ((g_webhook_mask >> i) & 1) snprintf(evs + strlen(evs), sizeof(evs) - strlen(evs), "%s%s", evs[0] ? ", " : "", T((StrId)(STR_WH_SHORT_0 + i)));
+					if ((g_webhook_mask >> i) & 1) snprintf(evs + strlen(evs), sizeof(evs) - strlen(evs), "%s%s", evs[0] ? ", " : "", T(wh_short(i)));
 				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK), host, evs[0] ? evs : "-");
 				ui_text(UI_SMALL, ui_w() / 2, ui_h() - ui_h() / 8 - ui_line(UI_SMALL) * 2, 0x8890A8, wl, UI_CENTER);
 			}

@@ -155,6 +155,8 @@ static const char *en[STR_COUNT] = {
 	"Time %s · about %s left",
 	"Finishing – checking against Redump … ",
 	"Fixed sectors: %u, all confirmed",
+	"A disc could not be read as a PS1 disc",
+	"Not identified",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -306,6 +308,8 @@ static const char *sv[STR_COUNT] = {
 	"Tid %s · kvar ca %s",
 	"Slutför – kontrollerar mot Redump … ",
 	"Lagade sektorer: %u, alla bekräftade",
+	"En skiva kunde inte läsas som en PS1-skiva",
+	"Ej identifierad",
 };
 
 static const char **table = en;
