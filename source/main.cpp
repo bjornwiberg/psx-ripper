@@ -2159,13 +2159,15 @@ static void region_of(const char *rdname, const char *serial, char *out, size_t 
 static void name_from(const char *pat, const char *rdname, const char *title, const char *serial, char *out, size_t n)
 {
 	char t[160], r[64], b[300], dk[32] = "";
-	const char *dp = rdname ? strstr(rdname, "(Disc ") : NULL;   // a disc of several: "(Disc 1)"
+	// a disc of several: "(Disc 1)" in Redump's name, else in the app's own title list (GameDB-PSX)
+	const char *dp = rdname && rdname[0] ? strstr(rdname, "(Disc ") : NULL;
+	if (!dp) dp = strstr(title, "(Disc ");
 	if (dp) { const char *e = strchr(dp, ')'); if (e) snprintf(dk, sizeof(dk), "%.*s", (int)(e - dp - 1), dp + 1); }
-	if (rdname && rdname[0]) {   // Redump's name up to its first bracket: the title (with its disc,
-		const char *q = strstr(rdname, " (");                       // unless %C places that)
-		snprintf(t, sizeof(t), "%.*s", q ? (int)(q - rdname) : (int)strlen(rdname), rdname);
-		if (dk[0] && !strstr(pat, "%C")) snprintf(t + strlen(t), sizeof(t) - strlen(t), " (%s)", dk);
-	} else snprintf(t, sizeof(t), "%s", title);
+	// the title: up to the first bracket (Redump's name or the app's), then its disc unless %C places it
+	const char *src = rdname && rdname[0] ? rdname : title;
+	const char *q = strstr(src, " (");
+	snprintf(t, sizeof(t), "%.*s", q ? (int)(q - src) : (int)strlen(src), src);
+	if (dk[0] && !strstr(pat, "%C")) snprintf(t + strlen(t), sizeof(t) - strlen(t), " (%s)", dk);
 	region_of(rdname, serial, r, sizeof(r));
 	size_t o = 0;
 	for (const char *p = pat; *p && o < sizeof(b) - 1; p++) {
