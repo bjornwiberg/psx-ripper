@@ -79,10 +79,11 @@ static const int wh_steps[] = {1, 2, 5, 10, 15, 25, 50};
 static int g_webhook_step = 5;                 // rip_progress every this many percent
 static const int speed_x[4] = {0, 8, 4, 2};
 
-static void cfg_load()
+// Returns 0 when there is no config file yet.
+static int cfg_load()
 {
 	FILE *f = fopen(CFG_PATH, "r");
-	if (!f) return;
+	if (!f) return 0;
 	char line[640];
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = 0;
@@ -106,6 +107,7 @@ static void cfg_load()
 		else if (!strncmp(line, "webhook_step=", 13)) { int v = atoi(line + 13); for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
 	}
 	fclose(f);
+	return 1;
 }
 
 static void cfg_save()
@@ -3120,7 +3122,7 @@ int main(int argc, char *argv[])
 	g_sec = (uint8_t *)memalign(128, 4096);
 	lang_init();
 	netInitialize();
-	cfg_load();
+	if (!cfg_load()) { mkdir("/dev_hdd0/tmp", 0777); cfg_save(); }   // first start: write the defaults, so the file can be edited over FTP
 	{
 		VfVolume v[8];
 		int nv = vf_scan(v, 8);
