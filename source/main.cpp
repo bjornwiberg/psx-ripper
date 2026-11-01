@@ -3061,7 +3061,7 @@ static int own_dialog(const char *msg, int yesno)
 static void eject_disc();
 static int result_screen()
 {
-	int ejected = g_eject;   // the rip already ejected the disc
+	int ejected = !disc_present;   // from the system's disc callback: is the disc still in the drive?
 	disc_inserted = 0;
 	pad_pressed();
 	g_redraw = 2;
