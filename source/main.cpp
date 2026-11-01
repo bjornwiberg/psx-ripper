@@ -456,9 +456,14 @@ static void dialog_handler(msgButton button, void *usrData)
 
 static volatile int exit_requested = 0;
 static volatile int g_osk_event = 0;   // last on-screen keyboard event (SYSUTIL_OSK_*)
+// The system's own layers (PS button menu, dialogs) draw over our picture: while one is up and
+// right after it closes, the finished canvas is copied to the screen again.
+static volatile int g_sys_overlay = 0;   // 1 = a system layer is up, 2 = it just closed
 static void sysutil_callback(u64 status, u64 param, void *usrdata)
 {
 	if (status == SYSUTIL_EXIT_GAME) exit_requested = 1;
+	if (status == SYSUTIL_MENU_OPEN || status == SYSUTIL_DRAW_BEGIN) g_sys_overlay = 1;
+	if (status == SYSUTIL_MENU_CLOSE || status == SYSUTIL_DRAW_END) g_sys_overlay = 2;
 	if (status >= SYSUTIL_OSK_LOADED && status <= SYSUTIL_OSK_INPUT_CANCELED) g_osk_event = (int)status;
 }
 
@@ -517,6 +522,10 @@ static int g_backdrop_shown = 0;
 
 static void present()
 {
+	if (g_sys_overlay) {   // repaint both buffers once the system layer is gone
+		g_drawn = 2;
+		if (g_sys_overlay == 2) g_sys_overlay = 0;
+	}
 	if (g_drawn > 0) {
 		ui_blit();
 		g_drawn--;
