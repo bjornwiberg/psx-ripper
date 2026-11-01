@@ -192,6 +192,9 @@ static const char *en[STR_COUNT] = {
 	"USB · %s",
 	"Reads from: %s",
 	"The USB drive is spinning up the disc (up to a minute) …",
+	"Drive",
+	"Standard (%s)",
+	"All standard",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -380,6 +383,9 @@ static const char *sv[STR_COUNT] = {
 	"USB · %s",
 	"Läses från: %s",
 	"USB-läsaren varvar upp skivan (upp till en minut) …",
+	"Läsare",
+	"Standard (%s)",
+	"Allt standard",
 };
 
 static const char **table = en;

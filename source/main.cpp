@@ -63,6 +63,13 @@ enum { SRC_BD, SRC_USB };
 static volatile int g_usb = 0;                 // usbodd drive number of the USB drive in use
 static volatile int g_use = SRC_BD;            // the drive the drive commands go to (set by select_card)
 static char g_outdir_usb[8][64];               // destination per USB drive, by its port ("" = the hard disk)
+// Drive settings: the standard (Settings, START) and a drive's own values (SELECT on its card),
+// where -1 means "standard".
+struct DriveCfg { int set, retries, speed, eject, autostart, check; };
+static DriveCfg g_std;                         // the standard, from the old keys retries=, speed=, ...
+static DriveCfg g_bdcfg = {0, -1, -1, -1, -1, -1};   // the PS3 drive's own values (drive_bd=)
+static DriveCfg g_usbcfg[8];                   // a USB drive's own values, by its port (drive_usbN=)
+static int std_or(int v, int std) { return v >= 0 ? v : std; }
 
 // "Name: value" cleaned of CR/LF, so a header can never add lines to the request
 static void clean_header(char *h)
@@ -84,6 +91,41 @@ static const int wh_steps[] = {1, 2, 5, 10, 15, 25, 50};
 static int g_webhook_step = 5;                 // rip_progress every this many percent
 static const int speed_x[4] = {0, 8, 4, 2};
 
+// One card per drive on the home screen: card 0 = the PS3's drive, card 1 + n = USB drive n (usbodd).
+// Identify, rip, repair and eject work on one card at a time, g_card: its drive gets the commands,
+// its destination is OUT_DIR, and the disc globals below (g_disc_state, ...) are its fields.
+enum { DISC_NONE, DISC_READING, DISC_READY, DISC_ERROR };
+#define NCARDS (1 + USBODD_DRIVES)
+struct Card {
+	volatile int present, inserted;   // a disc in the drive / just put in, not handled yet
+	volatile int state;               // DISC_*
+	int tried;                        // identification ran since the disc went in
+	int fresh;                        // put in while the app runs: auto-rip, disc_identified
+	char title[128], serial[16];
+	uint32_t mb;
+	char rd[160];                     // Redump line, "" = none
+	volatile int prev_rip, repair_n, space_short;
+	volatile int recheck;             // the destination changed: look again for an earlier rip there
+	char base[256];                   // destination + file name without extension (g_base of the card)
+	char outdir[64];                  // chosen destination
+	char dest[64];                    // used: the chosen one, or the hard disk while it is out
+	int retries, speed, eject, autostart, check;   // the drive's settings
+};
+static Card g_cards[NCARDS];
+
+static void card_defaults(Card &k) { k.retries = k.speed = k.eject = k.autostart = k.check = -1; }   // all standard
+static void card_from(Card &k, const DriveCfg &d) { k.retries = d.retries; k.speed = d.speed; k.eject = d.eject; k.autostart = d.autostart; k.check = d.check; }
+
+// The card's settings into the config: the PS3 drive's in the old keys, a USB drive's by its port.
+static void card_store(int c)
+{
+	const Card &k = g_cards[c];
+	DriveCfg d = {1, k.retries, k.speed, k.eject, k.autostart, k.check};
+	if (c == 0) { g_bdcfg = d; return; }
+	int port = usbodd_port(c - 1);
+	if (port >= 0 && port < 8) g_usbcfg[port] = d;
+}
+static volatile int g_card = 0;       // changes only while no identification, rip or repair runs
 // Returns 0 when there is no config file yet.
 static int cfg_load()
 {
@@ -112,6 +154,16 @@ static int cfg_load()
 		else if (!strncmp(line, "outdir_usb", 10) && line[10] >= '0' && line[10] <= '7' && line[11] == '=' &&
 		         (line[12] == '/' || !strncmp(line + 12, "exfat", 5)))   // destination of the USB drive on port N
 			snprintf(g_outdir_usb[line[10] - '0'], sizeof(g_outdir_usb[0]), "%s", line + 12);
+		else if ((!strncmp(line, "drive_usb", 9) && line[9] >= '0' && line[9] <= '7' && line[10] == '=') || !strncmp(line, "drive_bd=", 9)) {
+			// drive_bd= / drive_usbN=retries,speed,eject,autostart,check; -1 = the standard
+			DriveCfg c = {1, -1, -1, -1, -1, -1};
+			const char *v = strchr(line, '=') + 1;
+			if (sscanf(v, "%d,%d,%d,%d,%d", &c.retries, &c.speed, &c.eject, &c.autostart, &c.check) == 5 &&
+			    (c.retries == -1 || (c.retries >= 1 && c.retries <= 64)) && c.speed >= -1 && c.speed <= 3 && c.eject >= -1 && c.eject <= 1 &&
+			    c.autostart >= -1 && c.autostart <= 1 && c.check >= -1 && c.check <= CHECK_BITPERFECT) {
+				if (line[6] == 'b') g_bdcfg = c; else g_usbcfg[line[9] - '0'] = c;
+			}
+		}
 		else if (!strncmp(line, "webhook_step=", 13)) { int v = atoi(line + 13); for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
 	}
 	fclose(f);
@@ -122,9 +174,15 @@ static void cfg_save()
 {
 	FILE *f = fopen(CFG_PATH, "w");
 	if (!f) return;
+	const DriveCfg &k = g_std;   // the standard drive settings (the globals follow the card in use)
 	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\nwebhook_step=%d\n",
-	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook, g_check, g_webhook_mask, g_webhook_step);
+	        g_outdir, k.retries, k.speed, k.eject, k.autostart, g_redump, g_remote, g_webhook_on, g_webhook, k.check, g_webhook_mask, g_webhook_step);
+	if (g_bdcfg.set)
+		fprintf(f, "drive_bd=%d,%d,%d,%d,%d\n", g_bdcfg.retries, g_bdcfg.speed, g_bdcfg.eject, g_bdcfg.autostart, g_bdcfg.check);
 	for (int i = 0; i < 8; i++) if (g_outdir_usb[i][0]) fprintf(f, "outdir_usb%d=%s\n", i, g_outdir_usb[i]);
+	for (int i = 0; i < 8; i++)
+		if (g_usbcfg[i].set)
+			fprintf(f, "drive_usb%d=%d,%d,%d,%d,%d\n", i, g_usbcfg[i].retries, g_usbcfg[i].speed, g_usbcfg[i].eject, g_usbcfg[i].autostart, g_usbcfg[i].check);
 	fprintf(f, "webhook_headers_on=%d\n", g_webhook_hdr_on);
 	for (int i = 0; i < WH_HEADERS; i++) fprintf(f, "webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
 	fclose(f);
@@ -172,27 +230,6 @@ static void sysutil_callback(u64 status, u64 param, void *usrdata)
 	if (status >= SYSUTIL_OSK_LOADED && status <= SYSUTIL_OSK_INPUT_CANCELED) g_osk_event = (int)status;
 }
 
-// One card per drive on the home screen: card 0 = the PS3's drive, card 1 + n = USB drive n (usbodd).
-// Identify, rip, repair and eject work on one card at a time, g_card: its drive gets the commands,
-// its destination is OUT_DIR, and the disc globals below (g_disc_state, ...) are its fields.
-enum { DISC_NONE, DISC_READING, DISC_READY, DISC_ERROR };
-#define NCARDS (1 + USBODD_DRIVES)
-struct Card {
-	volatile int present, inserted;   // a disc in the drive / just put in, not handled yet
-	volatile int state;               // DISC_*
-	int tried;                        // identification ran since the disc went in
-	int fresh;                        // put in while the app runs: auto-rip, disc_identified
-	char title[128], serial[16];
-	uint32_t mb;
-	char rd[160];                     // Redump line, "" = none
-	volatile int prev_rip, repair_n, space_short;
-	volatile int recheck;             // the destination changed: look again for an earlier rip there
-	char base[256];                   // destination + file name without extension (g_base of the card)
-	char outdir[64];                  // chosen destination
-	char dest[64];                    // used: the chosen one, or the hard disk while it is out
-};
-static Card g_cards[NCARDS];
-static volatile int g_card = 0;       // changes only while no identification, rip or repair runs
 #define disc_inserted (g_cards[g_card].inserted)
 #define disc_present (g_cards[g_card].present)
 // the system's disc callbacks are about its own drive only
@@ -2076,8 +2113,9 @@ static void identify_thread(void *arg)
 	snprintf(g_id_serial, sizeof(g_id_serial), "%s", g_serial);
 	g_id_total = (uint64_t)g_leadout * RAW_SIZE;
 	g_id_ntracks = g_ntracks;
-	g_ident_busy = 0;   // the drive is free; the lookup below only uses the network
+	// the lookup writes this card's Redump line: the next identification (another card) waits for it
 	if (r == 0 && g_redump != RD_OFF) redump_lookup(g_id_serial, g_id_total, g_id_ntracks);
+	g_ident_busy = 0;
 	sysThreadExit(0);
 }
 
@@ -2559,96 +2597,124 @@ static void source_name(int drv, char *out, size_t n)
 	else snprintf(out, n, T(STR_SRC_USB_NOPORT), m);
 }
 
+// Text for a drive setting: its own value, or "Standard (value)".
+static void drive_val(char *out, size_t n, int own, int std, const char *(*fmt)(int, char *, size_t))
+{
+	char v[64];
+	if (own >= 0) { snprintf(out, n, "%s", fmt(own, v, sizeof(v))); return; }
+	char sv[64];
+	snprintf(out, n, T(STR_STD_VALUE), fmt(std, sv, sizeof(sv)));
+}
+static const char *fmt_speed(int v, char *b, size_t n) { if (v) snprintf(b, n, "%d\xC3\x97", speed_x[v]); else snprintf(b, n, "%s", T(STR_SPEED_MAX)); return b; }
+static const char *fmt_int(int v, char *b, size_t n) { snprintf(b, n, "%d", v); return b; }
+static const char *fmt_onoff(int v, char *b, size_t n) { snprintf(b, n, "%s", v ? T(STR_ON) : T(STR_OFF)); return b; }
+static const char *fmt_check(int v, char *b, size_t n)
+{
+	snprintf(b, n, "%s", v == CHECK_OFF ? T(STR_OFF) : v == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
+	return b;
+}
+// Steps through "standard" and a setting's values: opts[0] = -1 (standard), then the values in order.
+static int step_opt(int cur, const int *opts, int n, int d)
+{
+	int i = 0;
+	while (i < n && opts[i] != cur) i++;
+	if (i == n) i = 0;
+	return opts[(i + (d > 0 ? 1 : n - 1)) % n];
+}
+
+
+// A list of settings rows with the focused one highlighted (the settings screens share it).
+static void settings_rows(const char *subtitle, const char *const *labels, char (*vals)[96], int nrows, int row, int action_row)
+{
+	ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, subtitle, UI_CENTER);
+	// first row below the subtitle (drawn at h/10 + title + body/2)
+	int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10, left = ui_w() / 6, right = ui_w() * 5 / 6;
+	for (int r = 0; r < nrows; r++) {
+		int y = top + r * lh;
+		if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
+		ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
+		char v[128];
+		snprintf(v, sizeof(v), r == row && r != action_row ? "‹ %s ›" : "%s", vals[r]);
+		ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
+	}
+	char foot[200];   // all settings live in one file that can also be edited over FTP
+	snprintf(foot, sizeof(foot), T(STR_WH_CFG_PATH), CFG_PATH);
+	footer_note(foot);
+}
+
+// Settings (START): the standard for the drives (speed, re-reads, check, eject, rip at once; a
+// drive can have its own values, SELECT on its card), Redump, the Redump copy, remote view, webhooks.
 static void settings_screen()
 {
-	// edit locally; each change is applied and saved at once, O goes back
-	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, redump = g_redump, row = 0;
-	int remote = g_remote, webhook_on = g_webhook_on, check = g_check, whstep = g_webhook_step;
-	const int NROWS = 9, VIS = 9;   // the list scrolls when it is longer than VIS rows
-	int first = 0;
+	int redump = g_redump, remote = g_remote, webhook_on = g_webhook_on, row = 0;
+	const int NROWS = 9;
+	static const int steps[] = {1, 2, 4, 8, 16, 32};
+	DriveCfg sd = g_std;
 	char rdver[64] = "";
 	time_t rdwhen = 0;
 	int rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
-	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	pad_pressed();
 	g_redraw = 2;
 	while (!exit_requested) {
 		if (g_redraw > 0) {
-		g_redraw = 0;
-		g_drawn = 2;
-		draw_backdrop();
-		ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_SETTINGS_TITLE), UI_CENTER);
-		char vals[9][96];   // drive and destination are chosen per drive on the home screen
-		snprintf(vals[0], sizeof(vals[0]), "%d", retries);
-		if (speed) snprintf(vals[1], sizeof(vals[1]), "%d\xC3\x97", speed_x[speed]); else snprintf(vals[1], sizeof(vals[1]), "%s", T(STR_SPEED_MAX));
-		snprintf(vals[2], sizeof(vals[2]), "%s", eject ? T(STR_ON) : T(STR_OFF));
-		snprintf(vals[3], sizeof(vals[3]), "%s", autostart ? T(STR_ON) : T(STR_OFF));
-		snprintf(vals[4], sizeof(vals[4]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
-		if (rdcount > 0) {
-			// Redump's version (date) and when this copy was downloaded (date and time)
-			char date[16], ver[24], when[32];
-			snprintf(date, sizeof(date), "%.10s", rdver);
-			fmt_rd_version(date, ver, sizeof(ver));
-			fmt_local(rdwhen, when, sizeof(when));
-			snprintf(vals[5], sizeof(vals[5]), T(STR_RD_COPY_VALUE), ver, when);
-		} else {
-			snprintf(vals[5], sizeof(vals[5]), "%s", T(STR_RD_MISSING));
-		}
-		char ip[20];
-		remote_ip(ip, sizeof(ip));
-		if (remote) snprintf(vals[6], sizeof(vals[6]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
-		else snprintf(vals[6], sizeof(vals[6]), "%s", T(STR_OFF));
-		if (!webhook_on) snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_OFF));
-		else if (!g_webhook[0]) snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_WEBHOOK_NOURL));
-		else {
-			char host[96];
-			webhook_host(g_webhook, host, sizeof(host));
-			int ne = 0;
-			for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
-			snprintf(vals[7], sizeof(vals[7]), T(STR_WEBHOOK_ON_N), host, ne);
-		}
-		snprintf(vals[8], sizeof(vals[8]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
-		const char *labels[9] = {T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
-		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK)};
-		if (row < first) first = row;
-		if (row >= first + VIS) first = row - VIS + 1;
-		// first row below the "Settings" subtitle (drawn at h/10 + title + body/2), then nine rows
-		int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10, left = ui_w() / 6, right = ui_w() * 5 / 6;
-		for (int r = first; r < NROWS && r < first + VIS; r++) {
-			int y = top + (r - first) * lh;
-			if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
-			ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
-			char v[128];
-			snprintf(v, sizeof(v), r == row && r != 5 ? "‹ %s ›" : "%s", vals[r]);   // row 5 is an action
-			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
-		}
-		{   // all settings live in one file that can also be edited over FTP
-			char foot[200];
-			snprintf(foot, sizeof(foot), T(STR_WH_CFG_PATH), CFG_PATH);
-			footer_note(foot);
-		}
-		if (row == 7) {
-			const char *b[] = {"updown", "leftright", "cross", "triangle", "circle"};
-			const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
-			hint_bar(b, l, 5);
-		} else {
-			const char *b[] = {"updown", row == 5 ? "cross" : "leftright", "triangle", "circle"};
-			const char *l[] = {T(STR_HINT_SELECT), row == 5 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
-			hint_bar(b, l, 4);
-		}
+			g_redraw = 0;
+			g_drawn = 2;
+			draw_backdrop();
+			char vals[9][96];
+			fmt_speed(sd.speed, vals[0], sizeof(vals[0]));
+			fmt_int(sd.retries, vals[1], sizeof(vals[1]));
+			fmt_check(sd.check, vals[2], sizeof(vals[2]));
+			fmt_onoff(sd.eject, vals[3], sizeof(vals[3]));
+			fmt_onoff(sd.autostart, vals[4], sizeof(vals[4]));
+			snprintf(vals[5], sizeof(vals[0]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
+			if (rdcount > 0) {
+				// Redump's version (date) and when this copy was downloaded (date and time)
+				char date[16], ver[24], when[32];
+				snprintf(date, sizeof(date), "%.10s", rdver);
+				fmt_rd_version(date, ver, sizeof(ver));
+				fmt_local(rdwhen, when, sizeof(when));
+				snprintf(vals[6], sizeof(vals[6]), T(STR_RD_COPY_VALUE), ver, when);
+			} else {
+				snprintf(vals[6], sizeof(vals[6]), "%s", T(STR_RD_MISSING));
+			}
+			char ip[20];
+			remote_ip(ip, sizeof(ip));
+			if (remote) snprintf(vals[7], sizeof(vals[7]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
+			else snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_OFF));
+			if (!webhook_on) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
+			else if (!g_webhook[0]) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_WEBHOOK_NOURL));
+			else {
+				char host[96];
+				webhook_host(g_webhook, host, sizeof(host));
+				int ne = 0;
+				for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
+				snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON_N), host, ne);
+			}
+			const char *labels[9] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART),
+			                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK)};
+			settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 6);   // row 6 is an action
+			if (row == 8) {
+				const char *b[] = {"updown", "leftright", "cross", "triangle", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+				hint_bar(b, l, 5);
+			} else {
+				const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "triangle", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+				hint_bar(b, l, 4);
+			}
 		}
 		flip_frame();
 		int p = pad_pressed();
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
-		if ((p & B_CROSS) && row == 7) {
+		if ((p & B_CROSS) && row == 8) {
 			webhook_settings_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 5) {
+		if ((p & B_CROSS) && row == 6) {
 			redump_download_screen();
 			rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
 			pad_pressed();
@@ -2656,56 +2722,107 @@ static void settings_screen()
 			continue;
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (row == 5) d = 0;
+		if (row == 6) d = 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) {
 			reset = own_dialog(T(STR_RESET_Q), 1) == 1;
 			pad_pressed();
 			g_redraw = 2;
 			if (reset) {   // defaults; the webhook address and the Redump copy are kept
-				for (int c = 0; c < NCARDS; c++) snprintf(g_cards[c].outdir, sizeof(g_cards[0].outdir), "%s", HDD_DIR);
-				snprintf(g_outdir, sizeof(g_outdir), "%s", HDD_DIR);
-				memset(g_outdir_usb, 0, sizeof(g_outdir_usb));
-				retries = 4; speed = 0; eject = 1; autostart = 0; redump = RD_OFF;
+				DriveCfg st = {1, 4, 0, 1, 0, CHECK_BITPERFECT};
+				sd = st;
+				redump = RD_OFF;
 				if (remote) remote_set(0);
-				remote = 0; webhook_on = 0; check = CHECK_BITPERFECT; whstep = 5;   // step: web page only
+				remote = 0; webhook_on = 0; g_webhook_step = 5;
 			}
 		}
 		if (d && !reset) {
 			if (row == 0) {
-				int k = 0; while (k < 6 && steps[k] != retries) k++;
-				retries = steps[(k + (d > 0 ? 1 : 5)) % 6];
-			} else if (row == 1) {
 				// right = faster: 2x, 4x, 8x, max (index 3 ... 0)
-				if (d > 0 && speed > 0) speed--;
-				if (d < 0 && speed < 3) speed++;
+				if (d > 0 && sd.speed > 0) sd.speed--;
+				if (d < 0 && sd.speed < 3) sd.speed++;
+			} else if (row == 1) {
+				int k = 0; while (k < 6 && steps[k] != sd.retries) k++;
+				sd.retries = steps[(k + (d > 0 ? 1 : 5)) % 6];
 			} else if (row == 2) {
-				eject = !eject;
+				sd.check = (sd.check + (d > 0 ? 1 : 2)) % 3;
 			} else if (row == 3) {
-				autostart = !autostart;
+				sd.eject = !sd.eject;
 			} else if (row == 4) {
+				sd.autostart = !sd.autostart;
+			} else if (row == 5) {
 				redump = (redump + (d > 0 ? 1 : 2)) % 3;
-			} else if (row == 6) {
+			} else if (row == 7) {
 				remote = !remote;
 				remote_set(remote);
 				if (remote) notify_url(STR_REMOTE_HELP, "");
-			} else if (row == 7) {
-				webhook_on = !webhook_on;
 			} else if (row == 8) {
-				check = (check + (d > 0 ? 1 : 2)) % 3;
+				webhook_on = !webhook_on;
 			}
 		}
-		if (d || reset) {
-			// every change is applied and saved immediately
-			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on; g_check = check; g_webhook_step = whstep;
+		if (d || reset) {   // every change is applied and saved immediately
+			g_std = sd; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on;
 			cfg_save();
-			logf("settings saved: retries=%d speed=%d eject=%d autostart=%d redump=%d remote=%d webhook=%d",
-			     g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on);
+			logf("settings saved: standard speed=%d retries=%d check=%d eject=%d autostart=%d, redump=%d remote=%d webhook=%d",
+			     sd.speed, sd.retries, sd.check, sd.eject, sd.autostart, g_redump, g_remote, g_webhook_on);
 		}
 		if (p & B_CIRCLE) return;
 	}
 }
 
+// Settings of one drive (SELECT on its card): read speed, re-reads, sector check, eject after a
+// rip, rip a disc at once. Each is "standard" (Settings) unless set here for this drive. Saved per
+// drive: the PS3's as drive_bd=, a USB drive by its port as drive_usbN=.
+static void drive_settings_screen(int c)
+{
+	Card &k = g_cards[c];
+	int row = 0;
+	const int NROWS = 5;
+	static const int o_speed[] = {-1, 3, 2, 1, 0}, o_retries[] = {-1, 1, 2, 4, 8, 16, 32}, o_check[] = {-1, CHECK_OFF, CHECK_ON, CHECK_BITPERFECT},
+	                 o_onoff[] = {-1, 0, 1};
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			g_drawn = 2;
+			draw_backdrop();
+			char vals[5][96], name[96];
+			source_name(c ? c - 1 : -1, name, sizeof(name));
+			drive_val(vals[0], sizeof(vals[0]), k.speed, g_std.speed, fmt_speed);
+			drive_val(vals[1], sizeof(vals[1]), k.retries, g_std.retries, fmt_int);
+			drive_val(vals[2], sizeof(vals[2]), k.check, g_std.check, fmt_check);
+			drive_val(vals[3], sizeof(vals[3]), k.eject, g_std.eject, fmt_onoff);
+			drive_val(vals[4], sizeof(vals[4]), k.autostart, g_std.autostart, fmt_onoff);
+			const char *labels[5] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART)};
+			settings_rows(name, labels, vals, NROWS, row, -1);
+			const char *b[] = {"updown", "leftright", "triangle", "circle"};
+			const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_STANDARD), T(STR_HINT_BACK)};
+			hint_bar(b, l, 4);
+		}
+		flip_frame();
+		int p = pad_pressed();
+		if (p) g_redraw = 2;
+		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
+		if (p & B_DOWN) row = (row + 1) % NROWS;
+		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
+		int reset = 0;
+		if (p & B_TRIANGLE) { card_defaults(k); reset = 1; }   // all back to the standard
+		if (d) {
+			if (row == 0) k.speed = step_opt(k.speed, o_speed, 5, d);   // right = faster
+			else if (row == 1) k.retries = step_opt(k.retries, o_retries, 7, d);
+			else if (row == 2) k.check = step_opt(k.check, o_check, 4, d);
+			else if (row == 3) k.eject = step_opt(k.eject, o_onoff, 3, d);
+			else if (row == 4) k.autostart = step_opt(k.autostart, o_onoff, 3, d);
+		}
+		if (d || reset) {
+			card_store(c);
+			cfg_save();
+			logf("drive %d settings: speed=%d retries=%d check=%d eject=%d autostart=%d (-1 = standard)", c, k.speed, k.retries, k.check, k.eject, k.autostart);
+		}
+		if (p & B_CIRCLE) return;
+	}
+}
 
 // Ejects the disc (START STOP UNIT with LoEj).
 static void eject_disc()
@@ -2734,6 +2851,9 @@ static void select_card(int c)
 	if (c) g_usb = c - 1;
 	if (!g_cards[c].dest[0]) snprintf(g_cards[c].dest, sizeof(g_cards[0].dest), "%s", HDD_DIR);
 	OUT_DIR = g_cards[c].dest;
+	const Card &k = g_cards[c];   // the rip reads these
+	g_retries = std_or(k.retries, g_std.retries); g_speed = std_or(k.speed, g_std.speed); g_eject = std_or(k.eject, g_std.eject);
+	g_autostart = std_or(k.autostart, g_std.autostart); g_check = std_or(k.check, g_std.check);
 	if (g_cards[c].base[0]) snprintf(g_base, sizeof(g_base), "%s", g_cards[c].base);
 }
 
@@ -2785,6 +2905,8 @@ static void usb_presence_thread(void *arg)
 				const char *od = port >= 0 && g_outdir_usb[port][0] ? g_outdir_usb[port] : HDD_DIR;
 				snprintf(k.outdir, sizeof(k.outdir), "%s", od);
 				k.dest[0] = 0;
+				card_defaults(k);
+				if (port >= 0 && port < 8 && g_usbcfg[port].set) card_from(k, g_usbcfg[port]);
 				k.state = DISC_NONE; k.tried = 0; k.base[0] = 0;
 				logf("usb drive %d: %s, port %d", i, usbodd_name(i), port);
 				g_redraw = 2;
@@ -2897,10 +3019,10 @@ static int home_screen()
 		for (int i = 0; i < nc; i++) sig = sig * 7 + g_cards[list[i]].state * 2 + g_cards[list[i]].prev_rip;
 		if (sig != last_sig) { last_sig = sig; g_redraw = 2; }
 		// automatic rip only for a disc not ripped to this destination yet: never overwrite one
-		if (g_autostart && !g_ident_busy)
+		if (!g_ident_busy)
 			for (int i = 0; i < nc; i++) {
 				Card &k = g_cards[list[i]];
-				if (k.state == DISC_READY && k.fresh && !k.prev_rip) { select_card(list[i]); k.fresh = 0; return 2; }
+				if (std_or(k.autostart, g_std.autostart) && k.state == DISC_READY && k.fresh && !k.prev_rip) { select_card(list[i]); k.fresh = 0; return 2; }
 			}
 		Card &f = g_cards[sel];
 		int st = f.state;
@@ -2923,21 +3045,21 @@ static int home_screen()
 				footer_note(wl);
 			}
 			if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
-				const char *b[] = {"cross", "square", "triangle", "start", "circle"};
-				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
-				hint_bar(b, l, 5);
+				const char *b[] = {"cross", "square", "triangle", "select", "start", "circle"};
+				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				hint_bar(b, l, 6);
 			} else if (st == DISC_READY) {
-				const char *b[] = {"cross", "triangle", "start", "circle"};
-				const char *l[] = {T(f.prev_rip ? STR_HINT_NEWRIP : STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
-				hint_bar(b, l, 4);
+				const char *b[] = {"cross", "triangle", "select", "start", "circle"};
+				const char *l[] = {T(f.prev_rip ? STR_HINT_NEWRIP : STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				hint_bar(b, l, 5);
 			} else if (st == DISC_ERROR) {
-				const char *b[] = {"triangle", "start", "circle"};
-				const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
-				hint_bar(b, l, 3);
+				const char *b[] = {"triangle", "select", "start", "circle"};
+				const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				hint_bar(b, l, 4);
 			} else {
-				const char *b[] = {"start", "circle"};
-				const char *l[] = {T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
-				hint_bar(b, l, 2);
+				const char *b[] = {"select", "start", "circle"};
+				const char *l[] = {T(STR_HINT_DRIVE), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				hint_bar(b, l, 3);
 			}
 		}
 		flip_frame();
@@ -2978,6 +3100,12 @@ static int home_screen()
 			return 3;
 		}
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
+		if (p & B_SELECT) {   // this drive's settings
+			drive_settings_screen(sel);
+			pad_pressed();
+			g_redraw = 2;
+			continue;
+		}
 		if (p & B_START) {
 			int old = g_redump;
 			settings_screen();
@@ -3708,7 +3836,11 @@ int main(int argc, char *argv[])
 	netInitialize();
 	// start-up checks: config, lv1 state after an earlier crash, USB file systems
 	char warn[400] = "";
-	if (!cfg_load()) { mkdir("/dev_hdd0/tmp", 0777); cfg_save(); logf("startup: no config, defaults written"); }   // editable over FTP
+	int had_cfg = cfg_load();
+	{ DriveCfg st = {1, g_retries, g_speed, g_eject, g_autostart, g_check}; g_std = st; }   // the old keys are the standard
+	card_defaults(g_cards[0]);
+	if (g_bdcfg.set) card_from(g_cards[0], g_bdcfg);
+	if (!had_cfg) { mkdir("/dev_hdd0/tmp", 0777); cfg_save(); logf("startup: no config, defaults written"); }   // editable over FTP
 	{
 		int lv = lv1_startup_check();
 		if (lv == 1) snprintf(warn + strlen(warn), sizeof(warn) - strlen(warn), "%s\n", T(STR_START_LV1_FIXED));
