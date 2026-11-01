@@ -701,6 +701,44 @@ static volatile uint32_t g_buf_end[2];   // lba after the last sector in buffer
 static volatile int g_reader_done = 0, g_write_failed = 0;
 static FILE *g_out;
 
+// Sector check (data track 1): sync pattern, header address and EDC. Run by the writer thread,
+// so a rip that differs from Redump can be traced to damaged or misplaced sectors.
+static uint32_t g_edc_tab[256];
+static volatile uint32_t g_badsect = 0;
+
+static void edc_init()
+{
+	for (uint32_t i = 0; i < 256; i++) {
+		uint32_t e = i;
+		for (int k = 0; k < 8; k++) e = (e >> 1) ^ ((e & 1) ? 0xD8018001 : 0);
+		g_edc_tab[i] = e;
+	}
+}
+
+static uint32_t edc(const uint8_t *p, int n)
+{
+	uint32_t e = 0;
+	while (n--) e = g_edc_tab[(e ^ *p++) & 255] ^ (e >> 8);
+	return e;
+}
+
+static const char *check_sector(uint32_t lba, const uint8_t *s)
+{
+	static const uint8_t sync[12] = {0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0};
+	if (memcmp(s, sync, 12)) return "sync";
+	uint32_t a = lba + 150;
+	if (s[12] != bcd(a / 4500) || s[13] != bcd((a / 75) % 60) || s[14] != bcd(a % 75)) return "address";
+	const uint8_t *st;
+	uint32_t calc;
+	if (s[15] == 1) { calc = edc(s, 2064); st = s + 2064; }
+	else if (s[15] == 2 && (s[18] & 0x20)) { calc = edc(s + 16, 2332); st = s + 2348; }   // form 2
+	else if (s[15] == 2) { calc = edc(s + 16, 2056); st = s + 2072; }                     // form 1
+	else return 0;
+	uint32_t stored = st[0] | st[1] << 8 | st[2] << 16 | (uint32_t)st[3] << 24;
+	if (s[15] == 2 && (s[18] & 0x20) && !stored) return 0;   // form 2 EDC is optional
+	return stored == calc ? 0 : "EDC";
+}
+
 static void writer_thread(void *arg)
 {
 	for (int k = 0;; k ^= 1) {
@@ -721,6 +759,12 @@ static void writer_thread(void *arg)
 			md5_update(&g_md5[t], g_bufs[k] + i * RAW_SIZE, cnt * RAW_SIZE);
 			i += cnt;
 		}
+		uint32_t data_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
+		if (g_ntracks && (g_tracks[0].ctrl & 0x4))
+			for (uint32_t i = 0; i < n && first + i < data_end; i++) {
+				const char *why = check_sector(first + i, g_bufs[k] + i * RAW_SIZE);
+				if (why && ++g_badsect <= 32) logf("bad sector %u: %s", first + i, why);
+			}
 		g_done = g_buf_end[k];
 		g_buf_len[k] = 0;
 	}
@@ -740,6 +784,8 @@ static void rip_thread(void *arg)
 	g_buf_len[0] = g_buf_len[1] = 0;
 	for (int t = 0; t < g_ntracks; t++) md5_init(&g_md5[t]);
 	tstart_init();
+	edc_init();
+	g_badsect = 0;
 	g_reader_done = 0; g_write_failed = 0;
 	uint32_t data_end = (g_ntracks > 1) ? g_tracks[1].lba : g_leadout;  // LibCrypt lives in track 1
 
@@ -1641,6 +1687,11 @@ static int rip_disc_inner(int fresh, int autorip)
 	char lcline[480] = "";
 	if (lcinfo[0]) snprintf(lcline, sizeof(lcline), "\n%s", lcinfo);
 	if (rdinfo[0]) snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), "\n%s", rdinfo);
+	if (g_badsect) {
+		snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), "\n");
+		snprintf(lcline + strlen(lcline), sizeof(lcline) - strlen(lcline), T(STR_BAD_SECTORS), g_badsect);
+	}
+	logf("sector check: %u bad sector(s)", g_badsect);
 	snprintf(msg, sizeof(msg), T(STR_DONE),
 	         g_base, lcline, g_readerrs);
 	logf("done: %s errs=%u", g_base, g_readerrs);
@@ -1716,20 +1767,17 @@ int main(int argc, char *argv[])
 		autorip = 0;
 		if (!ok) continue;
 
-		// auto mode: show the result and wait for the next disc. X hides the summary, O leaves auto mode.
-		int show_summary = 1;
+		// auto mode: show the result and wait for the next disc; X or O goes back to the start screen
 		while (!exit_requested) {
 			char text[1024];
-			if (show_summary) snprintf(text, sizeof(text), "%s\n\n%s", g_done_msg, T(g_eject ? STR_NEXT_DISC : STR_NEXT_DISC_NOEJECT));
-			else snprintf(text, sizeof(text), "%s", T(g_eject ? STR_NEXT_DISC : STR_NEXT_DISC_NOEJECT));
+			snprintf(text, sizeof(text), "%s\n\n%s", g_done_msg, T(g_eject ? STR_NEXT_DISC : STR_NEXT_DISC_NOEJECT));
 			disc_inserted = 0;
 			dialog_action = 0;
 			msgDialogOpen2((msgType)(MSG_DIALOG_NORMAL | MSG_DIALOG_BTN_TYPE_OK), text, dialog_handler, NULL, NULL);
 			while (!dialog_action && !disc_inserted && !exit_requested) do_flip();
 			msgDialogAbort();
 			if (disc_inserted) { autorip = 1; break; }
-			if (dialog_action == 1) { show_summary = 0; continue; }   // X
-			break;                                                     // O: back to the start screen
+			break;   // X or O: back to the start screen
 		}
 	}
 	sysDiscUnregisterDiscChangeCallback();

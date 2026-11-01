@@ -26,7 +26,7 @@ static const char *en[STR_COUNT] = {
 	"LibCrypt: not applicable (only PAL discs use it).",
 	"Done!\n%s.bin/.cue\n%s\nUnreadable sectors: %u",
 	"Update the webMAN game list now?",
-	"The disc has been ejected. Insert the next disc and it will be ripped automatically.\n○ stops automatic ripping.",
+	"The disc has been ejected. Insert the next disc and it will be ripped automatically.\n✕ or ○ goes back to the start screen.",
 	"webMAN did not answer. Run Refresh XML in webMAN to see the new games.",
 	"Settings\n\nSave to: %s\n\nYes = change destination\nNo = next setting",
 	"Settings\n\nRe-reads on read errors: %d\n\nYes = change\nNo = next setting",
@@ -38,7 +38,7 @@ static const char *en[STR_COUNT] = {
 	"On",
 	"Off",
 	"PSX Ripper\n\nYes = Settings\nNo = Exit",
-	"Done. Remove the disc and insert the next one and it will be ripped automatically.\n○ stops automatic ripping.",
+	"Done. Remove the disc and insert the next one and it will be ripped automatically.\n✕ or ○ goes back to the start screen.",
 	"Insert a PS1 disc",
 	"Saving to: %s",
 	"Rip",
@@ -77,6 +77,7 @@ static const char *en[STR_COUNT] = {
 	"Redump: could not be checked.",
 	"Redump: the serial was not found.",
 	"Version %s, downloaded %s",
+	"Sectors with a checksum error: %u (see the log)",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -99,7 +100,7 @@ static const char *sv[STR_COUNT] = {
 	"LibCrypt: ej aktuellt (används bara på PAL-skivor).",
 	"Klart!\n%s.bin/.cue\n%s\nOläsbara sektorer: %u",
 	"Uppdatera webMANs spellista nu?",
-	"Skivan har matats ut. Sätt i nästa skiva så rippas den automatiskt.\n○ avslutar den automatiska rippningen.",
+	"Skivan har matats ut. Sätt i nästa skiva så rippas den automatiskt.\n✕ eller ○ går tillbaka till startskärmen.",
 	"webMAN svarade inte. Kör Refresh XML i webMAN för att se de nya spelen.",
 	"Inställningar\n\nSpara till: %s\n\nJa = byt plats\nNej = nästa inställning",
 	"Inställningar\n\nOmläsningar vid läsfel: %d\n\nJa = ändra\nNej = nästa inställning",
@@ -111,7 +112,7 @@ static const char *sv[STR_COUNT] = {
 	"På",
 	"Av",
 	"PSX Ripper\n\nJa = Inställningar\nNej = Avsluta",
-	"Klart. Ta ut skivan och sätt i nästa så rippas den automatiskt.\n○ avslutar den automatiska rippningen.",
+	"Klart. Ta ut skivan och sätt i nästa så rippas den automatiskt.\n✕ eller ○ går tillbaka till startskärmen.",
 	"Sätt i en PS1-skiva",
 	"Sparas till: %s",
 	"Rippa",
@@ -150,6 +151,7 @@ static const char *sv[STR_COUNT] = {
 	"Redump: kunde inte kontrolleras.",
 	"Redump: skivnumret hittades inte.",
 	"Version %s, hämtad %s",
+	"Sektorer med kontrollsummefel: %u (se loggen)",
 };
 
 static const char **table = en;
