@@ -34,6 +34,7 @@
 #include "remote.h"
 #include "webhook.h"
 #include "vfs.h"
+#include "usbodd.h"
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
 // Output locations; the mount test redirects both so a mounted image is never overwritten
@@ -371,7 +372,23 @@ static int debug_cmd(const char *q, char *out, int n)
 	if (!g_debug_on) { snprintf(out, n, "debug mode off (create /dev_hdd0/tmp/psxrip.debug)\n"); return 0; }
 	if (g_state_busy()) { snprintf(out, n, "busy: the app is using the drive\n"); return 0; }
 	const char *op = qget(q, "op", opbuf, sizeof(opbuf));   // own buffer: v is reused below
-	if (!op) { snprintf(out, n, "ops: list | info&id= | scsi&id=&sc=616|604&proto=0|1|3&dir=0|1&cdb=hex&len= | devcmd&id=&cmd=&in=hex&len=\n"); return 0; }
+	if (!op) { snprintf(out, n, "ops: list | usb | usbscsi&cdb=hex&len=&dir=in|out | scsi&id=&sc=616|604&proto=0|1|3&dir=0|1&cdb=hex&len= | devcmd&id=&cmd=&in=hex&len= | read&id=&lba=\n"); return 0; }
+	if (!strcmp(op, "usb")) { usbodd_status(out, n); return 0; }
+	if (!strcmp(op, "usbscsi")) {   // SCSI to the USB optical drive over our own Bulk-Only Transport
+		uint8_t cdb[16] = {0};
+		int cl = unhex(qget(q, "cdb", v2, sizeof(v2)) ? v2 : "", cdb, 16);
+		int len = qget(q, "len", v, sizeof(v)) ? atoi(v) : 0;
+		int din = !qget(q, "dir", v, sizeof(v)) || strcmp(v, "out");
+		static uint8_t data[65536];
+		memset(data, 0, sizeof(data));
+		int st = -1, got = 0;
+		char lg[600] = "";
+		int r = usbodd_scsi(cdb, cl ? cl : 12, data, len < 0 || len > 65536 ? 0 : len, din, &st, &got, lg, sizeof(lg));
+		snprintf(out, n, "%susbscsi -> %d, CSW status %d, data %d\n", lg, r, st, got);
+		if (got > 0) hexdump(out, n, data, got < 512 ? got : 512);
+		logf("debug: %s -> %d status %d", q, r, st);
+		return 0;
+	}
 	if (!strcmp(op, "list")) {
 		static const uint64_t bases[] = {0x0101000000000000ULL, 0x0103000000000000ULL};
 		for (int b = 0; b < 2; b++)
@@ -3443,7 +3460,7 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 	if (warn[0]) own_dialog(warn, 0);   // what the start-up checks found and fixed
-	{ struct stat ds; g_debug_on = stat("/dev_hdd0/tmp/psxrip.debug", &ds) == 0; if (g_debug_on) logf("debug commands on (/dbg)"); }
+	{ struct stat ds; g_debug_on = stat("/dev_hdd0/tmp/psxrip.debug", &ds) == 0; if (g_debug_on) { logf("debug commands on (/dbg)"); usbodd_init(); } }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
 	int autorip = 0;   // set after a successful rip: the next inserted disc is ripped without asking
