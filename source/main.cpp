@@ -1275,7 +1275,7 @@ static void redump_download_screen()
 		char raw[64] = "";
 		rd_local_info(raw, sizeof(raw), NULL);
 		fmt_rd_version(raw, ver, sizeof(ver));
-		snprintf(msg, sizeof(msg), T(STR_RD_DL_DONE), g_dl_result, ver);
+		snprintf(msg, sizeof(msg), T(STR_RD_DL_DONE), ver, g_dl_result);
 	}
 	else snprintf(msg, sizeof(msg), T(STR_RD_DL_FAILED), g_dl_result);
 	tell(msg);
@@ -1311,9 +1311,12 @@ static void settings_screen()
 		snprintf(vals[4], sizeof(vals[4]), "%s", autostart ? T(STR_ON) : T(STR_OFF));
 		snprintf(vals[5], sizeof(vals[5]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
 		if (rdcount > 0) {
-			char when[32];
+			// Redump's version (date) and when this copy was downloaded (date and time)
+			char date[16], ver[24], when[32];
+			snprintf(date, sizeof(date), "%.10s", rdver);
+			fmt_rd_version(date, ver, sizeof(ver));
 			fmt_local(rdwhen, when, sizeof(when));
-			snprintf(vals[6], sizeof(vals[6]), T(STR_RD_COPY_VALUE), when, rdcount);
+			snprintf(vals[6], sizeof(vals[6]), T(STR_RD_COPY_VALUE), ver, when);
 		} else {
 			snprintf(vals[6], sizeof(vals[6]), "%s", T(STR_RD_MISSING));
 		}

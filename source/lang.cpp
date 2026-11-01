@@ -66,7 +66,7 @@ static const char *en[STR_COUNT] = {
 	"Downloading the Redump database from redump.org…\n○ cancels",
 	"%u / %u KB",
 	"Building the index…",
-	"The Redump database has been downloaded: %d discs (%s).",
+	"The Redump database has been downloaded: version %s, %d discs.",
 	"Could not download the Redump database (%d). Is the console connected to the internet?",
 	"Redump: %s",
 	"Redump: %s (+%d more)",
@@ -76,7 +76,7 @@ static const char *en[STR_COUNT] = {
 	"Redump: no match. The rip differs from every known dump.",
 	"Redump: could not be checked.",
 	"Redump: the serial was not found.",
-	"Downloaded %s (%d discs)",
+	"Version %s, downloaded %s",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -139,7 +139,7 @@ static const char *sv[STR_COUNT] = {
 	"Hämtar Redump-databasen från redump.org …\n○ avbryter",
 	"%u / %u kB",
 	"Bygger index …",
-	"Redump-databasen är hämtad: %d skivor (%s).",
+	"Redump-databasen är hämtad: version %s, %d skivor.",
 	"Kunde inte hämta Redump-databasen (%d). Är konsolen ansluten till internet?",
 	"Redump: %s",
 	"Redump: %s (+%d till)",
@@ -149,7 +149,7 @@ static const char *sv[STR_COUNT] = {
 	"Redump: ingen träff. Rippen skiljer sig från alla kända dumpar.",
 	"Redump: kunde inte kontrolleras.",
 	"Redump: skivnumret hittades inte.",
-	"Hämtad %s (%d skivor)",
+	"Version %s, hämtad %s",
 };
 
 static const char **table = en;
