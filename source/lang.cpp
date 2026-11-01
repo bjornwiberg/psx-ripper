@@ -120,6 +120,7 @@ static const char *en[STR_COUNT] = {
 	"Yes",
 	"No",
 	"OK",
+	"No sectors to repair: the previous rip is complete.",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -236,6 +237,7 @@ static const char *sv[STR_COUNT] = {
 	"Ja",
 	"Nej",
 	"OK",
+	"Inga sektorer att laga: den tidigare rippen är komplett.",
 };
 
 static const char **table = en;

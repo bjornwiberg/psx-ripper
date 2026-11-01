@@ -1953,9 +1953,9 @@ static void eject_disc()
 	g_disc_state = DISC_NONE;
 }
 
-// The disc has been ripped to this destination before: X new rip, square repair the previous rip
-// (only offered when its log lists sectors to read again), O back.
-// Returns 1 = repair, 2 = new rip, 0 = back.
+// The disc has been ripped to this destination before: X repair (re-read only the sectors its log
+// lists; done at once when there are none), square new rip, triangle eject, O back.
+// Returns 1 = repair, 2 = new rip, 3 = eject, 0 = back.
 static int already_ripped_screen()
 {
 	pad_pressed();
@@ -1967,26 +1967,21 @@ static int already_ripped_screen()
 			int y = ui_h() * 2 / 5 - ui_line(UI_BODY);
 			ui_text(UI_TITLE, ui_w() / 2, y - ui_line(UI_TITLE), 0xFFFFFF, g_disc_title, UI_CENTER);
 			ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_BODY), 0xE8E8F0, T(STR_ALREADY_RIPPED), UI_CENTER);
-			if (g_repair_n) {
-				char rl[128];
-				snprintf(rl, sizeof(rl), T(STR_REPAIR_AVAIL), g_repair_n);
-				ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_BODY) * 5 / 2, 0xF0C060, rl, UI_CENTER);
-				const char *b[] = {"cross", "square", "circle"};
-				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_BACK)};
-				hint_bar(b, l, 3);
-			} else {
-				ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_BODY) * 5 / 2, 0x7CE0A0, T(STR_PREV_CLEAN), UI_CENTER);
-				const char *b[] = {"cross", "circle"};
-				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_BACK)};
-				hint_bar(b, l, 2);
-			}
+			char rl[128];
+			if (g_repair_n) snprintf(rl, sizeof(rl), T(STR_REPAIR_AVAIL), g_repair_n);
+			else snprintf(rl, sizeof(rl), "%s", T(STR_PREV_CLEAN));
+			ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_BODY) * 5 / 2, g_repair_n ? 0xF0C060 : 0x7CE0A0, rl, UI_CENTER);
+			const char *b[] = {"cross", "square", "triangle", "circle"};
+			const char *l[] = {T(STR_HINT_REPAIR), T(STR_HINT_NEWRIP), T(STR_HINT_EJECT), T(STR_HINT_BACK)};
+			hint_bar(b, l, 4);
 			g_drawn = 2;
 			g_backdrop_shown = 0;
 		}
 		flip_frame();
 		int p = pad_pressed();
-		if (p & B_CROSS) return 2;
-		if ((p & B_SQUARE) && g_repair_n) return 1;
+		if (p & B_CROSS) return 1;
+		if (p & B_SQUARE) return 2;
+		if (p & B_TRIANGLE) return 3;
 		if (p & B_CIRCLE) return 0;
 	}
 	return 0;
@@ -2034,15 +2029,15 @@ static int home_screen()
 				ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 3 / 2 - ui_line(UI_SMALL) / 2, 0x9AD0A8, g_disc_rd, UI_CENTER);
 			ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2 + (st == DISC_READY && g_disc_rd[0] ? ui_line(UI_SMALL) : 0), 0x8890A8, saving, UI_CENTER);
 			if (st == DISC_READY) {
-				const char *b[] = {"cross", "triangle", "square", "circle"};
+				const char *b[] = {"cross", "triangle", "start", "circle"};
 				const char *l[] = {T(STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
 				hint_bar(b, l, 4);
 			} else if (st == DISC_ERROR) {
-				const char *b[] = {"triangle", "square", "circle"};
+				const char *b[] = {"triangle", "start", "circle"};
 				const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
 				hint_bar(b, l, 3);
 			} else {
-				const char *b[] = {"square", "circle"};
+				const char *b[] = {"start", "circle"};
 				const char *l[] = {T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
 				hint_bar(b, l, 2);
 			}
@@ -2051,13 +2046,14 @@ static int home_screen()
 		int p = pad_pressed();
 		if ((p & B_CROSS) && st == DISC_READY) {
 			if (!g_prev_rip) return inserted ? 2 : 1;
-			int c = already_ripped_screen();   // X repair, square new rip, O back
+			int c = already_ripped_screen();   // X repair, square new rip, triangle eject, O back
 			if (c == 1) return 3;
 			if (c == 2) return inserted ? 2 : 1;
+			if (c == 3) eject_disc();
 			g_redraw = 2;
 		}
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
-		if (p & (B_SQUARE | B_START)) {
+		if (p & B_START) {
 			int old = g_redump;
 			settings_screen();
 			if (g_redump != old && g_disc_state == DISC_READY && !g_ident_busy) lookup_start();
@@ -2480,6 +2476,25 @@ static int repair_disc()
 	snprintf(path, sizeof(path), "%s.bin", g_base);
 	g_out = vf_open(path, "r+b");
 	if (!g_out || !n) { if (g_out) vf_close(g_out); sys_storage_close(g_fd); lv1_storage_unpatch(); tell(T(STR_CREATE_FAILED)); return 0; }
+	if (!riplog_open_count()) {
+		// nothing listed: the previous rip stands as it is
+		vf_close(g_out);
+		sys_storage_close(g_fd);
+		lv1_storage_unpatch();
+		g_nres = 0;
+		snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", g_name, g_serial);
+		snprintf(g_res_path, sizeof(g_res_path), "%s.bin", g_base);
+		const char *rd = strstr(buf, "redump=");
+		if (rd) {
+			char line[200];
+			size_t k = strcspn(rd + 7, "\n");
+			snprintf(line, sizeof(line), "Redump: %.*s", (int)(k < 180 ? k : 180), rd + 7);
+			res_add(!strncmp(rd + 7, "verified", 8) ? 0x7CE0A0 : 0xA8B0C8, "%s", line);
+		}
+		res_add(0x7CE0A0, "%s", T(STR_NOTHING_TO_REPAIR));
+		logf("repair %s: nothing to repair", g_base);
+		return 1;
+	}
 
 	// rebuild the state the second pass works on
 	edc_init(); ecc_init();
