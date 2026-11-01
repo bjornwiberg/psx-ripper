@@ -3045,6 +3045,15 @@ static void fn_step(int d)
 
 // The file name view: the pattern as parts, a preview for the discs in the drives (file name and
 // how webMAN lists it), parts to add with X, square removes the last one, triangle types freely.
+// A section heading in a view: body size, light blue, a thin line under it. Returns the height.
+static int section_head(int L, int R, int y, const char *text)
+{
+	int lb = ui_line(UI_BODY);
+	ui_text(UI_BODY, L, y, 0x8FB0FF, text);
+	ui_rect(L, y + lb + lb / 8, R - L, 2, 0x50FFFFFF);
+	return lb + lb / 3;
+}
+
 static void filename_screen()
 {
 	char pat[96];
@@ -3062,10 +3071,9 @@ static void filename_screen()
 			draw_backdrop();
 			int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL), L = ui_w() / 6, R = ui_w() * 5 / 6;
 			ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + lb / 2, 0xA8B0C8, T(STR_L_FILENAME), UI_CENTER);
-			int y = ui_h() / 10 + ui_line(UI_TITLE) + lb * 2;
+			int y = ui_h() / 10 + ui_line(UI_TITLE) + lb * 3 / 2;
 			// the pattern: variables as blue chips, other characters as they are (a space as a dot)
-			ui_text(UI_SMALL, L, y, 0x8890A8, T(STR_FN_PATTERN));
-			y += ls + ls / 3;
+			y += section_head(L, R, y, T(STR_FN_PATTERN));
 			int x = L, pad = ui_w() / 120;
 			for (const char *q = pat; *q; q++) {
 				if (*q == '%' && q[1]) {
@@ -3085,10 +3093,9 @@ static void filename_screen()
 			ui_rect(x + 2, y, 3, lb, 0xFFFFFFFF);   // where the next part goes
 			y += lb + ls / 2;
 			ui_text(UI_SMALL, L, y, 0x8890A8, pat);
-			y += ls * 2;
+			y += ls + ls / 2;
 			// preview: each disc in a drive, else an example
-			ui_text(UI_SMALL, L, y, 0x8890A8, T(STR_FN_PREVIEW));
-			y += ls + ls / 3;
+			y += section_head(L, R, y, T(STR_FN_PREVIEW));
 			int list[NCARDS], nc = card_list(list), shown = 0;
 			for (int i = 0; i <= nc; i++) {
 				const char *rn, *tt, *sr, *dn = "";
@@ -3115,13 +3122,12 @@ static void filename_screen()
 					ui_text(UI_SMALL, R, y + (lb - ls) / 2, 0x8890A8, dn, UI_RIGHT);
 				}
 				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, lv, R - L);
-				y += lb + ls + ls / 2;
+				y += lb + ls + ls / 3;
 				shown++;
 			}
 			// parts to add
 			y += ls / 2;
-			ui_text(UI_SMALL, L, y, 0x8890A8, T(STR_FN_ADD));
-			y += ls + ls / 3;
+			y += section_head(L, R, y, T(STR_FN_ADD));
 			x = L;
 			for (int i = 0; i < NP; i++) {
 				const char *w = i < 5 ? T(plbl[i]) : parts[i];
