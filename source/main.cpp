@@ -2474,10 +2474,14 @@ static int home_screen()
 				snprintf(sl, sizeof(sl), T(STR_NO_SPACE), g_disc_mb, (unsigned)(g_disc_mb + 2 - g_space_short));
 				ui_text(UI_SMALL, ui_w() / 2, sy + ls * 13 / 10, 0xFF8A80, sl, UI_CENTER);
 			}
-			if (st == DISC_READY && g_prev_rip) {   // already ripped here: X repairs, square rips again
+			if (st == DISC_READY && g_prev_rip && g_repair_n) {   // ripped here with known errors: square repairs
 				const char *b[] = {"cross", "square", "triangle", "start", "circle"};
-				const char *l[] = {T(STR_HINT_REPAIR), T(STR_HINT_NEWRIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
 				hint_bar(b, l, 5);
+			} else if (st == DISC_READY && g_prev_rip) {   // ripped here without known errors: nothing to repair
+				const char *b[] = {"cross", "triangle", "start", "circle"};
+				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				hint_bar(b, l, 4);
 			} else if (st == DISC_READY) {
 				const char *b[] = {"cross", "triangle", "start", "circle"};
 				const char *l[] = {T(STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
@@ -2498,17 +2502,22 @@ static int home_screen()
 			int shown_prev = g_prev_rip;
 			prev_rip_check();   // the destination may have changed since the disc was identified
 			if (g_prev_rip != shown_prev) { g_redraw = 2; continue; }   // the screen was out of date: show it first
-			if (g_prev_rip) return 3;                                    // repair
-			if (g_space_short) {                                          // would run out of space half way
+			// would run out of space half way (a new rip over an old one replaces it, so that fits)
+			if (g_space_short && !g_prev_rip) {
 				char m[256];
 				snprintf(m, sizeof(m), T(STR_NO_SPACE), g_disc_mb, (unsigned)(g_disc_mb + 2 - g_space_short));
 				own_dialog(m, 0);
 				g_redraw = 2;
 				continue;
 			}
-			return inserted ? 2 : 1;                                      // rip
+			return inserted ? 2 : 1;   // rip, also over an existing rip (X is always a rip)
 		}
-		if ((p & B_SQUARE) && st == DISC_READY && g_prev_rip) return inserted ? 2 : 1;   // new rip over the old one
+		if ((p & B_SQUARE) && st == DISC_READY && g_prev_rip && g_repair_n) {   // repair the sectors the log lists
+			int shown_prev = g_prev_rip;
+			prev_rip_check();
+			if (g_prev_rip != shown_prev || !g_repair_n) { g_redraw = 2; continue; }
+			return 3;
+		}
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
 		if (p & B_START) {
 			int old = g_redump;
