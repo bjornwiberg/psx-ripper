@@ -112,6 +112,9 @@ static const char *en[STR_COUNT] = {
 	"This disc has already been ripped to this destination.",
 	"The previous rip has no known errors.",
 	"New rip",
+	"Time %s",
+	"Time %s · about %s left · %u.%u MB/s",
+	"Time: %s",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -220,6 +223,9 @@ static const char *sv[STR_COUNT] = {
 	"Skivan är redan rippad till den här platsen.",
 	"Den tidigare rippen har inga kända fel.",
 	"Ny rippning",
+	"Tid %s",
+	"Tid %s · kvar ca %s · %u,%u MB/s",
+	"Tid: %s",
 };
 
 static const char **table = en;

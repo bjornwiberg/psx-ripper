@@ -1660,7 +1660,8 @@ static void fmt_local(time_t t, char *out, size_t n)
 
 // Own progress screen (instead of the system dialog, whose button reads "Back"): title, bar,
 // detail text and "O Cancel". Draws only when called; the caller decides when something changed.
-static void progress_draw(const char *title, const char *detail, uint32_t pct, const char *note = NULL, int cancelling = 0)
+static void progress_draw(const char *title, const char *detail, uint32_t pct, const char *note = NULL, int cancelling = 0,
+                          const char *timeline = NULL)
 {
 	if (pct > 100) pct = 100;
 	draw_backdrop();
@@ -1675,8 +1676,9 @@ static void progress_draw(const char *title, const char *detail, uint32_t pct, c
 	char p[16];
 	snprintf(p, sizeof(p), "%u %%", pct);
 	ui_text(UI_SMALL, ui_w() / 2, y + bh + ls / 2, 0xE8E8F0, p, UI_CENTER);
+	if (timeline && timeline[0]) ui_text(UI_SMALL, ui_w() / 2, y + bh + ls * 2, 0xA8B0C8, timeline, UI_CENTER);
 	if (cancelling) note = T(STR_CANCELLING);   // O was pressed: say what we are waiting for
-	if (note && note[0]) ui_text(UI_SMALL, ui_w() / 2, y + bh + ls * 2, 0xF0C060, note, UI_CENTER);
+	if (note && note[0]) ui_text(UI_SMALL, ui_w() / 2, y + bh + ls * (timeline && timeline[0] ? 7 : 4) / 2, 0xF0C060, note, UI_CENTER);
 	if (!cancelling) {
 		const char *b[] = {"circle"};
 		const char *l[] = {T(STR_HINT_CANCEL)};
@@ -1684,6 +1686,35 @@ static void progress_draw(const char *title, const char *detail, uint32_t pct, c
 	}
 	g_drawn = 2;
 	g_backdrop_shown = 0;   // a system dialog shown afterwards needs its plain backdrop again
+}
+
+static void fmt_dur(char *out, size_t n, long secs)
+{
+	if (secs >= 3600) snprintf(out, n, "%ld:%02ld:%02ld", secs / 3600, (secs / 60) % 60, secs % 60);
+	else snprintf(out, n, "%ld:%02ld", secs / 60, secs % 60);
+}
+
+// "Time 2:14 · about 1:35 left · 2.6 MB/s": speed over the last ~20 s (the drive is faster on the
+// outer part of the disc and slow in damaged areas), remaining time from that speed.
+struct Eta { uint64_t t0, tw; uint32_t pw; double rate; };
+static void eta_start(Eta *e) { e->t0 = e->tw = now_ms(); e->pw = 0; e->rate = 0; }
+static void eta_line(Eta *e, uint32_t pos, uint32_t total, char *out, size_t n)
+{
+	uint64_t t = now_ms();
+	if (t - e->tw >= 2000) {   // sample every 2 s, smooth over ~20 s
+		double r = (double)(pos - e->pw) * 1000.0 / (double)(t - e->tw);
+		e->rate = e->rate > 0 ? e->rate * 0.9 + r * 0.1 : r;
+		e->tw = t; e->pw = pos;
+	}
+	char el[16], left[16];
+	fmt_dur(el, sizeof(el), (long)((t - e->t0) / 1000));
+	if (e->rate > 1 && t - e->t0 > 6000) {
+		fmt_dur(left, sizeof(left), (long)((total - pos) / e->rate));
+		unsigned kbs = (unsigned)(e->rate * RAW_SIZE / 1024);
+		snprintf(out, n, T(STR_TIME_ETA), el, left, kbs / 1024, (kbs % 1024) * 10 / 1024);
+	} else {
+		snprintf(out, n, T(STR_TIME), el);
+	}
 }
 
 // Downloads the Redump dat to the console and builds the local index (progress dialog, O cancels).
@@ -2185,6 +2216,9 @@ static int rip_disc_inner(int fresh, int autorip)
 	pad_pressed();
 	uint32_t shown = 101, shown_pos = 0, shown_lba = 0;
 	int shown_try = -1, shown_abort = 0;
+	Eta eta;
+	eta_start(&eta);
+	uint64_t shown_ms = 0;
 	while (!g_finished) {
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
@@ -2192,7 +2226,9 @@ static int rip_disc_inner(int fresh, int autorip)
 		int rmax = g_rr_max, rtry = rmax ? g_rr_try : 0;
 		uint32_t rlba = g_rr_lba;
 		// redraw on a new percentage, every 256 sectors, or when the re-read state changes
-		if (pct != shown || pos / 256 != shown_pos / 256 || rtry != shown_try || (rmax && rlba != shown_lba) || g_abort != shown_abort) {
+		if (pct != shown || pos / 256 != shown_pos / 256 || rtry != shown_try || (rmax && rlba != shown_lba) || g_abort != shown_abort ||
+		    now_ms() - shown_ms >= 1000) {
+			shown_ms = now_ms();
 			char pm[96], note[200] = "";
 			snprintf(pm, sizeof(pm), T(STR_PROGRESS), pos, g_total);
 			if (g_pass2_total) snprintf(note, sizeof(note), T(STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
@@ -2201,7 +2237,9 @@ static int rip_disc_inner(int fresh, int autorip)
 				size_t o = strlen(note);
 				snprintf(note + o, sizeof(note) - o, T(STR_READ_STATS), o ? " · " : "", g_readerrs, g_recovered);
 			}
-			progress_draw(ripmsg, pm, pct, note, g_abort);
+			char tl[96];
+			eta_line(&eta, g_pass2_total ? g_leadout : pos, g_total, tl, sizeof(tl));
+			progress_draw(ripmsg, pm, pct, note, g_abort, tl);
 			shown = pct; shown_pos = pos; shown_try = rtry; shown_lba = rlba; shown_abort = g_abort;
 		}
 		flip_frame();
@@ -2315,6 +2353,11 @@ static int rip_disc_inner(int fresh, int autorip)
 	if (g_nsuspect) res_add(g_confirmed == g_nsuspect ? 0x7CE0A0 : 0xF0C060, T(STR_CONFIRMED), g_nsuspect, g_confirmed);
 	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
 	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);
+	{
+		char d[16];
+		fmt_dur(d, sizeof(d), (long)(time(NULL) - g_rip_t0));
+		res_add(0xA8B0C8, T(STR_TOTAL_TIME), d);
+	}
 	write_riplog();
 	logf("done: %s errs=%u", g_base, g_readerrs);
 	snprintf(g_done_msg, sizeof(g_done_msg), "%s", msg);
