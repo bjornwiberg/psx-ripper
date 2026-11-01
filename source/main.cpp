@@ -268,7 +268,8 @@ static uint8_t *g_cmdbuf;          // aligned command transfer buffer
 static uint8_t *g_sec;   // 128-byte aligned, allocated in main()
 
 // ATAPI packets are SCSI commands: with the USB drive selected they go over our own USB driver.
-static int cdb_len(const uint8_t *cdb) { return cdb[0] < 0x20 ? 6 : cdb[0] < 0xA0 ? 10 : 12; }
+// The SuperDrive is an ATAPI drive behind a USB bridge: it only answers 12-byte packets.
+static int cdb_len(const uint8_t *) { return 12; }
 
 static int atapi(const uint8_t *cdb, uint8_t *buf, uint32_t len, uint32_t proto)
 {
@@ -583,6 +584,7 @@ static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, 
 			                 (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n, 0xF8, sub, 0};
 			int r = usbodd_cmd(c, 12, buf + (size_t)done * blk, n * blk, 1);
 			if (r) return r;
+			if (usbodd_last_got() != (int)(n * blk)) return -1;   // fewer sectors than asked for
 			done += n;
 		}
 		return 0;

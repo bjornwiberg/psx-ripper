@@ -225,6 +225,13 @@ static int scsi_locked(const uint8_t *cdb, int cdblen, uint8_t *data, int len, i
 	g_done = 0;
 	r = usbBulkTransfer(g_in, csw, 13, done_cb, NULL);
 	w = wait_done(5000);
+	if (!r && !w && g_res) {   // after a short data phase the device stalls bulk-in: clear it, read the CSW again (BOT 6.7.2)
+		int ch = clear_halt(g_ep_in);
+		o += snprintf(log + o, logn - o, "CSW stalled: clear halt -> 0x%x\n", ch);
+		g_done = 0;
+		r = usbBulkTransfer(g_in, csw, 13, done_cb, NULL);
+		w = wait_done(5000);
+	}
 	const uint8_t *s = (const uint8_t *)csw;
 	o += snprintf(log + o, logn - o, "CSW -> 0x%x, done %d res 0x%x cnt %d sig %c%c%c%c tag %u residue %u status %u\n", r, !w, g_res, g_cnt,
 	              s[0], s[1], s[2], s[3], get_le32(s + 4), get_le32(s + 8), s[12]);
@@ -241,11 +248,16 @@ int usbodd_attached() { return g_attached; }
 
 // A command with no transfer log. Returns 0 on success, -1 when the transport failed, otherwise
 // 0x8D000000 | sense key << 16 | ASC << 8 | ASCQ from REQUEST SENSE.
+static volatile int g_last_got;
+int usbodd_last_got() { return g_last_got; }
+
 int usbodd_cmd(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_in)
 {
 	int st = -1, got = 0;
-	if (usbodd_scsi(cdb, cdblen, data, len, dir_in, &st, &got, NULL, 0)) return -1;
-	if (st == 0) return (dir_in && got < len) ? -1 : 0;
+	int r = usbodd_scsi(cdb, cdblen, data, len, dir_in, &st, &got, NULL, 0);
+	g_last_got = got;   // a short answer is fine (TOC, sense); READ CD checks it
+	if (r) return -1;
+	if (st == 0) return 0;
 	static uint8_t sense[18];
 	const uint8_t rs[6] = {0x03, 0, 0, 0, sizeof(sense), 0};
 	memset(sense, 0, sizeof(sense));

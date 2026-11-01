@@ -11,6 +11,7 @@ int usbodd_reset();
 
 int usbodd_attached();
 int usbodd_cmd(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_in);
+int usbodd_last_got();   // data bytes the last usbodd_cmd moved
 int usbodd_unlock();
 int usbodd_ready(int timeout_ms);
 int usbodd_eject();
