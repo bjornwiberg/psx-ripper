@@ -3698,7 +3698,8 @@ static int draw_card(int c, int y, int focused, int single)
 	char saving[400], v[420];
 	dest_line(k.dest[0] ? k.dest : HDD_DIR, known ? k.fname : "", saving, sizeof(saving));
 	snprintf(v, sizeof(v), focused && !k.job ? "‹ %s ›" : "%s", saving);   // ←→ chooses where this drive saves
-	ui_text_fit(UI_SMALL, ax, ly, focused ? 0xC8D0E0 : 0x8890A8, v, maxw, al);
+	// not ripping: the disc's ID and size sit on the same row on the right
+	ui_text_fit(UI_SMALL, ax, ly, focused ? 0xC8D0E0 : 0x8890A8, v, k.job ? maxw : lw, al);
 	return h;
 }
 
