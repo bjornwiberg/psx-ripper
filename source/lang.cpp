@@ -153,6 +153,7 @@ static const char *en[STR_COUNT] = {
 	"%d %%",
 	"Sector %u read differently – the first read was right",
 	"Time %s · about %s left",
+	"Finishing – checking against Redump … ",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -302,6 +303,7 @@ static const char *sv[STR_COUNT] = {
 	"%d %%",
 	"Sektor %u lästes olika – första läsningen var rätt",
 	"Tid %s · kvar ca %s",
+	"Slutför – kontrollerar mot Redump … ",
 };
 
 static const char **table = en;

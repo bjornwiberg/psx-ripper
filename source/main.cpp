@@ -1249,6 +1249,7 @@ static void rip_thread(void *arg)
 	if (g_er_valid) er_set_retries(-1);   // the drive's own retries back for the second pass
 	g_phase = 2;
 	patched += second_pass();
+	g_phase = 3;   // finishing: MD5, LibCrypt, Redump
 	vf_close(g_out);
 	if (patched) md5_from_file(path);   // the streamed MD5s no longer match the patched file
 	for (int t = 0; t < g_ntracks; t++) {
@@ -2357,7 +2358,8 @@ static int rip_disc_inner(int fresh, int autorip)
 			shown_ev = g_ev_seq;
 			char pm[96], note[200] = "";
 			snprintf(pm, sizeof(pm), T(STR_PROGRESS), pos, g_total);
-			if (g_pass2_total) snprintf(note, sizeof(note), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
+			if (g_phase == 3) snprintf(note, sizeof(note), "%s", T(STR_FINISHING));
+			else if (g_pass2_total) snprintf(note, sizeof(note), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
 			if (rmax) snprintf(note + strlen(note), sizeof(note) - strlen(note), T(STR_REREAD), rlba, rtry, rmax);
 			if (g_readerrs || g_recovered) {
 				size_t o = strlen(note);
@@ -2376,8 +2378,15 @@ static int rip_disc_inner(int fresh, int autorip)
 	}
 	u64 rv;
 	sysThreadJoin(tid, &rv);
+	if (!g_result) {   // LibCrypt check and Redump run here: say so instead of a frozen last frame
+		char pm[96];
+		snprintf(pm, sizeof(pm), T(STR_PROGRESS), g_total, g_total);
+		progress_draw(ripmsg, pm, 100, T(STR_FINISHING), 0, " ");
+		flip_frame(); flip_frame();
+	}
 	int is_pal = g_is_pal;
-	if (!g_result && is_pal && g_qcal_done && g_nlc > 0 && g_nlc <= MAX_LC) {
+	// re-reading LibCrypt candidates only matters for discs on the LibCrypt list
+	if (!g_result && is_pal && g_qcal_done && g_nlc > 0 && g_nlc <= MAX_LC && g_serial[0] && is_libcrypt_disc(g_serial)) {
 		uint8_t *tmp = (uint8_t *)memalign(128, 4096);
 		verify_lc_candidates(tmp);
 		free(tmp);
