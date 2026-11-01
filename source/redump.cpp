@@ -11,6 +11,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>
+#include <errno.h>
 #include <net/netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -49,19 +50,29 @@ static int http_get(const char *path, sink_fn sink, void *ctx, uint32_t *clen, c
 {
 	struct hostent *h = gethostbyname(HOST);
 	if (!h || !h->h_addr_list || !h->h_addr_list[0]) { rlog("redump: DNS lookup failed"); return -1; }
-	int sock = socket(AF_INET, SOCK_STREAM, 0);
+	int sock = -1;
+	for (int attempt = 1; attempt <= 3; attempt++) {   // the PS3 network stack sometimes refuses a first connect
+		if (attempt > 1) usleep(1000 * 1000);
+		sock = socket(AF_INET, SOCK_STREAM, 0);
+		if (sock < 0) { rlog("redump: socket failed (%d, errno %d)", sock, errno); continue; }
+		struct sockaddr_in sa;
+		memset(&sa, 0, sizeof(sa));
+		sa.sin_family = AF_INET;
+		sa.sin_port = htons(80);
+		memcpy(&sa.sin_addr, h->h_addr_list[0], 4);
+		int cr = connect(sock, (struct sockaddr *)&sa, sizeof(sa));
+		if (cr == 0) break;
+		const uint8_t *ip = (const uint8_t *)h->h_addr_list[0];
+		rlog("redump: connect to %u.%u.%u.%u failed (%d, errno %d), attempt %d", ip[0], ip[1], ip[2], ip[3], cr, errno, attempt);
+		close(sock);
+		sock = -1;
+	}
 	if (sock < 0) return -2;
 	// short socket timeouts; the loop below decides when the server has really gone quiet
 	// (the PS3 stack does not read SO_RCVTIMEO the way BSD does, so don't rely on its unit)
 	struct timeval tv = {1, 0};
 	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-	struct sockaddr_in sa;
-	memset(&sa, 0, sizeof(sa));
-	sa.sin_family = AF_INET;
-	sa.sin_port = htons(80);
-	memcpy(&sa.sin_addr, h->h_addr_list[0], 4);
-	if (connect(sock, (struct sockaddr *)&sa, sizeof(sa))) { close(sock); rlog("redump: connect failed"); return -2; }
 	char req[320];
 	int n = snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\nHost: " HOST "\r\nUser-Agent: PSXRipper\r\nConnection: close\r\n\r\n", path);
 	if (send(sock, req, n, 0) != n) { close(sock); return -2; }
