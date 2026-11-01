@@ -1595,6 +1595,23 @@ static void redump_verify(char *out, size_t n)
 	snprintf(g_rd_result_name, sizeof(g_rd_result_name), "%s", name);
 }
 
+// Is there already a rip of the identified disc in the *current* destination? g_base keeps the
+// file name; its directory follows OUT_DIR, which the settings may have changed since.
+static void prev_rip_check()
+{
+	const char *slash = strrchr(g_base, '/');
+	if (slash) {
+		char name[200];
+		snprintf(name, sizeof(name), "%s", slash + 1);
+		snprintf(g_base, sizeof(g_base), "%s/%s", OUT_DIR, name);
+	}
+	if (!strncmp(OUT_DIR, "exfat", 5)) { VfVolume v[8]; vf_scan(v, 8); }   // mounted before looking
+	char bp[320];
+	snprintf(bp, sizeof(bp), "%s.bin", g_base);
+	g_prev_rip = vf_exists(bp);
+	g_repair_n = g_prev_rip ? riplog_open_count() : 0;
+}
+
 static void fire_event(const char *event);
 static char g_state_title[128], g_state_serial[16];
 static void identify_thread(void *arg)
@@ -1611,8 +1628,7 @@ static void identify_thread(void *arg)
 		snprintf(g_disc_title, sizeof(g_disc_title), "%s", g_name);
 		snprintf(g_disc_serial, sizeof(g_disc_serial), "%s", g_serial[0] ? g_serial : T(STR_UNKNOWN));
 		g_disc_mb = (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024));
-		{ char bp[320]; snprintf(bp, sizeof(bp), "%s.bin", g_base); g_prev_rip = vf_exists(bp); }
-		g_repair_n = g_prev_rip ? riplog_open_count() : 0;
+		prev_rip_check();
 		snprintf(g_state_title, sizeof(g_state_title), "%s", g_name);
 		snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
 		// only for a disc inserted while the app runs; a disc already in the drive at start is part
@@ -2125,6 +2141,7 @@ static int home_screen()
 		flip_frame();
 		int p = pad_pressed();
 		if ((p & B_CROSS) && st == DISC_READY) {
+			prev_rip_check();   // the destination may have changed since the disc was identified
 			if (!g_prev_rip) return inserted ? 2 : 1;
 			int c = already_ripped_screen();   // X repair, square new rip, triangle eject, O back
 			if (c == 1) return 3;
@@ -2137,6 +2154,7 @@ static int home_screen()
 			int old = g_redump;
 			settings_screen();
 			if (g_redump != old && g_disc_state == DISC_READY && !g_ident_busy) lookup_start();
+			if (g_disc_state == DISC_READY && !g_ident_busy) prev_rip_check();   // destination may have changed
 			g_redraw = 2;
 		}
 		if (p & B_CIRCLE) return 0;
