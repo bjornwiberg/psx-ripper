@@ -2528,7 +2528,7 @@ static void identify_start(int fresh)
 }
 
 // ---------------------------------------------------------------- own screens (home, settings)
-enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT = 32, B_RIGHT = 64, B_START = 128, B_SQUARE = 256, B_SELECT = 512 };
+enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT = 32, B_RIGHT = 64, B_START = 128, B_SQUARE = 256, B_SELECT = 512, B_L1 = 1024, B_R1 = 2048 };
 
 // Buttons newly pressed since the last call, over all connected pads. Each pad keeps its own
 // last state: ioPadGetData only reports changes, so a quiet pad must not resurrect another pad's buttons.
@@ -2554,6 +2554,8 @@ static int pad_pressed()
 				if (pd.BTN_START) b |= B_START;
 				if (pd.BTN_SQUARE) b |= B_SQUARE;
 				if (pd.BTN_SELECT) b |= B_SELECT;
+				if (pd.BTN_L1) b |= B_L1;
+				if (pd.BTN_R1) b |= B_R1;
 				pad_state[i] = b;
 			}
 			now |= pad_state[i];
@@ -2583,8 +2585,12 @@ static void footer_note(const char *text)
 
 static void hint_bar(const char *const *buttons, const char *const *labels, int n)
 {
-	int total = 0, gap = ui_w() / 24;
-	for (int i = 0; i < n; i++) total += ui_hint_width(buttons[i], labels[i]) + (i ? gap : 0);
+	int total = 0, gap = ui_w() / 24, sum = 0;
+	for (int i = 0; i < n; i++) sum += ui_hint_width(buttons[i], labels[i]);
+	// a long row: the gaps shrink so it stays on the screen
+	if (n > 1 && sum + gap * (n - 1) > ui_w() * 94 / 100) gap = (ui_w() * 94 / 100 - sum) / (n - 1);
+	if (gap < ui_w() / 120) gap = ui_w() / 120;
+	total = sum + gap * (n - 1);
 	int x = (ui_w() - total) / 2, y = hint_y();
 	for (int i = 0; i < n; i++) x += ui_hint(x, y, buttons[i], labels[i]) + gap;
 }
@@ -3062,6 +3068,17 @@ static void filename_screen()
 	static const StrId plbl[] = {STR_FN_B_TITLE, STR_FN_B_REGION, STR_FN_B_ID, STR_FN_B_NAME, STR_FN_B_SPACE};
 	const int NP = 10;
 	int sel = 0;
+	// the pattern as parts ("%T" or one character) and a cursor between them: L1/R1 move it, X puts
+	// a part in at the cursor, square removes the part before it
+	auto part_starts = [&](int *st) {   // offsets where each part starts; returns the count
+		int n = 0;
+		for (int i = 0; pat[i]; i++) { st[n++] = i; if (pat[i] == '%' && pat[i + 1]) i++; }
+		st[n] = (int)strlen(pat);
+		return n;
+	};
+	int cur;
+	{ int st[100]; cur = part_starts(st); }   // at the end
+	uint64_t blink0 = now_ms();
 	pad_pressed();
 	g_redraw = 2;
 	while (!exit_requested) {
@@ -3074,8 +3091,10 @@ static void filename_screen()
 			int y = ui_h() / 10 + ui_line(UI_TITLE) + lb * 3 / 2;
 			// the pattern: variables as blue chips, other characters as they are (a space as a dot)
 			y += section_head(L, R, y, T(STR_FN_PATTERN));
-			int x = L, pad = ui_w() / 120;
-			for (const char *q = pat; *q; q++) {
+			int x = L, pad = ui_w() / 120, cx = L, pi = 0;
+			bool on = ((now_ms() - blink0) / 500) % 2 == 0;   // the cursor blinks
+			for (const char *q = pat; *q; q++, pi++) {
+				if (pi == cur) cx = x;
 				if (*q == '%' && q[1]) {
 					q++;
 					int k = *q == 'T' ? 0 : *q == 'R' ? 1 : *q == 'D' ? 2 : *q == 'N' ? 3 : -1;
@@ -3090,7 +3109,8 @@ static void filename_screen()
 					x += ui_text(UI_BODY, x, y, 0xC8D0E0, w) + pad;
 				}
 			}
-			ui_rect(x + 2, y, 3, lb, 0xFFFFFFFF);   // where the next part goes
+			if (cur >= pi) cx = x;   // at the end
+			if (on) ui_rect(cx - 3, y - lb / 8, 3, lb + lb / 4, 0xFFFFFFFF);   // where the next part goes
 			y += lb + ls / 2;
 			ui_text(UI_SMALL, L, y, 0x8890A8, pat);
 			y += ls + ls / 2;
@@ -3138,24 +3158,36 @@ static void filename_screen()
 			}
 			y += ls * 2;
 			ui_text_fit(UI_SMALL, L, y, 0x8FA8D8, T(STR_FN_NOTE), R - L);
-			const char *b[] = {"leftright", "cross", "square", "triangle", "circle"};
-			const char *l[] = {T(STR_HINT_PICK_PART), T(STR_HINT_ADD), T(STR_HINT_DEL_LAST), T(STR_HINT_TYPE), T(STR_HINT_BACK)};
-			hint_bar(b, l, 5);
+			const char *b[] = {"l1r1", "leftright", "cross", "square", "triangle", "circle"};
+			const char *l[] = {T(STR_HINT_CURSOR), T(STR_HINT_PICK_PART), T(STR_HINT_ADD), T(STR_HINT_DEL_LAST), T(STR_HINT_TYPE), T(STR_HINT_BACK)};
+			hint_bar(b, l, 6);
 		}
 		flip_frame();
+		{ static uint64_t last = 0; if (now_ms() - last >= 250) { last = now_ms(); g_redraw = 2; } }   // the blinking cursor
 		int p = pad_pressed();
-		if (p) g_redraw = 2;
+		if (p) { g_redraw = 2; blink0 = now_ms(); }   // the cursor shows at once after a key
+		int st[100], np = part_starts(st);
+		if (cur > np) cur = np;
 		if (p & B_RIGHT) sel = (sel + 1) % NP;
 		if (p & B_LEFT) sel = (sel + NP - 1) % NP;
-		if ((p & B_CROSS) && strlen(pat) + 3 < sizeof(pat)) strcat(pat, parts[sel]);
-		if ((p & B_SQUARE) && pat[0]) {   // the last part: a variable is two characters
-			size_t n = strlen(pat);
-			pat[n >= 2 && pat[n - 2] == '%' ? n - 2 : n - 1] = 0;
+		if ((p & B_R1) && cur < np) cur++;
+		if ((p & B_L1) && cur > 0) cur--;
+		if ((p & B_CROSS) && strlen(pat) + 3 < sizeof(pat)) {   // in at the cursor
+			int at = st[cur];
+			char rest[96];
+			snprintf(rest, sizeof(rest), "%s", pat + at);
+			snprintf(pat + at, sizeof(pat) - at, "%s%s", parts[sel], rest);
+			cur++;
+		}
+		if ((p & B_SQUARE) && cur > 0) {   // the part before the cursor
+			int a0 = st[cur - 1], a1 = st[cur];
+			memmove(pat + a0, pat + a1, strlen(pat + a1) + 1);
+			cur--;
 		}
 		if (p & B_TRIANGLE) {
 			char e[96];
 			snprintf(e, sizeof(e), "%s", pat);
-			if (osk_input(T(STR_FN_OSK_Q), e, sizeof(e))) snprintf(pat, sizeof(pat), "%s", e);
+			if (osk_input(T(STR_FN_OSK_Q), e, sizeof(e))) { snprintf(pat, sizeof(pat), "%s", e); int s2[100]; cur = part_starts(s2); }
 			pad_pressed();
 		}
 		if (p & B_CIRCLE) {   // back; a changed pattern is saved only when the question says yes

@@ -233,6 +233,7 @@ static const char *en[STR_COUNT] = {
 	"Type",
 	"File name pattern (%T title, %R region, %D disc ID, %N Redump name)",
 	"Save the new file name pattern?",
+	"Move",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -462,6 +463,7 @@ static const char *sv[STR_COUNT] = {
 	"Skriv själv",
 	"Filnamnsmönster (%T titel, %R region, %D skiv-id, %N Redumps namn)",
 	"Spara det nya filnamnsmönstret?",
+	"Flytta",
 };
 
 static const char **table = en;
