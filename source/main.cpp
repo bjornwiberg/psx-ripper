@@ -2901,6 +2901,8 @@ static void webhook_headers_screen()
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + WH_HEADERS - 1) % WH_HEADERS;
 		if (p & B_DOWN) row = (row + 1) % WH_HEADERS;
+		if (p & B_R2) row = WH_HEADERS - 1;   // L2/R2: first / last
+		if (p & B_L2) row = 0;
 		if (p & B_CIRCLE) return;
 		if (p & B_CROSS) {
 			char h[256];
@@ -3472,6 +3474,8 @@ static void drive_settings_screen(int c)
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
+		if (p & B_R2) row = NROWS - 1;   // all rows show: L2/R2 go to the first / last
+		if (p & B_L2) row = 0;
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) { card_defaults(k); reset = 1; }   // all back to the standard
@@ -3742,6 +3746,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 // not ripping: what is known about the disc here, how the last rip went, the destination to pick.
 static void draw_page(int c, int y)
 {
+	const int ytop = y;
 	Card &k = g_cards[c];
 	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL), L = ui_w() / 8, R = ui_w() * 7 / 8;
 	int st = k.state, known = k.job || st == DISC_READY, gap = ui_w() / 60;
@@ -3833,8 +3838,9 @@ static void draw_page(int c, int y)
 		}
 		return;
 	}
-	// not ripping: the disc here, then where it goes; headed groups with room between them
-	y += ls;
+	// not ripping: the disc here, then where it goes; headed groups with room between them, below
+	// the right column (drive, model, disc)
+	{ int under = ytop + lb + ls * 2 + ls / 2; if (y < under) y = under; }
 	y += section_head(L, R, y, T(STR_SEC_DISC));
 	if (st == DISC_READY && k.prev_rip) {   // already ripped here: how it stands, in words
 		char as[300], line[400];
@@ -4018,6 +4024,8 @@ static int home_screen()
 		if ((p & B_DOWN) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }
 		if ((p & B_R1) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }   // the next / previous tab
 		if ((p & B_L1) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }
+		if ((p & B_R2) && nc > 1) { sel = list[nc - 1]; g_redraw = 2; }   // the last / first tab
+		if ((p & B_L2) && nc > 1) { sel = list[0]; g_redraw = 2; }
 		if (f.job) {   // a ripping card: only cancel, and the general settings (they apply to the next rips)
 			if (p & B_CIRCLE) {
 				char m[300];
