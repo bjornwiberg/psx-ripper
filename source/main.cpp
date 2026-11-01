@@ -137,7 +137,7 @@ static void maybe_screenshot()
 	uint8_t *row = (uint8_t *)malloc(rowb + pad);
 	memset(row, 0, rowb + pad);
 	for (int y = h - 1; y >= 0; y--) {
-		const uint32_t *src = color_buffer[curr_fb] + y * (color_pitch / 4);
+		const uint32_t *src = ui_canvas() + y * w;
 		for (int x = 0; x < w; x++) { uint32_t c = src[x]; row[x * 3] = c; row[x * 3 + 1] = c >> 8; row[x * 3 + 2] = c >> 16; }
 		fwrite(row, 1, rowb + pad, f);
 	}
@@ -151,12 +151,29 @@ static void draw_backdrop()
 	ui_text(UI_TITLE, ui_w() / 2, ui_h() / 10, 0xFFFFFF, "PSX Ripper", UI_CENTER);
 }
 
+// Frames still to (re)draw: content is drawn into both buffers once, then only flipped.
+static int g_redraw = 2;          // canvas needs to be redrawn
+static int g_drawn = 0;           // canvas changed: copy it to both RSX buffers on the next flips
+static int g_backdrop_shown = 0;
+
+static void present()
+{
+	if (g_drawn > 0) {
+		ui_blit();
+		g_drawn--;
+	}
+	maybe_screenshot();
+	flip_sync();   // the buffer we draw into next is never the one on screen
+	static int last_to = 0;
+	if (flip_timeouts != last_to) { logf("flip timeout (total %d)", flip_timeouts); last_to = flip_timeouts; }
+}
+
 static void do_flip()
 {
 	sysUtilCheckCallback();
-	draw_backdrop();
-	maybe_screenshot();
-	flip();
+	if (!g_backdrop_shown) { g_redraw = 1; g_backdrop_shown = 1; }
+	if (g_redraw > 0) { draw_backdrop(); g_redraw = 0; g_drawn = 2; }
+	present();
 }
 
 // Shows a dialog and blocks until answered. Returns 1 = OK/YES, 2 = NO/cancel.
@@ -898,28 +915,42 @@ static void next_target()
 // ---------------------------------------------------------------- own screens (home, settings)
 enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT = 32, B_RIGHT = 64, B_START = 128 };
 
-// Buttons newly pressed since the last call, over all connected pads.
+// Buttons newly pressed since the last call, over all connected pads. Each pad keeps its own
+// last state: ioPadGetData only reports changes, so a quiet pad must not resurrect another pad's buttons.
 static int pad_pressed()
 {
-	static int last = 0;
+	static int pad_state[7];
+	static int last = 0, held = 0;
 	padInfo info;
 	int now = 0;
 	if (ioPadGetInfo(&info) == 0) {
 		for (int i = 0; i < 7; i++) {
-			if (!info.status[i]) continue;
+			if (!info.status[i]) { pad_state[i] = 0; continue; }
 			padData pd;
-			if (ioPadGetData(i, &pd) || pd.len <= 0) { now |= last; continue; }
-			if (pd.BTN_CROSS) now |= B_CROSS;
-			if (pd.BTN_CIRCLE) now |= B_CIRCLE;
-			if (pd.BTN_TRIANGLE) now |= B_TRIANGLE;
-			if (pd.BTN_UP) now |= B_UP;
-			if (pd.BTN_DOWN) now |= B_DOWN;
-			if (pd.BTN_LEFT) now |= B_LEFT;
-			if (pd.BTN_RIGHT) now |= B_RIGHT;
-			if (pd.BTN_START) now |= B_START;
+			if (ioPadGetData(i, &pd) == 0 && pd.len > 0) {
+				int b = 0;
+				if (pd.BTN_CROSS) b |= B_CROSS;
+				if (pd.BTN_CIRCLE) b |= B_CIRCLE;
+				if (pd.BTN_TRIANGLE) b |= B_TRIANGLE;
+				if (pd.BTN_UP) b |= B_UP;
+				if (pd.BTN_DOWN) b |= B_DOWN;
+				if (pd.BTN_LEFT) b |= B_LEFT;
+				if (pd.BTN_RIGHT) b |= B_RIGHT;
+				if (pd.BTN_START) b |= B_START;
+				pad_state[i] = b;
+			}
+			now |= pad_state[i];
 		}
 	}
 	int pressed = now & ~last;
+	// auto-repeat a single held arrow: first after ~0.4 s, then every ~0.1 s (called once per frame)
+	const int arrows = B_UP | B_DOWN | B_LEFT | B_RIGHT;
+	int a = now & arrows;
+	if (a && (a & (a - 1)) == 0 && a == (last & arrows)) {
+		if (++held >= 24 && (held - 24) % 6 == 0) pressed |= a;
+	} else {
+		held = 0;
+	}
 	last = now;
 	return pressed;
 }
@@ -935,8 +966,7 @@ static void hint_bar(const char *const *buttons, const char *const *labels, int 
 static void flip_frame()
 {
 	sysUtilCheckCallback();
-	maybe_screenshot();
-	flip();
+	present();
 }
 
 static void settings_screen()
@@ -948,7 +978,11 @@ static void settings_screen()
 	const int NROWS = 5;
 	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	pad_pressed();
+	g_redraw = 2;
 	while (!exit_requested) {
+		if (g_redraw > 0) {
+		g_redraw = 0;
+		g_drawn = 2;
 		draw_backdrop();
 		ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_SETTINGS_TITLE), UI_CENTER);
 		char vals[5][96];
@@ -973,8 +1007,10 @@ static void settings_screen()
 		const char *b[] = {"updown", "leftright", "cross", "circle"};
 		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_SAVE), T(STR_HINT_BACK)};
 		hint_bar(b, l, 4);
+		}
 		flip_frame();
 		int p = pad_pressed();
+		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
@@ -1013,11 +1049,16 @@ static void settings_screen()
 static int home_screen()
 {
 	disc_inserted = 0;
+	g_redraw = 2;
 	pad_pressed();   // swallow buttons still held from a previous screen
 	while (!exit_requested) {
 		char tname[96], saving[160];
 		target_name(g_outdir, tname, sizeof(tname));
 		snprintf(saving, sizeof(saving), T(STR_HOME_SAVING), tname);
+		g_backdrop_shown = 0;   // a dialog opened later must redraw its backdrop
+		if (g_redraw > 0) {
+		g_redraw = 0;
+		g_drawn = 2;
 		draw_backdrop();
 		int y = ui_h() * 2 / 5;
 		ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, T(STR_HOME_INSERT), UI_CENTER);
@@ -1025,11 +1066,12 @@ static int home_screen()
 		const char *b[] = {"cross", "triangle", "circle"};
 		const char *l[] = {T(STR_HINT_RIP), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
 		hint_bar(b, l, 3);
+		}
 		flip_frame();
 		if (disc_inserted) return 2;
 		int p = pad_pressed();
 		if (p & B_CROSS) return 1;
-		if (p & (B_TRIANGLE | B_START)) settings_screen();
+		if (p & (B_TRIANGLE | B_START)) { settings_screen(); g_redraw = 2; }
 		if (p & B_CIRCLE) return 0;
 	}
 	return 0;

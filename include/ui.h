@@ -8,6 +8,8 @@ enum UiFont { UI_SMALL, UI_BODY, UI_TITLE };
 enum UiAlign { UI_LEFT, UI_CENTER, UI_RIGHT };
 
 void ui_init();
+void ui_blit();                              // copy the finished canvas to the RSX back buffer
+const uint32_t *ui_canvas();
 int ui_w();
 int ui_h();
 int ui_line(UiFont f);                       // line height in pixels

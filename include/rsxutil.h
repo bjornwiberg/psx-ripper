@@ -19,5 +19,7 @@ void setRenderTarget(u32 index);
 void init_screen(void *host_addr,u32 size);
 void waitflip();
 void flip();
+void flip_sync();
+extern int flip_timeouts;
 
 #endif

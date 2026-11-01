@@ -8,6 +8,7 @@ struct Font { const Glyph *glyphs; int count; const uint8_t *data; int height; }
 
 static const Font *fonts[3];
 static uint32_t *row_bg;   // one precomputed background colour per scanline
+static uint32_t *canvas;   // the UI is drawn here (cached RAM), never read back from VRAM
 
 void ui_init()
 {
@@ -16,6 +17,7 @@ void ui_init()
 	fonts[UI_BODY]  = hd ? &f1080_body  : &f720_body;
 	fonts[UI_TITLE] = hd ? &f1080_title : &f720_title;
 	row_bg = new uint32_t[display_height];
+	canvas = new uint32_t[display_width * display_height];
 	for (u32 y = 0; y < display_height; y++) {
 		float t = (float)y / display_height;   // deep navy to near black
 		uint32_t r = 28 - (uint32_t)(14 * t), g = 34 - (uint32_t)(18 * t), b = 72 - (uint32_t)(40 * t);
@@ -27,7 +29,19 @@ int ui_w() { return display_width; }
 int ui_h() { return display_height; }
 int ui_line(UiFont f) { return fonts[f]->height; }
 
-static inline uint32_t *fb_row(int y) { return color_buffer[curr_fb] + y * (color_pitch / 4); }
+static inline uint32_t *fb_row(int y) { return canvas + y * display_width; }
+
+void ui_blit()
+{
+	if (color_pitch == display_width * 4) {
+		memcpy(color_buffer[curr_fb], canvas, display_width * display_height * 4);
+	} else {
+		for (u32 y = 0; y < display_height; y++)
+			memcpy(color_buffer[curr_fb] + y * (color_pitch / 4), canvas + y * display_width, display_width * 4);
+	}
+}
+
+const uint32_t *ui_canvas() { return canvas; }
 
 void ui_background()
 {
@@ -142,7 +156,8 @@ int ui_hint(int x, int y, const char *button, const char *label)
 	uint32_t col;
 	const char *sym = hint_symbol(button, &col);
 	// centre the symbol on the label's cap height so both line up visually
-	int dy = glyph_mid(UI_BODY, "E") - glyph_mid(UI_BODY, sym);
+	// labels are mostly lowercase: aim between cap-height and x-height centres
+	int dy = (glyph_mid(UI_BODY, "E") + glyph_mid(UI_BODY, "x")) / 2 - glyph_mid(UI_BODY, sym);
 	int w = ui_text(UI_BODY, x, y + dy, col, sym);
 	w += ui_text_width(UI_BODY, " ");
 	w += ui_text(UI_BODY, x + w, y, 0xE8E8F0, label);

@@ -152,3 +152,22 @@ void flip()
 
 	first_fb = 0;
 }
+
+// Flips and waits until that flip is on screen before switching to the other buffer,
+// so the CPU never draws into the buffer that is being displayed.
+int flip_timeouts = 0;
+
+void flip_sync()
+{
+	gcmResetFlipStatus();
+	gcmSetFlip(context, curr_fb);
+	rsxFlushBuffer(context);
+	gcmSetWaitFlip(context);
+	int i = 0;
+	for (; i < 250 && gcmGetFlipStatus() != 0; i++)   // at most ~50 ms, never hang
+		usleep(200);
+	if (i == 250) flip_timeouts++;
+	curr_fb ^= 1;
+	setRenderTarget(curr_fb);
+	first_fb = 0;
+}
