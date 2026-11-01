@@ -3043,6 +3043,7 @@ static int step_opt(int cur, const int *opts, int n, int d)
 
 
 static int card_list(int *out);
+static int drive_column(int c, int right, int y, const char *idl);
 static void ui_text_fit(UiFont f, int x, int y, uint32_t col, const char *text, int maxw, UiAlign al = UI_LEFT);
 
 // File name patterns ready to pick; anything else is the own pattern.
@@ -3150,14 +3151,10 @@ static void filename_screen()
 				snprintf(fb, sizeof(fb), "%s.bin", fn);
 				listed_name(fn, ln, sizeof(ln));
 				snprintf(lv, sizeof(lv), T(STR_FN_LISTED), ln);
-				ui_text_fit(UI_BODY, L, y, 0xFFFFFF, fb, R - L - ui_w() / 8);
-				if (dn[0]) {   // the drive, with its icon like on the cards
-					int tw = ui_text_width(UI_SMALL, dn), isz = ls * 3 / 4, igap = ls / 3;
-					ui_icon(list[i] ? "usb" : "drive", R - tw - igap - isz, y + (lb - ls) / 2 + (ls - isz) / 2, isz, 0x8890A8);
-					ui_text(UI_SMALL, R, y + (lb - ls) / 2, 0x8890A8, dn, UI_RIGHT);
-				}
-				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, lv, R - L);
-				y += lb + ls + ls / 3;
+				ui_text_fit(UI_BODY, L, y, 0xFFFFFF, fb, R - L - ui_w() / 5);
+				int cw = dn[0] ? drive_column(list[i], R, y, sr) + ui_w() / 60 : 0;   // like on the cards, ID without size
+				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, lv, R - L - ui_w() / 60 - cw);
+				y += lb + ls * 2 + ls / 3;
 				shown++;
 			}
 			// parts to add
@@ -3577,6 +3574,35 @@ static void ui_text_fit(UiFont f, int x, int y, uint32_t col, const char *text, 
 	ui_text(f, x, y, col, b, al);
 }
 
+// The right column of a card (and of the file name preview): the drive (icon + "USB 0" /
+// "Intern läsare") level with a body line at y, its model under it in small type, then the disc
+// (disc icon + idl). Right-aligned at right; returns the width it takes.
+static int drive_column(int c, int right, int y, const char *idl)
+{
+	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
+	char drive[96], model[48] = "";
+	if (c && usbodd_port(c - 1) >= 0) snprintf(drive, sizeof(drive), T(STR_SRC_USB_PORT), usbodd_port(c - 1));
+	else if (c) snprintf(drive, sizeof(drive), "USB");
+	else snprintf(drive, sizeof(drive), "%s", T(STR_SRC_BD));
+	if (c) snprintf(model, sizeof(model), "%s", usbodd_name(c - 1)[0] ? usbodd_name(c - 1) : "CD/DVD");
+	int isz = ls * 3 / 4, igap = ls / 3, tw = ui_text_width(UI_SMALL, drive);
+	int ty = y + (lb - ls) / 2;
+	ui_icon(c ? "usb" : "drive", right - tw - igap - isz, ty + (ls - isz) / 2, isz, 0x8890A8);
+	ui_text(UI_SMALL, right - tw, ty, 0x8890A8, drive);
+	// the model: there, but small (it matters less than the drive and the disc)
+	if (model[0]) ui_text(UI_TINY, right, y + lb + (ls - ui_line(UI_TINY)) / 2, 0x7078A0, model, UI_RIGHT);
+	int iw = 0;
+	if (idl && idl[0]) {
+		iw = ui_text_width(UI_SMALL, idl) + isz + igap;
+		ui_icon("disc", right - iw, y + lb + ls + (ls - isz) / 2, isz, 0x8890A8);
+		ui_text(UI_SMALL, right, y + lb + ls, 0x8890A8, idl, UI_RIGHT);
+	}
+	int w = tw + isz + igap, mw = ui_text_width(UI_TINY, model);
+	if (mw > w) w = mw;
+	if (iw > w) w = iw;
+	return w;
+}
+
 static int draw_card(int c, int y, int focused, int single)
 {
 	// Card, top to bottom: title (Redump's name when there is one) with the Redump icon | drive;
@@ -3599,7 +3625,7 @@ static int draw_card(int c, int y, int focused, int single)
 	else snprintf(drive, sizeof(drive), "%s", T(STR_SRC_BD));
 	if (c) snprintf(model, sizeof(model), "%s", usbodd_name(c - 1)[0] ? usbodd_name(c - 1) : "CD/DVD");
 	if (known) snprintf(idl, sizeof(idl), "%s  ·  %u MB", k.serial, k.mb);
-	int isz = ls * 3 / 4, igap = ls / 3, tw = ui_text_width(UI_SMALL, drive);
+	int isz = ls * 3 / 4, igap = ls / 3;
 	const char *dicon = c ? "usb" : "drive";
 	int rw = 0;   // width the right column takes from the left one
 	if (single) {   // above the title, centred: the drive and its model on one line
@@ -3609,21 +3635,7 @@ static int draw_card(int c, int y, int focused, int single)
 		ui_icon(dicon, tx - igap - isz, y - ls + (ls - isz) / 2, isz, 0x8890A8);
 		ui_text(UI_SMALL, tx, y - ls, 0x8890A8, both);
 	} else {
-		int ty = y + (lb - ls) / 2;
-		ui_icon(dicon, right - tw - igap - isz, ty + (ls - isz) / 2, isz, 0x8890A8);
-		ui_text(UI_SMALL, right - tw, ty, 0x8890A8, drive);
-		// the model: there, but small (it matters less than the drive and the disc)
-		if (model[0]) ui_text(UI_TINY, right, y + lb + (ls - ui_line(UI_TINY)) / 2, 0x7078A0, model, UI_RIGHT);
-		int iw = 0;
-		if (idl[0]) {
-			iw = ui_text_width(UI_SMALL, idl) + isz + igap;
-			ui_icon("disc", right - iw, y + lb + ls + (ls - isz) / 2, isz, 0x8890A8);
-			ui_text(UI_SMALL, right, y + lb + ls, 0x8890A8, idl, UI_RIGHT);
-		}
-		int mw = ui_text_width(UI_TINY, model), w = tw + isz + igap;
-		if (mw > w) w = mw;
-		if (iw > w) w = iw;
-		rw = w + gap;
+		rw = drive_column(c, right, y, idl) + gap;
 	}
 	int ly = y;
 	// title, with the Redump icon after it: medal = verified, warning = does not match, ? = not known yet
