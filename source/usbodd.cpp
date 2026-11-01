@@ -29,6 +29,7 @@ static void ulog(const char *fmt, ...)
 }
 
 static volatile s32 g_dev = -1, g_ctrl = -1, g_in = -1, g_out = -1;
+static uint8_t g_ep_in, g_ep_out, g_ifnum;
 static volatile int g_attached = 0, g_probes = 0, g_attaches = 0;
 static int g_init_rc = 1, g_reg_rc = 1;
 static unsigned g_tag = 1;
@@ -94,6 +95,7 @@ static s32 odd_attach(s32 dev)
 	}
 	g_in = usbOpenPipe(dev, ein);
 	g_out = usbOpenPipe(dev, eout);
+	g_ep_in = ein->bEndpointAddress; g_ep_out = eout->bEndpointAddress; g_ifnum = ifc->bInterfaceNumber;
 	g_dev = dev;
 	g_attached = g_ctrl >= 0 && g_in >= 0 && g_out >= 0;
 	ulog("usbodd: attach dev %d: pipes ctrl %d in %d (ep %02x) out %d (ep %02x)", dev, g_ctrl, g_in, ein->bEndpointAddress,
@@ -125,6 +127,36 @@ void usbodd_status(char *out, int n)
 {
 	snprintf(out, n, "usbInit=0x%x register=0x%x probes=%d attaches=%d attached=%d dev=%d pipes ctrl=%d in=%d out=%d set_config done=%d res=0x%x\n",
 	         g_init_rc, g_reg_rc, g_probes, g_attaches, g_attached, g_dev, g_ctrl, g_in, g_out, g_cfg_done, g_cfg_res);
+}
+
+// Control request on the default pipe, waited for. Returns the transfer result (0 = ok).
+static int control(uint8_t type, uint8_t req, uint16_t value, uint16_t index)
+{
+	static usbDeviceRequest r;
+	r.bmRequestType = type; r.bRequest = req; r.wValue = value; r.wIndex = index; r.wLength = 0;
+	g_done = 0;
+	s32 rc = usbControlTransfer(g_ctrl, &r, NULL, done_cb, NULL);
+	if (rc) return rc;
+	return wait_done(2000) ? -1 : g_res;
+}
+
+// A stalled endpoint stays blocked until the host clears the halt (USB 2.0 9.4.1).
+static int clear_halt(uint8_t ep)
+{
+	int r = control(USB_REQTYPE_DIR_TO_DEVICE | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_RECIP_ENDPOINT, USB_REQUEST_CLEAR_FEATURE, 0, ep);
+	ulog("usbodd: clear halt ep %02x -> 0x%x", ep, r);
+	return r;
+}
+
+// Bulk-Only Mass Storage Reset (class request 0xFF) followed by clearing both halts (BOT 5.3.4).
+int usbodd_reset()
+{
+	if (!g_attached) return -1;
+	int r = control(USB_REQTYPE_DIR_TO_DEVICE | USB_REQTYPE_TYPE_CLASS | USB_REQTYPE_RECIP_INTERFACE, 0xFF, 0, g_ifnum);
+	ulog("usbodd: bulk-only reset -> 0x%x", r);
+	clear_halt(g_ep_in);
+	clear_halt(g_ep_out);
+	return r;
 }
 
 static void put_le32(uint8_t *p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
@@ -162,7 +194,7 @@ int usbodd_scsi(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_
 	int w = wait_done(3000);
 	ulog("usbodd: CBW wait -> %d (res 0x%x cnt %d)", w, g_res, g_cnt);
 	o += snprintf(log + o, logn - o, "CBW -> 0x%x, done %d res 0x%x cnt %d\n", r, !w, g_res, g_cnt);
-	if (r || w || g_res) return -3;
+	if (r || w || g_res) { int rr = usbodd_reset(); o += snprintf(log + o, logn - o, "CBW failed: reset -> 0x%x\n", rr); return -3; }
 	*got = 0;
 	if (len) {
 		if (!dir_in) memcpy(buf, data, len);
@@ -170,7 +202,11 @@ int usbodd_scsi(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_
 		r = usbBulkTransfer(dir_in ? g_in : g_out, buf, len, done_cb, NULL);
 		w = wait_done(10000);
 		o += snprintf(log + o, logn - o, "data -> 0x%x, done %d res 0x%x cnt %d\n", r, !w, g_res, g_cnt);
-		if (!r && !w) { *got = g_cnt; if (dir_in && g_cnt > 0) memcpy(data, buf, g_cnt < len ? g_cnt : len); }
+		if (!r && !w && !g_res) { *got = g_cnt; if (dir_in && g_cnt > 0) memcpy(data, buf, g_cnt < len ? g_cnt : len); }
+		else if (!r && !w && g_res) {   // the device stalled the data phase: clear it, then the CSW tells why
+			int ch = clear_halt(dir_in ? g_ep_in : g_ep_out);
+			o += snprintf(log + o, logn - o, "data stalled: clear halt -> 0x%x\n", ch);
+		}
 	}
 	g_done = 0;
 	r = usbBulkTransfer(g_in, csw, 13, done_cb, NULL);
@@ -178,7 +214,11 @@ int usbodd_scsi(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_
 	const uint8_t *s = (const uint8_t *)csw;
 	o += snprintf(log + o, logn - o, "CSW -> 0x%x, done %d res 0x%x cnt %d sig %c%c%c%c tag %u residue %u status %u\n", r, !w, g_res, g_cnt,
 	              s[0], s[1], s[2], s[3], get_le32(s + 4), get_le32(s + 8), s[12]);
-	if (r || w) return -4;
+	if (r || w || g_res) {   // no valid CSW: recover with a reset so the next command works again
+		int rr = usbodd_reset();
+		o += snprintf(log + o, logn - o, "no CSW: bulk-only reset -> 0x%x\n", rr);
+		return -4;
+	}
 	*status = s[12];
 	return 0;
 }

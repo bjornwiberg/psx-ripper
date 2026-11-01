@@ -374,6 +374,7 @@ static int debug_cmd(const char *q, char *out, int n)
 	const char *op = qget(q, "op", opbuf, sizeof(opbuf));   // own buffer: v is reused below
 	if (!op) { snprintf(out, n, "ops: list | usb | usbscsi&cdb=hex&len=&dir=in|out | scsi&id=&sc=616|604&proto=0|1|3&dir=0|1&cdb=hex&len= | devcmd&id=&cmd=&in=hex&len= | read&id=&lba=\n"); return 0; }
 	if (!strcmp(op, "usb")) { usbodd_status(out, n); return 0; }
+	if (!strcmp(op, "usbreset")) { snprintf(out, n, "bulk-only reset -> %d\n", usbodd_reset()); return 0; }
 	if (!strcmp(op, "usbscsi")) {   // SCSI to the USB optical drive over our own Bulk-Only Transport
 		uint8_t cdb[16] = {0};
 		int cl = unhex(qget(q, "cdb", v2, sizeof(v2)) ? v2 : "", cdb, 16);
