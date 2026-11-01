@@ -10,6 +10,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>
 #include <net/netdb.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -50,7 +51,9 @@ static int http_get(const char *path, sink_fn sink, void *ctx, uint32_t *clen, c
 	if (!h || !h->h_addr_list || !h->h_addr_list[0]) { rlog("redump: DNS lookup failed"); return -1; }
 	int sock = socket(AF_INET, SOCK_STREAM, 0);
 	if (sock < 0) return -2;
-	struct timeval tv = {15, 0};
+	// short socket timeouts; the loop below decides when the server has really gone quiet
+	// (the PS3 stack does not read SO_RCVTIMEO the way BSD does, so don't rely on its unit)
+	struct timeval tv = {1, 0};
 	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 	struct sockaddr_in sa;
@@ -67,9 +70,18 @@ static int http_get(const char *path, sink_fn sink, void *ctx, uint32_t *clen, c
 	int have = 0, status = -3, in_body = 0, aborted = 0;
 	if (clen) *clen = 0;
 	if (loc && locn) loc[0] = 0;
+	time_t last = time(NULL);
+	int errs = 0;
 	for (;;) {
 		int r = recv(sock, buf + have, sizeof(buf) - have, 0);
-		if (r <= 0) break;
+		if (r == 0) break;                    // server closed the connection: done
+		if (r < 0) {                          // timeout or transient error: wait, unless silent too long
+			if (time(NULL) - last > 20) { rlog("redump: receive timed out"); break; }
+			errs++;
+			usleep(20000);
+			continue;
+		}
+		last = time(NULL);
 		have += r;
 		if (!in_body) {
 			char *end = NULL;
@@ -97,6 +109,7 @@ static int http_get(const char *path, sink_fn sink, void *ctx, uint32_t *clen, c
 		have = 0;
 	}
 	close(sock);
+	if (errs) rlog("redump: %d receive retries", errs);
 	if (aborted) return -4;
 	return status;
 }
