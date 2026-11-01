@@ -55,6 +55,8 @@ static int http_get(const char *path, sink_fn sink, void *ctx, uint32_t *clen, c
 		if (attempt > 1) usleep(1000 * 1000);
 		sock = socket(AF_INET, SOCK_STREAM, 0);
 		if (sock < 0) { rlog("redump: socket failed (%d, errno %d)", sock, errno); continue; }
+		int rcvbuf = 256 * 1024;   // the default window is small, which limits the download speed
+		setsockopt(sock, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 		struct sockaddr_in sa;
 		memset(&sa, 0, sizeof(sa));
 		sa.sin_family = AF_INET;
@@ -89,7 +91,7 @@ static int http_get(const char *path, sink_fn sink, void *ctx, uint32_t *clen, c
 		if (r < 0) {                          // timeout or transient error: wait, unless silent too long
 			if (time(NULL) - last > 20) { rlog("redump: receive timed out"); break; }
 			errs++;
-			usleep(20000);
+			usleep(2000);
 			continue;
 		}
 		last = time(NULL);
@@ -359,6 +361,8 @@ static int build_index(volatile uint32_t *done, volatile uint32_t *total, volati
 	Indexer *x = (Indexer *)calloc(1, sizeof(Indexer));
 	uint8_t *in = (uint8_t *)malloc(65536), *out = (uint8_t *)malloc(65536);
 	x->idx = fopen(RD_IDX ".part", "wb");
+	static char ibuf[65536];
+	if (x->idx) setvbuf(x->idx, ibuf, _IOFBF, sizeof(ibuf));
 	int ret = -6;
 	z_stream zs;
 	memset(&zs, 0, sizeof(zs));
@@ -401,12 +405,16 @@ int rd_download(volatile uint32_t *done, volatile uint32_t *total, volatile int 
 	*phase = 0; *done = 0; *total = 0;
 	FILE *f = fopen(RD_ZIP, "wb");
 	if (!f) return -4;
+	static char wbuf[65536];   // newlib's default buffer is tiny: avoid thousands of small HDD writes
+	setvbuf(f, wbuf, _IOFBF, sizeof(wbuf));
 	DlCtx c = {f, done, abort};
 	// Content-Length goes straight into *total, so the progress bar knows the size during the download
+	time_t t0 = time(NULL);
 	int st = http_get("/datfile/psx/", file_sink, &c, (uint32_t *)total, NULL, 0);
 	uint32_t clen = *total;
 	fclose(f);
-	rlog("redump download -> HTTP %d, %u bytes", st, *done);
+	long secs = (long)(time(NULL) - t0);
+	rlog("redump download -> HTTP %d, %u bytes in %ld s (%u KB/s)", st, *done, secs, secs ? (unsigned)(*done / 1024 / secs) : 0);
 	if (st != 200 || *abort || (clen && *done != clen)) {
 		unlink(RD_ZIP);
 		return *abort ? -7 : (st < 0 ? st : -3);
@@ -414,7 +422,9 @@ int rd_download(volatile uint32_t *done, volatile uint32_t *total, volatile int 
 	*done = 0;                // reset before announcing the new phase, so the bar starts at 0
 	__sync_synchronize();
 	*phase = 1;
+	t0 = time(NULL);
 	int r = build_index(done, total, abort);
+	rlog("redump index built in %ld s", (long)(time(NULL) - t0));
 	unlink(RD_ZIP);
 	return r;
 }
