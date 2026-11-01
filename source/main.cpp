@@ -55,8 +55,7 @@ static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
 static char g_webhook_hdr[WH_HEADERS][256];    // extra headers "Name: value" (often a secret: never logged or shown)
 static int g_webhook_hdr_on = 0;               // send them (off keeps them stored)
 // File name of a rip: %T title (Redump's name without the language list, else the app's title;
-// with "(Disc 1)" for a disc of several), %R region, %D disc ID, %C "Disc 1" (then not in %T),
-// %N Redump's whole name. Text in [ ] does not show in webMAN's game list.
+// with "(Disc 1)" for a disc of several), %R region, %D disc ID, %N Redump's whole name. Text in [ ] does not show in webMAN's game list.
 static char g_name_pat[96] = "%T [%D]";
 enum { SRC_BD, SRC_USB };
 static char g_outdir_usb[8][64];               // destination per USB drive, by its port ("" = the hard disk)
@@ -2163,18 +2162,18 @@ static void name_from(const char *pat, const char *rdname, const char *title, co
 	const char *dp = rdname && rdname[0] ? strstr(rdname, "(Disc ") : NULL;
 	if (!dp) dp = strstr(title, "(Disc ");
 	if (dp) { const char *e = strchr(dp, ')'); if (e) snprintf(dk, sizeof(dk), "%.*s", (int)(e - dp - 1), dp + 1); }
-	// the title: up to the first bracket (Redump's name or the app's), then its disc unless %C places it
+	// the title: up to the first bracket (Redump's name or the app's), then its disc
 	const char *src = rdname && rdname[0] ? rdname : title;
 	const char *q = strstr(src, " (");
 	snprintf(t, sizeof(t), "%.*s", q ? (int)(q - src) : (int)strlen(src), src);
-	if (dk[0] && !strstr(pat, "%C")) snprintf(t + strlen(t), sizeof(t) - strlen(t), " (%s)", dk);
+	if (dk[0]) snprintf(t + strlen(t), sizeof(t) - strlen(t), " (%s)", dk);
 	region_of(rdname, serial, r, sizeof(r));
 	size_t o = 0;
 	for (const char *p = pat; *p && o < sizeof(b) - 1; p++) {
 		const char *ins = NULL;
 		if (*p == '%' && p[1]) {
 			p++;
-			ins = *p == 'T' ? t : *p == 'R' ? r : *p == 'D' ? serial : *p == 'C' ? dk : *p == 'N' ? (rdname && rdname[0] ? rdname : title) : *p == '%' ? "%" : "";
+			ins = *p == 'T' ? t : *p == 'R' ? r : *p == 'D' ? serial : *p == 'N' ? (rdname && rdname[0] ? rdname : title) : *p == '%' ? "%" : "";
 		}
 		if (ins) o += snprintf(b + o, sizeof(b) - o, "%s", ins);
 		else b[o++] = *p;
@@ -3088,9 +3087,9 @@ static void filename_screen()
 {
 	char pat[96];
 	snprintf(pat, sizeof(pat), "%s", g_name_pat);
-	static const char *parts[] = {"%T", "%R", "%D", "%C", "%N", " ", "(", ")", "[", "]", "-"};
-	static const StrId plbl[] = {STR_FN_B_TITLE, STR_FN_B_REGION, STR_FN_B_ID, STR_FN_B_DISC, STR_FN_B_NAME, STR_FN_B_SPACE};
-	const int NP = 11, NL = 6;   // the first NL parts have a name
+	static const char *parts[] = {"%T", "%R", "%D", "%N", " ", "(", ")", "[", "]", "-"};
+	static const StrId plbl[] = {STR_FN_B_TITLE, STR_FN_B_REGION, STR_FN_B_ID, STR_FN_B_NAME, STR_FN_B_SPACE};
+	const int NP = 10, NL = 5;   // the first NL parts have a name
 	int sel = 0;
 	// the pattern as parts ("%T" or one character) and a cursor between them: L1/R1 move it, X puts
 	// a part in at the cursor, square removes the part before it
@@ -3121,7 +3120,7 @@ static void filename_screen()
 				if (pi == cur) cx = x;
 				if (*q == '%' && q[1]) {
 					q++;
-					int k = *q == 'T' ? 0 : *q == 'R' ? 1 : *q == 'D' ? 2 : *q == 'C' ? 3 : *q == 'N' ? 4 : -1;
+					int k = *q == 'T' ? 0 : *q == 'R' ? 1 : *q == 'D' ? 2 : *q == 'N' ? 3 : -1;
 					const char *w = k >= 0 ? T(plbl[k]) : "%";
 					int tw = ui_text_width(UI_BODY, w);
 					ui_rect(x, y - lb / 8, tw + pad * 2, lb + lb / 4, 0xFF3D6FD9);

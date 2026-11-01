@@ -231,14 +231,13 @@ static const char *en[STR_COUNT] = {
 	"Add",
 	"Remove last",
 	"Type",
-	"File name pattern (%T title, %R region, %D disc ID, %C disc, %N Redump name)",
+	"File name pattern (%T title, %R region, %D disc ID, %N Redump name)",
 	"Save the new file name pattern?",
 	"Move",
 	"USB %d",
 	" and verified against Redump.",
 	"Already ripped here",
 	"Page",
-	"Disc",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -466,14 +465,13 @@ static const char *sv[STR_COUNT] = {
 	"Lägg till",
 	"Ta bort sista",
 	"Skriv själv",
-	"Filnamnsmönster (%T titel, %R region, %D skiv-id, %C skiva, %N Redumps namn)",
+	"Filnamnsmönster (%T titel, %R region, %D skiv-id, %N Redumps namn)",
 	"Spara det nya filnamnsmönstret?",
 	"Flytta",
 	"USB %d",
 	" och verifierad mot Redump.",
 	"Redan rippad hit",
 	"Sida",
-	"Skiva",
 };
 
 static const char **table = en;
