@@ -2408,12 +2408,14 @@ static void eject_disc()
 }
 
 // Home screen. Returns 1 = rip the disc in the drive, 2 = rip a freshly inserted disc, 0 = exit.
+static volatile int g_insert_pending = 0;   // a disc was inserted on the result screen (auto-rip off)
 static int home_screen()
 {
-	disc_inserted = 0;
+	disc_inserted = g_insert_pending;   // treat it as freshly inserted: identify (and report) it
+	g_insert_pending = 0;
 	g_redraw = 2;
 	pad_pressed();   // swallow buttons still held from a previous screen
-	if (g_disc_state != DISC_READY && !g_ident_busy) identify_start(0);
+	if (g_disc_state != DISC_READY && !g_ident_busy && !disc_inserted) identify_start(0);
 	int last_state = -1, inserted = 0, last_rd = -1;
 	while (!exit_requested) {
 		if (g_rd_seq != last_rd) { last_rd = g_rd_seq; g_redraw = 2; }
@@ -3159,7 +3161,8 @@ static int own_dialog(const char *msg, int yesno)
 }
 
 // Own result screen after a rip (instead of the system dialog). Returns 1 when a new disc was
-// inserted (rip it right away), 0 for O (back to the start screen).
+// inserted and "rip immediately" is on (rip it right away), 0 for O or a new disc otherwise
+// (back to the start screen, which identifies it).
 static void eject_disc();
 static int result_screen()
 {
@@ -3184,7 +3187,8 @@ static int result_screen()
 				y += lb * 13 / 10;
 			}
 			y += lb / 2;
-			ui_text(UI_SMALL, ui_w() / 2, y, 0xA8B0C8, T(ejected ? STR_RES_NEXT : STR_RES_NEXT_NOEJECT), UI_CENTER);
+			if (g_autostart)   // only then does a new disc start a rip from here
+				ui_text(UI_SMALL, ui_w() / 2, y, 0xA8B0C8, T(ejected ? STR_RES_NEXT : STR_RES_NEXT_NOEJECT), UI_CENTER);
 			if (ejected) {
 				const char *b[] = {"circle"};
 				const char *l[] = {T(STR_HINT_BACK)};
@@ -3198,7 +3202,11 @@ static int result_screen()
 			g_backdrop_shown = 0;
 		}
 		flip_frame();
-		if (disc_inserted) return 1;
+		if (disc_inserted) {
+			if (g_autostart) return 1;            // rip it right away
+			g_insert_pending = 1;                 // otherwise: home screen identifies it and waits for X
+			return 0;
+		}
 		int p = pad_pressed();
 		if ((p & B_TRIANGLE) && !ejected) { eject_disc(); ejected = 1; disc_inserted = 0; g_redraw = 2; }
 		if (p & B_CIRCLE) return 0;
