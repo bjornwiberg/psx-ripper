@@ -12,6 +12,7 @@
 
 #define ATAPI_NON_DATA_PROTO    0
 #define ATAPI_PIO_DATA_IN_PROTO 1
+#define ATAPI_PIO_DATA_OUT_PROTO 2
 #define ATAPI_DMA_PROTO         3
 
 #define ATAPI_DIR_WRITE 0

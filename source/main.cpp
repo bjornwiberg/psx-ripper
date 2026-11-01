@@ -7,6 +7,7 @@
 #include <string.h>
 #include <malloc.h>
 #include <time.h>
+#include <sys/time.h>
 
 #include <io/pad.h>
 #include <sys/thread.h>
@@ -226,6 +227,69 @@ static int atapi(const uint8_t *cdb, uint8_t *buf, uint32_t len, uint32_t proto)
 	if (!len) cmd.proto = ATAPI_NON_DATA_PROTO;
 	memcpy(cmd.pkt, cdb, 12);
 	return sys_storage_send_atapi_command(g_sc, g_fd, &cmd, buf);
+}
+
+// Data-out command (MODE SELECT).
+static int atapi_out(const uint8_t *cdb, uint8_t *buf, uint32_t len)
+{
+	struct lv2_atapi_cmnd_block cmd;
+	atapi_init(&cmd, len, ATAPI_PIO_DATA_OUT_PROTO, ATAPI_DIR_WRITE);
+	memcpy(cmd.pkt, cdb, 12);
+	return sys_storage_send_atapi_command(g_sc, g_fd, &cmd, buf);
+}
+
+static uint64_t now_ms()
+{
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	return (uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+
+// Read/write error recovery mode page (0x01). Its read retry count decides how long the drive
+// itself keeps retrying a bad sector before it reports an error. The first pass sets it low so a
+// scratch costs little time; the original value is restored for the second pass and afterwards.
+static uint8_t g_er_page[12];
+static int g_er_valid = 0;
+
+static int er_read(uint8_t page[12])
+{
+	static uint8_t b[64] __attribute__((aligned(128)));
+	uint8_t cdb[12] = {0x5A, 0x08, 0x01, 0, 0, 0, 0, 0, sizeof(b), 0, 0, 0};   // MODE SENSE(10), DBD, page 1
+	memset(b, 0, sizeof(b));
+	int r = atapi(cdb, b, sizeof(b), ATAPI_PIO_DATA_IN_PROTO);
+	if (r) return r;
+	int bdl = b[6] << 8 | b[7];
+	const uint8_t *pg = b + 8 + bdl;
+	if ((pg[0] & 0x3F) != 0x01 || pg[1] < 10) return -1;
+	memcpy(page, pg, 12);
+	return 0;
+}
+
+static int er_write(const uint8_t page[12])
+{
+	static uint8_t b[20] __attribute__((aligned(128)));
+	memset(b, 0, sizeof(b));
+	memcpy(b + 8, page, 12);
+	b[8] &= 0x3F;   // PS bit must be 0 in MODE SELECT
+	uint8_t cdb[12] = {0x55, 0x10, 0, 0, 0, 0, 0, 0, sizeof(b), 0, 0, 0};   // MODE SELECT(10), PF, not saved
+	return atapi_out(cdb, b, sizeof(b));
+}
+
+static void er_set_retries(int n)   // n < 0: restore the original page
+{
+	if (!g_er_valid) {
+		int r = er_read(g_er_page);
+		if (r) { logf("error recovery page not available (0x%x)", r); return; }
+		g_er_valid = 1;
+		logf("error recovery page: flags=%02x read retries=%u", g_er_page[2], g_er_page[3]);
+	}
+	uint8_t pg[12];
+	memcpy(pg, g_er_page, 12);
+	if (n >= 0) pg[3] = (uint8_t)n;
+	int r = er_write(pg);
+	uint8_t chk[12];
+	int rr = er_read(chk);
+	logf("set read retries %d -> 0x%x (now %d)", n >= 0 ? n : g_er_page[3], r, rr ? -1 : chk[3]);
 }
 
 struct Track {
@@ -796,7 +860,8 @@ static void set_cd_speed(int x)   // x = 0: maximum, otherwise the CD speed fact
 	logf("set cd speed %u KB/s -> 0x%x", kbs, atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
 }
 
-// Second pass over the sectors that failed: low speed (2x), twice the configured tries. A sector
+// Second pass over the sectors that failed: low speed (2x), the configured tries, the drive's own
+// retries restored. O stops it and keeps the image as it is. A sector
 // that reads (with a correct EDC on the data track) is written into the image at its place.
 // Returns the number of sectors fixed.
 static int second_pass()
@@ -806,7 +871,7 @@ static int second_pass()
 	g_pass2_total = g_nhard; g_pass2_done = 0;
 	set_cd_speed(2);
 	uint32_t t1_end = (g_ntracks > 1) ? g_tstart[1] : g_leadout;
-	int data1 = g_tracks[0].ctrl & 0x4, fixed = 0, tries = g_retries * 2;
+	int data1 = g_tracks[0].ctrl & 0x4, fixed = 0, tries = g_retries;
 	time_t t0 = time(NULL);
 	for (uint32_t k = 0; k < g_nhard && !g_abort; k++) {
 		uint32_t lba = g_hard[k] & 0x7FFFFFFF;
@@ -826,7 +891,8 @@ static int second_pass()
 		g_pass2_done = k + 1;
 	}
 	set_cd_speed(g_speed ? speed_x[g_speed] : 0);
-	logf("second pass: %d of %u recovered in %ld s", fixed, g_nhard, (long)(time(NULL) - t0));
+	logf("second pass: %d of %u recovered in %ld s%s", fixed, g_nhard, (long)(time(NULL) - t0), g_abort ? " (stopped with O)" : "");
+	g_abort = 0;   // O during the second pass keeps the image from the first pass
 	return fixed;
 }
 
@@ -885,6 +951,7 @@ static void rip_thread(void *arg)
 	int single = stat("/dev_hdd0/tmp/psxrip_single", &st) == 0;   // test switch: disable overlap
 	logf("buffering: %s", single ? "single" : "double");
 	time_t t0 = time(NULL);
+	er_set_retries(1);   // first pass: let the drive give up quickly on bad sectors
 	int k = 0;
 	for (uint32_t lba = 0; lba < g_leadout && !g_abort && !g_write_failed; k ^= 1) {
 		while (g_buf_len[k] && !g_write_failed) usleep(500);   // wait until the writer has emptied it
@@ -907,19 +974,24 @@ static void rip_thread(void *arg)
 				uint32_t m = n - i0 < PIECE ? n - i0 : PIECE;
 				g_readpos = lba + i0;   // keep the progress bar moving in slow areas
 				if (g_abort) { for (uint32_t i = i0; i < i0 + m; i++) { memset(buf + i * SECT_Q, 0, SECT_Q); dead[i] = 1; } continue; }
-				if (read_cd(lba + i0, m, buf + i0 * SECT_Q) == 0) continue;
+				// inside a damaged area go straight to single sectors: a failing 16-sector read costs as
+				// much as a failing single one
+				int in_damage = g_readerrs && lba + i0 - last_bad < 256;
+				if (!in_damage && read_cd(lba + i0, m, buf + i0 * SECT_Q) == 0) continue;
 				for (uint32_t i = i0; i < i0 + m; i++) {
 					uint8_t *sp = buf + i * SECT_Q;
 					if (g_abort) { memset(sp, 0, SECT_Q); dead[i] = 1; continue; }
 					int damaged = g_readerrs && lba + i - last_bad < 256;
 					int r = -1, tries = damaged ? 1 : g_retries;
 					g_rr_lba = lba + i; g_rr_max = tries;
+					uint64_t t0 = now_ms();
 					for (int t = 0; t < tries && r && !g_abort; t++) { g_rr_try = t + 1; r = read_cd(lba + i, 1, sp); }
 					g_rr_max = 0;
 					if (r) {
 						memset(sp, 0, SECT_Q); dead[i] = 1; g_readerrs++; last_bad = lba + i;
 						note_hard(lba + i, 0);
-						if (g_readerrs <= 64 || g_readerrs % 100 == 0) logf("unreadable sector %u (0x%x, %d tries, %u so far)", lba + i, r, tries, g_readerrs);
+						if (g_readerrs <= 64 || g_readerrs % 100 == 0)
+							logf("unreadable sector %u (0x%x, %d tries, %u ms, %u so far)", lba + i, r, tries, (unsigned)(now_ms() - t0), g_readerrs);
 					}
 				}
 			}
@@ -961,6 +1033,7 @@ static void rip_thread(void *arg)
 	g_reader_done = 1;
 	u64 rv;
 	sysThreadJoin(wtid, &rv);
+	if (g_er_valid) er_set_retries(-1);   // the drive's own retries back for the second pass
 	int patched = second_pass();
 	fclose(g_out);
 	if (patched) md5_from_file(path);   // the streamed MD5s no longer match the patched file
