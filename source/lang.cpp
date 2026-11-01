@@ -192,7 +192,7 @@ static const char *en[STR_COUNT] = {
 	"USB · %s",
 	"Reads from: %s",
 	"The USB drive is spinning up the disc (up to a minute) …",
-	"Drive",
+	"Drive settings",
 	"Standard (%s)",
 	"All standard",
 };
@@ -383,7 +383,7 @@ static const char *sv[STR_COUNT] = {
 	"USB · %s",
 	"Läses från: %s",
 	"USB-läsaren varvar upp skivan (upp till en minut) …",
-	"Läsare",
+	"Läsarinställningar",
 	"Standard (%s)",
 	"Allt standard",
 };
