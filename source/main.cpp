@@ -297,19 +297,31 @@ static void usb_optical_probe()
 			logf("usbprobe: open %016llx -> 0x%x", (unsigned long long)id, r);
 			if (r) continue;
 			g_fd = fd;
+			// which syscall/transfer reaches a USB drive? (the BD drive uses 616)
+			uint32_t keep_sc = g_sc;
+			static const uint32_t scs[2] = {616, 604};
+			static const uint32_t protos[2] = {ATAPI_PIO_DATA_IN_PROTO, ATAPI_DMA_PROTO};
 			static uint8_t inq[96] __attribute__((aligned(128)));
-			memset(inq, 0, sizeof(inq));
-			uint8_t c1[12] = {0x12, 0, 0, 0, 96, 0, 0, 0, 0, 0, 0, 0};   // INQUIRY
-			r = atapi(c1, inq, 96, ATAPI_PIO_DATA_IN_PROTO);
-			char vend[9], prod[17];
-			memcpy(vend, inq + 8, 8); vend[8] = 0; memcpy(prod, inq + 16, 16); prod[16] = 0;
-			logf("usbprobe: INQUIRY -> 0x%x type %u vendor '%s' product '%s'", r, inq[0] & 0x1F, vend, prod);
+			int found = 0;
+			for (int si = 0; si < 2 && !found; si++)
+				for (int pi = 0; pi < 2 && !found; pi++) {
+					g_sc = scs[si];
+					memset(inq, 0, sizeof(inq));
+					uint8_t c1[12] = {0x12, 0, 0, 0, 96, 0, 0, 0, 0, 0, 0, 0};   // INQUIRY
+					r = atapi(c1, inq, 96, protos[pi]);
+					char vend[9], prod[17];
+					memcpy(vend, inq + 8, 8); vend[8] = 0; memcpy(prod, inq + 16, 16); prod[16] = 0;
+					logf("usbprobe: INQUIRY sc %u proto %u -> 0x%x type %u vendor '%s' product '%s'", scs[si], protos[pi], r, inq[0] & 0x1F, vend, prod);
+					if (r == 0) found = 1;
+				}
+			if (!found) g_sc = keep_sc;
 			uint8_t c2[12] = {0xEA, 0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0};    // SuperDrive unlock
 			r = atapi(c2, NULL, 0, ATAPI_NON_DATA_PROTO);
 			logf("usbprobe: unlock EA..01 -> 0x%x", r);
 			uint8_t c3[12] = {0x1B, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0, 0};    // START STOP UNIT: load tray
 			r = atapi(c3, NULL, 0, ATAPI_NON_DATA_PROTO);
-			logf("usbprobe: load -> 0x%x", r);
+			logf("usbprobe: load -> 0x%x (sc %u)", r, g_sc);
+			g_sc = keep_sc;
 			sys_storage_close(fd);
 		}
 	g_fd = keep_fd;
