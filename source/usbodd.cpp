@@ -139,6 +139,9 @@ int usbodd_scsi(const uint8_t *cdb, int cdblen, uint8_t *data, int len, int dir_
 	if (!cbw) {
 		ulog("usbodd: allocating transfer memory");
 		s32 a1 = usbAllocateMemory(&cbw, 64), a2 = usbAllocateMemory(&csw, 64), a3 = usbAllocateMemory(&buf, 65536);
+		// the library stores a 32-bit address in the 64-bit pointer: on this big-endian CPU it lands
+		// in the upper half (0x200a000000000000 for 0x200a0000)
+		cbw = (void *)((uintptr_t)cbw >> 32); csw = (void *)((uintptr_t)csw >> 32); buf = (void *)((uintptr_t)buf >> 32);
 		ulog("usbodd: allocate -> 0x%x 0x%x 0x%x (%p %p %p)", a1, a2, a3, cbw, csw, buf);
 	}
 	if (!cbw || !csw || !buf || len > 65536) { snprintf(log, logn, "no USB memory\n"); return -2; }
