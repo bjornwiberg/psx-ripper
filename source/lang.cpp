@@ -157,6 +157,8 @@ static const char *en[STR_COUNT] = {
 	"Fixed sectors: %u, all confirmed",
 	"A disc could not be read as a PS1 disc",
 	"Not identified",
+	"The app was started (with the disc in the drive, if any)",
+	"App started",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -310,6 +312,8 @@ static const char *sv[STR_COUNT] = {
 	"Lagade sektorer: %u, alla bekräftade",
 	"En skiva kunde inte läsas som en PS1-skiva",
 	"Ej identifierad",
+	"Appen startades (med skivan som sitter i, om någon)",
+	"Appstart",
 };
 
 static const char **table = en;

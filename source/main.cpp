@@ -1615,24 +1615,26 @@ static void identify_thread(void *arg)
 		g_repair_n = g_prev_rip ? riplog_open_count() : 0;
 		snprintf(g_state_title, sizeof(g_state_title), "%s", g_name);
 		snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
-		// only for a disc that was just inserted, or one not reported yet (not when the home screen
-		// identifies the same disc again after a rip or a repair)
-		static char reported[16];
-		if ((long)arg || strcmp(reported, g_serial)) {
-			snprintf(reported, sizeof(reported), "%s", g_serial);
-			fire_event("disc_identified");
-		}
+		// only for a disc inserted while the app runs; a disc already in the drive at start is part
+		// of app_started, and the home screen identifying the same disc again sends nothing
+		if ((long)arg) fire_event("disc_identified");
 		if (g_repair_n) logf("previous rip has %d sector(s) to repair", g_repair_n);
 		__sync_synchronize();
 		g_disc_state = DISC_READY;
 	} else {
 		g_disc_state = (r == -2) ? DISC_NONE : DISC_ERROR;
-		if (r != -2) {   // a disc is in the drive but is not a readable PS1 disc
+		if (r != -2 && (long)arg) {   // a disc was inserted but is not a readable PS1 disc
 			g_state_title[0] = 0; g_state_serial[0] = 0;
 			fire_event("disc_not_identified");
 		}
 	}
 	logf("identify -> %d (state %d)", r, g_disc_state);
+	static int started_sent = 0;
+	if (!started_sent) {   // first identification after the app started: report the start once
+		started_sent = 1;
+		if (r != 0) { g_state_title[0] = 0; g_state_serial[0] = 0; }
+		fire_event("app_started");
+	}
 	snprintf(g_id_serial, sizeof(g_id_serial), "%s", g_serial);
 	g_id_total = (uint64_t)g_leadout * RAW_SIZE;
 	g_id_ntracks = g_ntracks;
