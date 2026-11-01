@@ -16,7 +16,7 @@ straight to the internal hard disk, ready to play with webMAN MOD / Cobra.
 - Automatic mode: after a rip the disc is ejected, and the next disc you insert is ripped
   without asking. Press O to leave automatic mode
 - Own on-screen UI: start screen (✕ rip · △ settings · ○ exit) and a settings menu
-  (↑↓ select, ←→ change, ✕ save, ○ back) with destination (internal HDD or a connected USB
+  (↑↓ select, ←→ change and save, ○ back) with destination (internal HDD or a connected USB
   drive), re-reads on read errors, read speed (Max/8×/4×/2×), eject on/off and "rip
   immediately when a disc is inserted", saved in `/dev_hdd0/tmp/psxrip.cfg`
 - English and Swedish UI, picked from the PS3 system language

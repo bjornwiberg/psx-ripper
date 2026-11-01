@@ -971,7 +971,7 @@ static void flip_frame()
 
 static void settings_screen()
 {
-	// edit a copy; X saves, O discards
+	// edit locally; each change is applied and saved at once, O goes back
 	char outdir[64];
 	snprintf(outdir, sizeof(outdir), "%s", g_outdir);
 	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, row = 0;
@@ -1004,9 +1004,9 @@ static void settings_screen()
 			snprintf(v, sizeof(v), r == row ? "‹ %s ›" : "%s", vals[r]);
 			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 		}
-		const char *b[] = {"updown", "leftright", "cross", "circle"};
-		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_SAVE), T(STR_HINT_BACK)};
-		hint_bar(b, l, 4);
+		const char *b[] = {"updown", "leftright", "circle"};
+		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
+		hint_bar(b, l, 3);
 		}
 		flip_frame();
 		int p = pad_pressed();
@@ -1031,16 +1031,14 @@ static void settings_screen()
 			} else {
 				autostart = !autostart;
 			}
-		}
-		if (p & B_CROSS) {
+			// every change is applied and saved immediately
 			snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
 			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart;
 			OUT_DIR = g_outdir;
 			cfg_save();
 			logf("settings saved: outdir=%s retries=%d speed=%d eject=%d autostart=%d", g_outdir, g_retries, g_speed, g_eject, g_autostart);
-			return;
 		}
-		if (p & B_CIRCLE) { logf("settings: cancelled"); return; }
+		if (p & B_CIRCLE) return;
 	}
 }
 
