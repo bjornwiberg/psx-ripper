@@ -1674,6 +1674,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		logf("eject -> 0x%x", atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
 	}
 	sys_storage_close(g_fd);
+	lv1_storage_unpatch();   // done with the drive: never keep the patch while a dialog waits
 
 	if (g_result) {
 		snprintf(msg, sizeof(msg), "%s.bin.part", g_base);
