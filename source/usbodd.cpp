@@ -31,6 +31,9 @@ static void ulog(const char *fmt, ...)
 	fclose(f);
 }
 
+struct UsbDrive;
+struct Xfer { UsbDrive *d; unsigned seq; };   // callback argument: which drive, which transfer
+
 struct UsbDrive {
 	volatile s32 dev, ctrl, in, out;
 	uint8_t ep_in, ep_out, ifnum;
@@ -39,6 +42,9 @@ struct UsbDrive {
 	sys_mutex_t lock;              // one command at a time (rip thread, presence poll, /dbg)
 	void *cbw, *csw, *buf;         // transfer memory from usbAllocateMemory
 	volatile int done;             // completion of the transfer in flight
+	volatile unsigned seq;         // number of that transfer; a late completion of an earlier one is ignored
+	Xfer xf[16];
+	usbEndpointDescriptor ein, eout;   // copies, to reopen the bulk pipes
 	volatile s32 res, cnt;
 	volatile int last_got;
 	usbDeviceRequest req;          // control request in flight (must stay valid until done)
@@ -53,8 +59,21 @@ static int g_init_rc = 1, g_reg_rc = 1;
 
 static void done_cb(s32 result, s32 count, void *arg)
 {
-	UsbDrive *d = (UsbDrive *)arg;
+	Xfer *x = (Xfer *)arg;
+	UsbDrive *d = x->d;
+	if (x->seq != d->seq) return;   // a transfer we gave up waiting for: its answer must not end the current one
 	d->res = result; d->cnt = count; d->done = 1;
+}
+
+// Prepares the completion for the next transfer and returns its callback argument.
+static void *next_xfer(UsbDrive *d)
+{
+	d->seq++;
+	Xfer *x = &d->xf[d->seq & 15];
+	x->d = d;
+	x->seq = d->seq;
+	d->done = 0;
+	return x;
 }
 
 static uint64_t ms_now()
@@ -111,12 +130,12 @@ static s32 odd_attach(s32 dev)
 		d->req.wValue = cfg[5];   // bConfigurationValue
 		d->req.wIndex = 0;
 		d->req.wLength = 0;
-		d->done = 0;
-		s32 rc = usbControlTransfer(d->ctrl, &d->req, NULL, done_cb, d);
+		s32 rc = usbControlTransfer(d->ctrl, &d->req, NULL, done_cb, next_xfer(d));
 		ulog("usbodd: set configuration %u -> 0x%x", cfg[5], rc);
 	}
-	d->in = usbOpenPipe(dev, ein);
-	d->out = usbOpenPipe(dev, eout);
+	d->ein = *ein; d->eout = *eout;
+	d->in = usbOpenPipe(dev, &d->ein);
+	d->out = usbOpenPipe(dev, &d->eout);
 	d->ep_in = ein->bEndpointAddress; d->ep_out = eout->bEndpointAddress; d->ifnum = ifc->bInterfaceNumber;
 	d->dev = dev;
 	d->apple = 1;   // the only id registered so far
@@ -182,8 +201,7 @@ void usbodd_status(char *out, int n)
 static int control(UsbDrive *d, uint8_t type, uint8_t req, uint16_t value, uint16_t index)
 {
 	d->req.bmRequestType = type; d->req.bRequest = req; d->req.wValue = value; d->req.wIndex = index; d->req.wLength = 0;
-	d->done = 0;
-	s32 rc = usbControlTransfer(d->ctrl, &d->req, NULL, done_cb, d);
+		s32 rc = usbControlTransfer(d->ctrl, &d->req, NULL, done_cb, next_xfer(d));
 	if (rc) return rc;
 	return wait_done(d, 2000) ? -1 : d->res;
 }
@@ -194,6 +212,18 @@ static int clear_halt(UsbDrive *d, uint8_t ep)
 	int r = control(d, USB_REQTYPE_DIR_TO_DEVICE | USB_REQTYPE_TYPE_STANDARD | USB_REQTYPE_RECIP_ENDPOINT, USB_REQUEST_CLEAR_FEATURE, 0, ep);
 	if (r) ulog("usbodd: clear halt ep %02x -> 0x%x", ep, r);
 	return r;
+}
+
+// A transfer that timed out is still queued on its pipe and would take the next answer (a bulk-in
+// request waiting for a CSW gets the next command's data). Closing the pipe cancels it.
+static void reopen_pipes(UsbDrive *d)
+{
+	d->seq++;   // whatever still completes belongs to the cancelled transfers
+	usbClosePipe(d->in);
+	usbClosePipe(d->out);
+	d->in = usbOpenPipe(d->dev, &d->ein);
+	d->out = usbOpenPipe(d->dev, &d->eout);
+	ulog("usbodd: reopened pipes in %d out %d", d->in, d->out);
 }
 
 // Bulk-Only Mass Storage Reset (class request 0xFF) followed by clearing both halts (BOT 5.3.4).
@@ -250,37 +280,45 @@ static int scsi_locked(UsbDrive *d, const uint8_t *cdb, int cdblen, uint8_t *dat
 	memcpy(c + 15, cdb, cdblen);
 	int o = 0;
 #define TR(...) do { if (o < logn) o += snprintf(log + o, logn - o, __VA_ARGS__); } while (0)
-	d->done = 0;
-	s32 r = usbBulkTransfer(d->out, d->cbw, 31, done_cb, d);
+	s32 r = usbBulkTransfer(d->out, d->cbw, 31, done_cb, next_xfer(d));
 	int w = wait_done(d, 3000);
 	TR("CBW -> 0x%x, done %d res 0x%x cnt %d\n", r, !w, d->res, d->cnt);
-	if (r || w || d->res) { int rr = reset_locked(d); TR("CBW failed: reset -> 0x%x\n", rr); return -3; }
+	if (r || w || d->res) {
+		if (w) reopen_pipes(d);
+		int rr = reset_locked(d);
+		TR("CBW failed: reset -> 0x%x\n", rr);
+		return -3;
+	}
 	if (len) {
 		if (!dir_in) memcpy(d->buf, data, len);
-		d->done = 0;
-		r = usbBulkTransfer(dir_in ? d->in : d->out, d->buf, len, done_cb, d);
+		r = usbBulkTransfer(dir_in ? d->in : d->out, d->buf, len, done_cb, next_xfer(d));
 		w = wait_done(d, 20000);   // a scratched sector can keep the drive retrying for a while
 		TR("data -> 0x%x, done %d res 0x%x cnt %d\n", r, !w, d->res, d->cnt);
 		if (!r && !w && !d->res) { *got = d->cnt; if (dir_in && d->cnt > 0) memcpy(data, d->buf, d->cnt < len ? d->cnt : len); }
-		else if (!r && !w && d->res) {   // the device stalled the data phase: clear it, then the CSW tells why
+		else if (w) {   // no data in time: cancel and recover, the CSW will not come either
+			reopen_pipes(d);
+			int rr = reset_locked(d);
+			TR("data timeout: reset -> 0x%x\n", rr);
+			return -5;
+		}
+		else if (!r && d->res) {   // the device stalled the data phase: clear it, then the CSW tells why
 			int ch = clear_halt(d, dir_in ? d->ep_in : d->ep_out);
 			TR("data stalled: clear halt -> 0x%x\n", ch);
 		}
 	}
-	d->done = 0;
-	r = usbBulkTransfer(d->in, d->csw, 13, done_cb, d);
+	r = usbBulkTransfer(d->in, d->csw, 13, done_cb, next_xfer(d));
 	w = wait_done(d, 5000);
 	if (!r && !w && d->res) {   // after a short data phase the device stalls bulk-in: clear it, read the CSW again (BOT 6.7.2)
 		int ch = clear_halt(d, d->ep_in);
 		TR("CSW stalled: clear halt -> 0x%x\n", ch);
-		d->done = 0;
-		r = usbBulkTransfer(d->in, d->csw, 13, done_cb, d);
+		r = usbBulkTransfer(d->in, d->csw, 13, done_cb, next_xfer(d));
 		w = wait_done(d, 5000);
 	}
 	const uint8_t *s = (const uint8_t *)d->csw;
 	TR("CSW -> 0x%x, done %d res 0x%x cnt %d sig %c%c%c%c tag %u residue %u status %u\n", r, !w, d->res, d->cnt,
 	   s[0], s[1], s[2], s[3], get_le32(s + 4), get_le32(s + 8), s[12]);
 	if (r || w || d->res) {   // no valid CSW: recover with a reset so the next command works again
+		if (w) reopen_pipes(d);
 		int rr = reset_locked(d);
 		TR("no CSW: bulk-only reset -> 0x%x\n", rr);
 		return -4;

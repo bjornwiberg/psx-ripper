@@ -652,8 +652,20 @@ static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, 
 	return ret;
 }
 
+static int q_needed(uint32_t lba, uint32_t count);
 static int read_cd(uint32_t lba, uint32_t count, uint8_t *buf)
 {
+	// A USB SuperDrive reads Q at about 2x but without it at 5-8x: read Q only where the ripper looks
+	// at it, elsewhere the Q bytes are left zero (counted as "no Q", like a drive that gives none)
+	if (g_use == SRC_USB && !q_needed(lba, count)) {
+		int r = read_cd_sub(lba, count, buf, 0x00, RAW_SIZE);
+		if (r) return r;
+		for (int i = (int)count - 1; i >= 0; i--) {   // 2352-byte sectors -> 2368 with Q, from the end, in place
+			memmove(buf + (size_t)i * SECT_Q, buf + (size_t)i * RAW_SIZE, RAW_SIZE);
+			memset(buf + (size_t)i * SECT_Q + RAW_SIZE, 0, SUBQ_SIZE);
+		}
+		return 0;
+	}
 	return read_cd_sub(lba, count, buf, 0x02, SECT_Q);
 }
 
@@ -919,6 +931,22 @@ static int bcd2(uint8_t b) { return (b >> 4) * 10 + (b & 0x0F); }
 #define QCAL_SECTORS 512
 #define LC_LBA_MIN 13000
 #define LC_LBA_MAX 45000
+
+static int g_is_pal = 0;    // LibCrypt is only checked on PAL discs
+
+// Sectors whose Q the ripper uses: the calibration at the start, the LibCrypt area of a PAL disc and
+// the 10 s before each later track (pregap starts).
+static int q_needed(uint32_t lba, uint32_t count)
+{
+	uint32_t end = lba + count;
+	if (lba < QCAL_SECTORS + 2) return 1;
+	if (g_is_pal && end > LC_LBA_MIN - 2 && lba < LC_LBA_MAX + 2) return 1;
+	for (int t = 1; t < g_ntracks; t++) {
+		uint32_t l = g_tracks[t].lba;
+		if (end + 760 > l && lba < l + 2) return 1;
+	}
+	return 0;
+}
 static int g_qoff = 0, g_qcal_done = 0;
 static int g_qhist[5];   // delta -2..+2
 
@@ -1051,7 +1079,6 @@ static void note_suspect(uint32_t lba, const uint8_t *sector)
 static volatile int g_abort = 0, g_finished = 0, g_result = 0;
 static volatile uint32_t g_readerrs = 0;
 static int g_ripped = 0;    // discs ripped this session
-static int g_is_pal = 0;    // LibCrypt is only checked on PAL discs
 static int g_headless = 0;  // remote test mode: no dialogs, no eject, exit after one rip
 #define AUTO_FLAG "/dev_hdd0/tmp/psxrip.auto"
 static char g_base[256];      // "/dev_hdd0/PSXISO/NAME [SERIAL]"
