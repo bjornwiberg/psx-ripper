@@ -3762,15 +3762,15 @@ static void draw_page(int c, int y)
 		dest_parts(k.dest[0] ? k.dest : HDD_DIR, dp, sizeof(dp), &gb);
 		snprintf(m, sizeof(m), arrows ? "‹ %s%s ›" : "%s%s", T(STR_DEST_LABEL), dp);   // ←→ where this drive saves
 		snprintf(gbs, sizeof(gbs), T(STR_DEST_FREE), gb);
-		int gw = ui_text_width(UI_BODY, gbs);
-		ui_text(UI_BODY, R, yy, 0x8890A8, gbs, UI_RIGHT);
+		int gw = ui_text_width(UI_SMALL, gbs);   // the free space: small, on the right
+		ui_text(UI_SMALL, R, yy + (lb - ls) / 2, 0x8890A8, gbs, UI_RIGHT);
 		ui_text_fit(UI_BODY, L, yy, col, m, R - L - gw - ui_w() / 40);
 		yy += lb;
 		if (known && k.fname[0]) {
 			snprintf(fl, sizeof(fl), "%s.bin", k.fname);
-			int pw = ui_text_width(UI_SMALL, T(STR_FILE_LABEL));
+			int pw = ui_text_width(UI_BODY, T(STR_FILE_LABEL));   // same size as "Mål:" above it
 			fit_middle(UI_BODY, fl, fn, sizeof(fn), R - L - pw);
-			ui_text(UI_SMALL, L, yy + (lb - ls) / 2, 0x8890A8, T(STR_FILE_LABEL));
+			ui_text(UI_BODY, L, yy, col, T(STR_FILE_LABEL));
 			ui_text(UI_BODY, L + pw, yy, 0xC8D0E0, fn);
 			yy += lb;
 		}
