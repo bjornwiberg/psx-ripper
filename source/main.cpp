@@ -270,6 +270,50 @@ static int atapi(const uint8_t *cdb, uint8_t *buf, uint32_t len, uint32_t proto)
 	return sys_storage_send_atapi_command(g_sc, g_fd, &cmd, buf);
 }
 
+// ---------------------------------------------------------------- USB optical drives (diagnosis)
+// Flag file /dev_hdd0/tmp/psxrip.usbprobe: list the storage devices the PS3 knows, and for any
+// device that looks optical (2048-byte sectors) other than the internal drive, send INQUIRY and
+// the Apple SuperDrive unlock command (EA 00 00 00 00 00 01). Results go to the log only.
+static void usb_optical_probe()
+{
+	static const uint64_t bases[] = {0x0101000000000000ULL, 0x0103000000000000ULL};
+	int keep_fd = g_fd;
+	for (int b = 0; b < 2; b++)
+		for (int n = 0; n < 0x40; n++) {
+			uint64_t id = bases[b] + n;
+			struct storage_device_info info __attribute__((aligned(16)));
+			memset(&info, 0, sizeof(info));
+			info.unknown03 = 0x12345678;
+			if (sys_storage_get_device_info(id, (uint8_t *)&info)) continue;
+			char name[8];
+			memcpy(name, info.name, 7); name[7] = 0;
+			for (int i = 0; i < 7; i++) if ((unsigned char)name[i] < 32 || (unsigned char)name[i] > 126) name[i] = '.';
+			logf("usbprobe: id %016llx name '%s' sectors %llu size %u writable %u", (unsigned long long)id, name,
+			     (unsigned long long)info.total_sectors, info.sector_size, info.writable);
+			if (id == BD_DEVICE || info.sector_size != 2048) continue;   // not an external optical drive
+			int fd = -1;
+			int r = sys_storage_open(id, &fd);
+			logf("usbprobe: open %016llx -> 0x%x", (unsigned long long)id, r);
+			if (r) continue;
+			g_fd = fd;
+			static uint8_t inq[96] __attribute__((aligned(128)));
+			memset(inq, 0, sizeof(inq));
+			uint8_t c1[12] = {0x12, 0, 0, 0, 96, 0, 0, 0, 0, 0, 0, 0};   // INQUIRY
+			r = atapi(c1, inq, 96, ATAPI_PIO_DATA_IN_PROTO);
+			char vend[9], prod[17];
+			memcpy(vend, inq + 8, 8); vend[8] = 0; memcpy(prod, inq + 16, 16); prod[16] = 0;
+			logf("usbprobe: INQUIRY -> 0x%x type %u vendor '%s' product '%s'", r, inq[0] & 0x1F, vend, prod);
+			uint8_t c2[12] = {0xEA, 0, 0, 0, 0, 0, 0x01, 0, 0, 0, 0, 0};    // SuperDrive unlock
+			r = atapi(c2, NULL, 0, ATAPI_NON_DATA_PROTO);
+			logf("usbprobe: unlock EA..01 -> 0x%x", r);
+			uint8_t c3[12] = {0x1B, 0, 0, 0, 0x03, 0, 0, 0, 0, 0, 0, 0};    // START STOP UNIT: load tray
+			r = atapi(c3, NULL, 0, ATAPI_NON_DATA_PROTO);
+			logf("usbprobe: load -> 0x%x", r);
+			sys_storage_close(fd);
+		}
+	g_fd = keep_fd;
+}
+
 // Data-out command (MODE SELECT).
 static int atapi_out(const uint8_t *cdb, uint8_t *buf, uint32_t len)
 {
@@ -3281,6 +3325,7 @@ int main(int argc, char *argv[])
 		return 0;
 	}
 	if (warn[0]) own_dialog(warn, 0);   // what the start-up checks found and fixed
+	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
 	int autorip = 0;   // set after a successful rip: the next inserted disc is ripped without asking
 	while (!exit_requested) {
