@@ -36,6 +36,9 @@ VFile *vf_open(const char *path, const char *mode)
 	if (fat_path(path, fp, sizeof(fp)) < 0) {
 		f->std = fopen(path, mode);
 		if (!f->std) { free(f); return NULL; }
+		// the image is written in 2.4 MB blocks: unbuffered, or stdio splits them into tiny writes
+		// (very slow on USB drives)
+		if (mode[0] != 'r') setvbuf(f->std, NULL, _IONBF, 0);
 		return f;
 	}
 	BYTE m = !strcmp(mode, "rb") ? FA_READ : !strcmp(mode, "r+b") ? (FA_READ | FA_WRITE) : (FA_WRITE | FA_CREATE_ALWAYS);

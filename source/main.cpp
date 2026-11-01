@@ -5,6 +5,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <malloc.h>
 #include <time.h>
 #include <sys/time.h>
@@ -1806,6 +1807,22 @@ static void redump_download_screen()
 	tell(msg);
 }
 
+// Shows a system notification (top right) through webMAN: "Watch the screen at http://ip:8090/".
+static void notify_url(StrId fmt, const char *page)
+{
+	char ip[20], text[200], url[600];
+	remote_ip(ip, sizeof(ip));
+	snprintf(text, sizeof(text), T(fmt), ip, REMOTE_PORT);
+	(void)page;
+	size_t o = snprintf(url, sizeof(url), "/popup.ps3/");
+	for (const unsigned char *p = (const unsigned char *)text; *p && o + 4 < sizeof(url); p++) {
+		if (isalnum(*p) || strchr("-_.~/:", *p)) url[o++] = *p;
+		else o += snprintf(url + o, sizeof(url) - o, "%%%02X", *p);
+	}
+	url[o] = 0;
+	webman_get(url);
+}
+
 static void settings_screen()
 {
 	// edit locally; each change is applied and saved at once, O goes back
@@ -1869,11 +1886,6 @@ static void settings_screen()
 			snprintf(v, sizeof(v), r == row && r != 6 ? "‹ %s ›" : "%s", vals[r]);   // row 6 is an action
 			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 		}
-		if ((row == 7 && remote) || row == 8) {   // where to watch / where to set the webhook address
-			char help[160];
-			snprintf(help, sizeof(help), T(row == 7 ? STR_REMOTE_HELP : STR_WEBHOOK_HELP), ip, REMOTE_PORT);
-			ui_text(UI_SMALL, ui_w() / 2, top + VIS * lh - lh / 4 + ui_line(UI_SMALL) / 4, 0x9AD0A8, help, UI_CENTER);
-		}
 		const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "circle"};
 		const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
 		hint_bar(b, l, 3);
@@ -1913,8 +1925,10 @@ static void settings_screen()
 			} else if (row == 7) {
 				remote = !remote;
 				remote_set(remote);
+				if (remote) notify_url(STR_REMOTE_HELP, "");
 			} else if (row == 8) {
 				webhook_on = !webhook_on;
+				if (webhook_on) notify_url(STR_WEBHOOK_HELP, "webhook");
 			} else if (row == 9) {
 				check = (check + (d > 0 ? 1 : 2)) % 3;
 			}
@@ -2616,7 +2630,7 @@ int main(int argc, char *argv[])
 	{
 		static const RemoteHooks hooks = {status_json, get_webhook, set_webhook, test_webhook};
 		remote_init(&hooks);
-		if (g_remote) remote_set(1);
+		if (g_remote) { remote_set(1); notify_url(STR_REMOTE_HELP, ""); }
 	}
 	OUT_DIR = g_outdir;
 	{ struct stat gs; ui_guides = stat("/dev_hdd0/tmp/psxrip.guides", &gs) == 0; }
