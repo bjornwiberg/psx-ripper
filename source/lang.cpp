@@ -248,6 +248,8 @@ static const char *en[STR_COUNT] = {
 	"Events",
 	"Last rip: %s",
 	"Square repairs: only these %d sectors are read again (clean the disc first).",
+	"Skip re-reads",
+	"Skipping the re-reads – the rip keeps what it has, repair the rest later",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -492,6 +494,8 @@ static const char *sv[STR_COUNT] = {
 	"Händelser",
 	"Senaste rippningen: %s",
 	"Tryck □ Laga efter att skivan har rengjorts: bara de %d sektorerna läses om.",
+	"Hoppa över omläsning",
+	"Hoppar över omläsningen – rippen sparas som den är, laga resten senare",
 };
 
 static const char **table = en;

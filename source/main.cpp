@@ -263,6 +263,7 @@ struct Ctx {
 	uint8_t g_suspect_ok[MAX_SUSPECT];   // confirmed in the second pass
 	volatile uint32_t g_confirmed, g_changed;
 	volatile int g_abort, g_finished, g_result;
+	volatile int g_skip;           // square: leave the re-reads, keep what the rip has (repair later)
 	volatile uint32_t g_readerrs;
 	Md5 g_md5[MAX_TRACKS + 1];
 	char g_track_md5[MAX_TRACKS + 1][33];
@@ -372,6 +373,7 @@ static void ctx_init(int c)
 #define g_confirmed (CX.g_confirmed)
 #define g_changed (CX.g_changed)
 #define g_abort (CX.g_abort)
+#define g_skip (CX.g_skip)
 #define g_finished (CX.g_finished)
 #define g_result (CX.g_result)
 #define g_readerrs (CX.g_readerrs)
@@ -1532,7 +1534,7 @@ static int confirm_read(uint32_t lba, int need_edc, int max_reads, uint8_t *out)
 {
 	uint8_t (&prev)[SECT_Q] = CX.cr_prev;
 	int streak = 0;
-	for (int t = 0; t < max_reads && !g_abort; t++) {
+	for (int t = 0; t < max_reads && !g_abort && !g_skip; t++) {
 		g_rr_try = t + 1;
 		if (read_cd(lba, 1, g_sec) || (need_edc && check_sector(lba, g_sec))) { streak = 0; continue; }
 		if (streak && !memcmp(prev, g_sec, RAW_SIZE)) streak++;
@@ -1553,7 +1555,7 @@ static int verify_pass()
 	uint64_t t0 = now_ms();
 	int patched = 0, reads = g_retries * 3 + 3;
 	uint8_t (&sec)[RAW_SIZE] = CX.vp_sec;
-	for (uint32_t k = 0; k < g_nuv && !g_abort; ) {
+	for (uint32_t k = 0; k < g_nuv && !g_abort && !g_skip; ) {
 		uint32_t a = g_uv_lba[k], m = 1;   // sectors within one window of CHUNK, read as one run
 		while (k + m < g_nuv && g_uv_lba[k + m] - a < CHUNK) m++;
 		uint32_t span = g_uv_lba[k + m - 1] - a + 1;
@@ -1597,7 +1599,7 @@ static int second_pass()
 	int data1 = g_tracks[0].ctrl & 0x4, patched = 0, reads = g_retries * 3 + 3;
 	uint8_t (&sec)[RAW_SIZE] = CX.sp_sec;
 	time_t t0 = time(NULL);
-	for (uint32_t k = 0; k < total && !g_abort; k++) {
+	for (uint32_t k = 0; k < total && !g_abort && !g_skip; k++) {
 		int suspect = k >= g_nhard;
 		uint32_t lba = suspect ? g_suspect[k - g_nhard] : (g_hard[k] & 0x3FFFFFFF);
 		int edc_bad = !suspect && (g_hard[k] >> 31);
@@ -1633,8 +1635,7 @@ static int second_pass()
 	}
 	set_cd_speed(g_speed ? speed_x[g_speed] : 0);
 	logf("second pass: %d sector(s) written, %u of %u fixed sectors confirmed (%u changed), %ld s%s",
-	     patched, g_confirmed, g_nsuspect, g_changed, (long)(time(NULL) - t0), g_abort ? " (stopped with O)" : "");
-	g_abort = 0;   // O during the second pass keeps the image from the first pass
+	     patched, g_confirmed, g_nsuspect, g_changed, (long)(time(NULL) - t0), g_skip ? " (skipped with square)" : "");
 	return patched;
 }
 
@@ -3732,6 +3733,7 @@ static void draw_page(int c, int y)
 		// what it does: the phase, a re-read, the counts
 		char ph[160];
 		if (g_abort) snprintf(ph, sizeof(ph), "%s", T(STR_CANCELLING));
+		else if (g_skip && (g_phase == 1 || g_phase == 2)) snprintf(ph, sizeof(ph), "%s", T(STR_SKIPPING));
 		else if (g_phase == 3) snprintf(ph, sizeof(ph), "%s", T(STR_FINISHING));
 		else if (g_pass2_total) snprintf(ph, sizeof(ph), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
 		else snprintf(ph, sizeof(ph), T(STR_PROGRESS), pos, g_total);
@@ -3893,7 +3895,13 @@ static int home_screen()
 				if (w2) ui_hint(x, gy, "circle", T(STR_HINT_EXIT));   // O on a ripping card cancels its rip instead
 			}
 			// the bottom row: what the buttons do on the focused card
-			if (f.job) {
+			int rereads = 0;   // the rip is in its re-reads: square leaves them
+			if (f.job) { OnCard o(sel); rereads = (g_phase == 1 || g_phase == 2) && !g_skip && !g_abort; }
+			if (f.job && rereads) {
+				const char *b[] = {"square", "circle"};
+				const char *l[] = {T(STR_HINT_SKIP), T(STR_HINT_CANCEL_RIP)};
+				hint_bar(b, l, 2);
+			} else if (f.job) {
 				const char *b[] = {"circle"};
 				const char *l[] = {T(STR_HINT_CANCEL_RIP)};
 				hint_bar(b, l, 1);
@@ -3929,6 +3937,10 @@ static int home_screen()
 				pad_pressed();
 				g_redraw = 2;
 				continue;
+			}
+			if (p & B_SQUARE) {   // leave the re-reads: the rip finishes with what it has, the log lists the rest
+				OnCard o(sel);
+				if (g_phase == 1 || g_phase == 2) { g_skip = 1; logf("re-reads skipped (square)"); g_redraw = 2; }
 			}
 			p &= B_START;   // its own settings were taken when the rip started: not while it runs
 		}
@@ -4434,7 +4446,7 @@ static void rip_job_start(int c, int fresh)
 	k.job = 1;
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy from now on (status, the poll thread, deploy)
-	g_abort = 0; g_finished = 0;
+	g_abort = 0; g_finished = 0; g_skip = 0;
 	sys_ppu_thread_t t;
 	if (sysThreadCreate(&t, rip_job_thread, (void *)(long)(fresh | c << 8), 1000, 0x10000, 0, (char *)"psxjob")) {
 		k.job = 0; g_state = ST_HOME;
