@@ -236,6 +236,7 @@ static const char *en[STR_COUNT] = {
 	"Move",
 	"USB %d",
 	" and verified.",
+	"Already ripped here",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -468,6 +469,7 @@ static const char *sv[STR_COUNT] = {
 	"Flytta",
 	"USB %d",
 	" och verifierad.",
+	"Redan rippad hit",
 };
 
 static const char **table = en;

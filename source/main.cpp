@@ -2068,7 +2068,7 @@ static void target_name(const char *dir, char *out, size_t n)
 // drive is mounted by the PS3 as /dev_usbNNN, an exFAT drive is reached through FatFs).
 // dir = +1 forward, -1 back.
 // "Mål: Hårddisk · PSXISO/Croc 2 (Europe) [SLES_020.88].bin · 339 GB ledigt" (no file: just the folder)
-static void dest_line(const char *dir, const char *fname, char *out, size_t n)
+static void dest_line(const char *dir, const char *fname, char *out, size_t n, int maxw = 0, const char *wrap = "%s")
 {
 	int port;
 	uint64_t mb = 0;
@@ -2087,11 +2087,26 @@ static void dest_line(const char *dir, const char *fname, char *out, size_t n)
 		if (sscanf(dir, "/dev_usb%3d", &port) == 1) snprintf(label, sizeof(label), T(STR_DEST_USB), port);
 		else snprintf(label, sizeof(label), "%s", T(STR_DEST_HDD));
 	}
-	char path[300];
+	char path[300], line[420];
 	folder = folder ? folder + 1 : "";
 	if (fname && fname[0]) snprintf(path, sizeof(path), "%s/%s.bin", folder, fname);
 	else snprintf(path, sizeof(path), "%s", folder);
-	snprintf(out, n, T(STR_DEST_LINE), label, path, (unsigned)(mb / 1024));
+	snprintf(line, sizeof(line), T(STR_DEST_LINE), label, path, (unsigned)(mb / 1024));
+	snprintf(out, n, wrap, line);
+	// too wide: the file name gives way ("Croc 2 (Euro….bin"), the drive, folder and free space stay
+	if (maxw && fname && fname[0] && ui_text_width(UI_SMALL, out) > maxw) {
+		char f[200];
+		snprintf(f, sizeof(f), "%s", fname);
+		int l = (int)strlen(f);
+		while (l > 1) {
+			do l--; while (l > 0 && ((unsigned char)f[l] & 0xC0) == 0x80);   // back one UTF-8 character
+			f[l] = 0;
+			snprintf(path, sizeof(path), "%s/%s….bin", folder, f);
+			snprintf(line, sizeof(line), T(STR_DEST_LINE), label, path, (unsigned)(mb / 1024));
+			snprintf(out, n, wrap, line);
+			if (ui_text_width(UI_SMALL, out) <= maxw) break;
+		}
+	}
 }
 
 static void next_target(char *outdir, int dir)
@@ -3683,7 +3698,7 @@ static int draw_card(int c, int y, int focused, int single)
 			else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
 			const char *en = strrchr(k.exist, '/');
 			en = en ? en + 1 : k.exist;
-			const char *p1 = T(STR_ALREADY_HERE);
+			const char *p1 = T(k.repair_n ? STR_ALREADY_SHORT : STR_ALREADY_HERE);   // with errors: shorter, the count matters
 			if (strcmp(en, k.fname)) { snprintf(as, sizeof(as), T(STR_ALREADY_AS), en); p1 = as; }   // under another name
 			int w1 = ui_text_width(UI_SMALL, p1), w2 = ui_text_width(UI_SMALL, p2), x0 = single ? (ui_w() - w1 - w2) / 2 : left;
 			ui_text(UI_SMALL, x0, ly, 0x8FA8D8, p1);
@@ -3695,11 +3710,12 @@ static int draw_card(int c, int y, int focused, int single)
 		}
 		ly += ls;
 	}
-	char saving[400], v[420];
-	dest_line(k.dest[0] ? k.dest : HDD_DIR, known ? k.fname : "", saving, sizeof(saving));
-	snprintf(v, sizeof(v), focused && !k.job ? "‹ %s ›" : "%s", saving);   // ←→ chooses where this drive saves
-	// not ripping: the disc's ID and size sit on the same row on the right
-	ui_text_fit(UI_SMALL, ax, ly, focused ? 0xC8D0E0 : 0x8890A8, v, k.job ? maxw : lw, al);
+	// ←→ chooses where this drive saves; not ripping, the disc's ID and size sit on the same row on
+	// the right, so the line stops before them (the file name is shortened, never the free space)
+	char v[420];
+	int dw2 = k.job || single ? maxw : lw;
+	dest_line(k.dest[0] ? k.dest : HDD_DIR, known ? k.fname : "", v, sizeof(v), dw2, focused && !k.job ? "‹ %s ›" : "%s");
+	ui_text_fit(UI_SMALL, ax, ly, focused ? 0xC8D0E0 : 0x8890A8, v, dw2, al);
 	return h;
 }
 
