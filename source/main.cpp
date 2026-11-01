@@ -27,7 +27,8 @@
 #include "ui.h"
 #include "md5.h"
 #include "redump.h"
-#include "devstream.h"
+#include "remote.h"
+#include "webhook.h"
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
 // Output locations; the mount test redirects both so a mounted image is never overwritten
@@ -43,13 +44,16 @@ static int g_speed = 0;            // 0 = max, 1 = 8x, 2 = 4x, 3 = 2x
 static int g_eject = 1;            // eject the disc after a successful rip
 static int g_autostart = 0;        // rip an inserted disc without the confirmation
 static int g_redump = RD_OFF;      // verification against Redump: off, online or local copy
+static int g_remote = 0;           // remote view (web server on port 8090)
+static int g_webhook_on = 0;       // send webhooks
+static char g_webhook[512] = "";   // webhook address (http://...); may contain a secret id, never logged
 static const int speed_x[4] = {0, 8, 4, 2};
 
 static void cfg_load()
 {
 	FILE *f = fopen(CFG_PATH, "r");
 	if (!f) return;
-	char line[128];
+	char line[640];
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = 0;
 		if (!strncmp(line, "outdir=", 7) && line[7] == '/') snprintf(g_outdir, sizeof(g_outdir), "%s", line + 7);
@@ -58,6 +62,9 @@ static void cfg_load()
 		else if (!strncmp(line, "eject=", 6)) g_eject = atoi(line + 6) ? 1 : 0;
 		else if (!strncmp(line, "autostart=", 10)) g_autostart = atoi(line + 10) ? 1 : 0;
 		else if (!strncmp(line, "redump=", 7)) { int v = atoi(line + 7); if (v >= RD_OFF && v <= RD_LOCAL) g_redump = v; }
+		else if (!strncmp(line, "remote=", 7)) g_remote = atoi(line + 7) ? 1 : 0;
+		else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
+		else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
 	}
 	fclose(f);
 }
@@ -66,7 +73,8 @@ static void cfg_save()
 {
 	FILE *f = fopen(CFG_PATH, "w");
 	if (!f) return;
-	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\n", g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump);
+	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\n",
+	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook);
 	fclose(f);
 }
 
@@ -1229,6 +1237,8 @@ static void lookup_start()
 }
 
 // Compares the track MD5s of the finished rip with Redump. Fills `out` with the result line.
+static int g_rd_result = -3;            // last verification: 1 verified, 0 no match, -1 unchecked, -2 not found, -3 off
+static char g_rd_result_name[RD_NAME];
 static void redump_verify(char *out, size_t n)
 {
 	char name[RD_NAME] = "";
@@ -1262,6 +1272,8 @@ static void redump_verify(char *out, size_t n)
 	else if (r == -2) snprintf(out, n, "%s", T(STR_RD_NOTFOUND));
 	else snprintf(out, n, "%s", T(STR_RD_UNCHECKED));
 	logf("redump verify (%s) -> %d %s", g_redump == RD_LOCAL ? "local" : "online", r, name);
+	g_rd_result = r;
+	snprintf(g_rd_result_name, sizeof(g_rd_result_name), "%s", name);
 }
 
 static void identify_thread(void *arg)
@@ -1482,7 +1494,8 @@ static void settings_screen()
 	char outdir[64];
 	snprintf(outdir, sizeof(outdir), "%s", g_outdir);
 	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, redump = g_redump, row = 0;
-	const int NROWS = 7;
+	int remote = g_remote, webhook_on = g_webhook_on;
+	const int NROWS = 9;
 	char rdver[64] = "";
 	time_t rdwhen = 0;
 	int rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
@@ -1495,7 +1508,7 @@ static void settings_screen()
 		g_drawn = 2;
 		draw_backdrop();
 		ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_SETTINGS_TITLE), UI_CENTER);
-		char vals[7][96];
+		char vals[9][96];
 		char save_dir[64]; snprintf(save_dir, sizeof(save_dir), "%s", g_outdir);
 		snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
 		target_name(outdir, vals[0], sizeof(vals[0]));
@@ -1515,8 +1528,16 @@ static void settings_screen()
 		} else {
 			snprintf(vals[6], sizeof(vals[6]), "%s", T(STR_RD_MISSING));
 		}
-		const char *labels[7] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY)};
-		int top = ui_h() * 3 / 10, lh = ui_line(UI_BODY) * 2, left = ui_w() / 6, right = ui_w() * 5 / 6;
+		char ip[20];
+		remote_ip(ip, sizeof(ip));
+		if (remote) snprintf(vals[7], sizeof(vals[7]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
+		else snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_OFF));
+		if (!webhook_on) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
+		else if (!g_webhook[0]) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_WEBHOOK_NOURL));
+		else { char host[96]; webhook_host(g_webhook, host, sizeof(host)); snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON), host); }
+		const char *labels[9] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
+		                         T(STR_L_REMOTE), T(STR_L_WEBHOOK)};
+		int top = ui_h() * 2 / 9, lh = ui_line(UI_BODY) * 17 / 10, left = ui_w() / 6, right = ui_w() * 5 / 6;
 		for (int r = 0; r < NROWS; r++) {
 			int y = top + r * lh;
 			if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
@@ -1524,6 +1545,11 @@ static void settings_screen()
 			char v[128];
 			snprintf(v, sizeof(v), r == row && r != 6 ? "‹ %s ›" : "%s", vals[r]);   // row 6 is an action
 			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
+		}
+		if ((row == 7 && remote) || row == 8) {   // where to watch / where to set the webhook address
+			char help[160];
+			snprintf(help, sizeof(help), T(row == 7 ? STR_REMOTE_HELP : STR_WEBHOOK_HELP), ip, REMOTE_PORT);
+			ui_text(UI_SMALL, ui_w() / 2, top + NROWS * lh - lh / 4 + ui_line(UI_SMALL) / 4, 0x9AD0A8, help, UI_CENTER);
 		}
 		const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "circle"};
 		const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
@@ -1559,15 +1585,21 @@ static void settings_screen()
 				eject = !eject;
 			} else if (row == 4) {
 				autostart = !autostart;
-			} else {
+			} else if (row == 5) {
 				redump = (redump + (d > 0 ? 1 : 2)) % 3;
+			} else if (row == 7) {
+				remote = !remote;
+				remote_set(remote);
+			} else if (row == 8) {
+				webhook_on = !webhook_on;
 			}
 			// every change is applied and saved immediately
 			snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
-			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump;
+			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on;
 			OUT_DIR = g_outdir;
 			cfg_save();
-			logf("settings saved: outdir=%s retries=%d speed=%d eject=%d autostart=%d redump=%d", g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump);
+			logf("settings saved: outdir=%s retries=%d speed=%d eject=%d autostart=%d redump=%d remote=%d webhook=%d",
+			     g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on);
 		}
 		if (p & B_CIRCLE) return;
 	}
@@ -1704,6 +1736,93 @@ static int prepare_disc(int *err, int *code)
 	return 0;
 }
 
+// ---------------------------------------------------------------- remote view and webhooks
+enum { ST_HOME, ST_RIPPING };
+static volatile int g_state = ST_HOME;
+static char g_state_title[128], g_state_serial[16];
+static time_t g_rip_t0;
+
+static const char *rd_result_str()
+{
+	switch (g_rd_result) {
+	case 1: return "verified";
+	case 0: return "no_match";
+	case -1: return "unchecked";
+	case -2: return "not_found";
+	default: return "off";
+	}
+}
+
+// Fields shared by the status page and the webhooks (appended to an open JSON object).
+static void json_fields(char *js, size_t n)
+{
+	size_t o;
+	o = strlen(js); snprintf(js + o, n - o, "\"title\":"); json_str(js, n, g_state_title);
+	o = strlen(js); snprintf(js + o, n - o, ",\"serial\":"); json_str(js, n, g_state_serial);
+	o = strlen(js); snprintf(js + o, n - o, ",\"sectors_done\":%u,\"sectors_total\":%u,\"unreadable\":%u,\"fixed\":%u,\"bad\":%u",
+	                         g_readpos > g_done ? g_readpos : g_done, g_total, g_readerrs, g_recovered, g_badsect);
+	o = strlen(js); snprintf(js + o, n - o, ",\"redump\":\"%s\",\"redump_name\":", rd_result_str()); json_str(js, n, g_rd_result_name);
+}
+
+static int status_json(char *js, int n)
+{
+	uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
+	snprintf(js, n, "{\"state\":\"%s\",\"percent\":%u,", g_state == ST_RIPPING ? "ripping" : "idle",
+	         g_state == ST_RIPPING && g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
+	if (g_state != ST_RIPPING) {   // idle: describe the disc on the home screen
+		size_t o = strlen(js);
+		snprintf(js + o, n - o, "\"disc\":");
+		json_str(js, n, g_disc_state == DISC_READY ? g_disc_title : "");
+		o = strlen(js); snprintf(js + o, n - o, ",");
+	}
+	json_fields(js, n);
+	size_t o = strlen(js);
+	snprintf(js + o, n - o, "}");
+	return (int)strlen(js);
+}
+
+static void get_webhook(char *out, int n) { snprintf(out, n, "%s", g_webhook); }
+
+static void set_webhook(const char *url)
+{
+	snprintf(g_webhook, sizeof(g_webhook), "%s", url);
+	cfg_save();
+	char host[160];
+	webhook_host(g_webhook, host, sizeof(host));
+	logf("webhook address set (%s)", g_webhook[0] ? host : "none");
+	g_redraw = 2;
+}
+
+static void event_json(char *js, size_t n, const char *event)
+{
+	snprintf(js, n, "{\"event\":\"%s\",\"app\":\"PSX Ripper\",", event);
+	json_fields(js, n);
+	size_t o = strlen(js);
+	snprintf(js + o, n - o, ",\"seconds\":%ld,\"path\":", g_rip_t0 ? (long)(time(NULL) - g_rip_t0) : 0L);
+	char bin[300];
+	snprintf(bin, sizeof(bin), "%s.bin", g_base);
+	json_str(js, n, strcmp(event, "rip_finished") ? "" : bin);
+	o = strlen(js);
+	snprintf(js + o, n - o, "}");
+}
+
+static int test_webhook()
+{
+	char js[1024];
+	event_json(js, sizeof(js), "test");
+	int st = webhook_post(g_webhook, js);
+	logf("webhook test -> %d", st);
+	return st;
+}
+
+static void fire_event(const char *event)
+{
+	if (!g_webhook_on || !g_webhook[0]) return;
+	char js[1024];
+	event_json(js, sizeof(js), event);
+	webhook_send_async(g_webhook, js);
+}
+
 static int rip_disc_inner(int fresh, int autorip)
 {
 	char msg[768];
@@ -1721,6 +1840,12 @@ static int rip_disc_inner(int fresh, int autorip)
 	         name, g_serial[0] ? g_serial : T(STR_UNKNOWN), g_ntracks, mb, OUT_DIR);
 	if (!autorip && !ask_yesno(msg)) { sys_storage_close(g_fd); return 0; }
 
+	g_rd_result = -3; g_rd_result_name[0] = 0;
+	g_rip_t0 = time(NULL);
+	g_state = ST_RIPPING;
+	snprintf(g_state_title, sizeof(g_state_title), "%s", name);
+	snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
+	fire_event("rip_started");
 	mkdir(OUT_DIR, 0777);
 	g_done = 0; g_readpos = 0; g_total = g_leadout; g_abort = 0; g_finished = 0;
 
@@ -1778,6 +1903,8 @@ static int rip_disc_inner(int fresh, int autorip)
 	if (g_result) {
 		snprintf(msg, sizeof(msg), "%s.bin.part", g_base);
 		unlink(msg);
+		g_state = ST_HOME;
+		fire_event(g_result == 1 ? "rip_cancelled" : "rip_failed");
 		tell(g_result == 1 ? T(STR_ABORTED) : T(STR_CREATE_FAILED));
 		return 0;
 	}
@@ -1854,6 +1981,8 @@ static int rip_disc_inner(int fresh, int autorip)
 	         g_base, lcline, g_readerrs);
 	logf("done: %s errs=%u", g_base, g_readerrs);
 	snprintf(g_done_msg, sizeof(g_done_msg), "%s", msg);
+	g_state = ST_HOME;
+	fire_event("rip_finished");
 	return 1;
 }
 
@@ -1877,10 +2006,12 @@ int main(int argc, char *argv[])
 	g_sec = (uint8_t *)memalign(128, 4096);
 	lang_init();
 	netInitialize();
-#ifdef DEV_STREAM
-	{ struct stat ds; if (stat("/dev_hdd0/tmp/psxrip.stream", &ds) == 0) { devstream_start(); logf("dev stream on port 8090"); } }
-#endif
 	cfg_load();
+	{
+		static const RemoteHooks hooks = {status_json, get_webhook, set_webhook, test_webhook};
+		remote_init(&hooks);
+		if (g_remote) remote_set(1);
+	}
 	OUT_DIR = g_outdir;
 	{ struct stat gs; ui_guides = stat("/dev_hdd0/tmp/psxrip.guides", &gs) == 0; }
 #ifdef PRIVATE_SBI

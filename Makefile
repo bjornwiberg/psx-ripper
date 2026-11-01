@@ -33,10 +33,6 @@ CFLAGS		=	-O2 -Wall -mcpu=cell $(MACHDEP) $(INCLUDE)
 ifeq ($(PRIVATE_SBI),1)
 CFLAGS	+=	-DPRIVATE_SBI
 endif
-# DEV=1: development build with the screen streamer (flag file /dev_hdd0/tmp/psxrip.stream)
-ifeq ($(DEV),1)
-CFLAGS	+=	-DDEV_STREAM
-endif
 CXXFLAGS	=	$(CFLAGS)
 
 LDFLAGS		=	$(MACHDEP) -Wl,-Map,$(notdir $@).map
@@ -44,7 +40,7 @@ LDFLAGS		=	$(MACHDEP) -Wl,-Map,$(notdir $@).map
 #---------------------------------------------------------------------------------
 # any extra libraries we wish to link with the project
 #---------------------------------------------------------------------------------
-LIBS	:=	-lz -lrsx -lgcm_sys -lio -lsysutil -lnet -lsysmodule -lrt -llv2 -lm
+LIBS	:=	-lz -lrsx -lgcm_sys -lio -lsysutil -lnetctl -lnet -lsysmodule -lrt -llv2 -lm
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing

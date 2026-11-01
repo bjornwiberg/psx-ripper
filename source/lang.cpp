@@ -83,6 +83,19 @@ static const char *en[STR_COUNT] = {
 	"%sUnreadable so far: %u · fixed: %u",
 	"Cancelling… waiting for the drive to finish",
 	"Second pass at low speed (%u of %u): ",
+	"Remote view",
+	"Webhook",
+	"On · %s:%d",
+	"On · %s",
+	"On · no address yet",
+	"Watch the screen at http://%s:%d/",
+	"Set the address at http://%s:%d/webhook (remote view must be on)",
+	"Address that receives a POST with JSON when a rip starts, finishes, is cancelled or fails. Only http:// is supported, for example a Home Assistant webhook.",
+	"Save",
+	"Send test",
+	"Test sent: HTTP %d",
+	"Saved.",
+	"Back to the screen",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -162,6 +175,19 @@ static const char *sv[STR_COUNT] = {
 	"%sOläsbara hittills: %u · lagade: %u",
 	"Avbryter … väntar på att läsaren blir klar",
 	"Andra genomgång, låg hastighet (%u av %u): ",
+	"Fjärrvisning",
+	"Webhook",
+	"På · %s:%d",
+	"På · %s",
+	"På · ingen adress än",
+	"Följ skärmen på http://%s:%d/",
+	"Ange adressen på http://%s:%d/webhook (fjärrvisning måste vara på)",
+	"Adress som får en POST med JSON när en rippning startar, blir klar, avbryts eller misslyckas. Bara http:// stöds, till exempel en webhook i Home Assistant.",
+	"Spara",
+	"Skicka test",
+	"Test skickat: HTTP %d",
+	"Sparat.",
+	"Tillbaka till skärmen",
 };
 
 static const char **table = en;
