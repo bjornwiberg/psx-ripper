@@ -159,6 +159,7 @@ static const char *en[STR_COUNT] = {
 	"Not identified",
 	"The app was started (with the disc in the drive, if any)",
 	"App started",
+	"Webhook · %d events",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -314,6 +315,7 @@ static const char *sv[STR_COUNT] = {
 	"Ej identifierad",
 	"Appen startades (med skivan som sitter i, om någon)",
 	"Appstart",
+	"Webhook · %d händelser",
 };
 
 static const char **table = en;

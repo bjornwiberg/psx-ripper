@@ -2093,13 +2093,12 @@ static int home_screen()
 				const char *msg = st == DISC_READING ? T(STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
 				ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, msg, UI_CENTER);
 			}
-			if (g_webhook_on && g_webhook[0]) {   // which events go where
-				char host[96], evs[200] = "", wl[320];
-				webhook_host(g_webhook, host, sizeof(host));
-				for (int i = 0; i < WH_COUNT; i++)
-					if ((g_webhook_mask >> i) & 1) snprintf(evs + strlen(evs), sizeof(evs) - strlen(evs), "%s%s", evs[0] ? ", " : "", T(wh_short(i)));
-				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK), host, evs[0] ? evs : "-");
-				ui_text(UI_SMALL, ui_w() / 2, ui_h() - ui_h() / 8 - ui_line(UI_SMALL) * 2, 0x8890A8, wl, UI_CENTER);
+			if (g_webhook_on && g_webhook[0]) {   // just a hint that webhooks are on; details in the settings
+				int ne = 0;
+				for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
+				char wl[64];
+				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
+				ui_text(UI_SMALL, ui_w() / 2, ui_h() - ui_h() / 8 - ui_line(UI_SMALL) * 2, 0x6870A0, wl, UI_CENTER);
 			}
 			if (st == DISC_READY && g_repair_n) {
 				char rl[128];
