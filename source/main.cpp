@@ -3129,7 +3129,7 @@ static void filename_screen()
 			y += ls * 2;
 			ui_text_fit(UI_SMALL, L, y, 0x8FA8D8, T(STR_FN_NOTE), R - L);
 			const char *b[] = {"leftright", "cross", "square", "triangle", "circle"};
-			const char *l[] = {T(STR_HINT_PICK_PART), T(STR_HINT_ADD), T(STR_HINT_DEL_LAST), T(STR_HINT_TYPE), T(STR_HINT_SAVE)};
+			const char *l[] = {T(STR_HINT_PICK_PART), T(STR_HINT_ADD), T(STR_HINT_DEL_LAST), T(STR_HINT_TYPE), T(STR_HINT_BACK)};
 			hint_bar(b, l, 5);
 		}
 		flip_frame();
@@ -3148,8 +3148,14 @@ static void filename_screen()
 			if (osk_input(T(STR_FN_OSK_Q), e, sizeof(e))) snprintf(pat, sizeof(pat), "%s", e);
 			pad_pressed();
 		}
-		if (p & B_CIRCLE) {   // save: an empty pattern goes back to the first ready-made one
-			snprintf(g_name_pat, sizeof(g_name_pat), "%s", pat[0] ? pat : FN_PRESETS[0]);
+		if (p & B_CIRCLE) {   // back; a changed pattern is saved only when the question says yes
+			const char *np = pat[0] ? pat : FN_PRESETS[0];   // an empty pattern is the first ready-made one
+			if (!strcmp(np, g_name_pat)) return;
+			int a = own_dialog(T(STR_FN_SAVE_Q), 1);
+			pad_pressed();
+			g_redraw = 2;
+			if (a != 1) return;   // no: the pattern stays as it was
+			snprintf(g_name_pat, sizeof(g_name_pat), "%s", np);
 			cfg_save();
 			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // the cards show the new names
 			logf("file name pattern: %s", g_name_pat);
