@@ -30,6 +30,7 @@
 #include "redump.h"
 #include "remote.h"
 #include "webhook.h"
+#include "vfs.h"
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
 // Output locations; the mount test redirects both so a mounted image is never overwritten
@@ -703,17 +704,17 @@ static void verify_lc_candidates(uint8_t *tmp)
 
 static int write_sbi(const char *path)
 {
-	FILE *f = fopen(path, "wb");
+	VFile *f = vf_open(path, "wb");
 	if (!f) return -1;
-	fwrite("SBI\0", 1, 4, f);
+	vf_write(f, "SBI\0", 4);
 	for (int i = 0; i < g_nlc; i++) {
 		uint8_t rec[14];
 		lba_to_msf(g_lc[i].lba + 150, rec);
 		rec[3] = 0x01;                   // full 10-byte Q follows
 		memcpy(rec + 4, g_lc[i].q, 10);
-		fwrite(rec, 1, 14, f);
+		vf_write(f, rec, 14);
 	}
-	fclose(f);
+	vf_close(f);
 	return 0;
 }
 
@@ -787,7 +788,7 @@ static uint8_t *g_bufs[2];
 static volatile uint32_t g_buf_len[2];   // sectors in buffer, 0 = empty
 static volatile uint32_t g_buf_end[2];   // lba after the last sector in buffer
 static volatile int g_reader_done = 0, g_write_failed = 0;
-static FILE *g_out;
+static VFile *g_out;
 
 // Sector check (data track 1): sync pattern, header address and EDC. The drive can hand out a
 // sector with uncorrected errors and still report success, so the reader re-reads such sectors.
@@ -843,7 +844,7 @@ static void writer_thread(void *arg)
 		if (!g_buf_len[k]) break;   // reader done and nothing left
 		__sync_synchronize();
 		uint32_t n = g_buf_len[k];
-		if (fwrite(g_bufs[k], RAW_SIZE, n, g_out) != n) g_write_failed = 1;
+		if (vf_write(g_out, g_bufs[k], (size_t)RAW_SIZE * n) != (size_t)RAW_SIZE * n) g_write_failed = 1;
 		// feed each sector range to the MD5 of the track it belongs to
 		uint32_t first = g_buf_end[k] - n;
 		for (uint32_t i = 0; i < n;) {
@@ -891,7 +892,7 @@ static int second_pass()
 			ok = read_cd(lba, 1, g_sec) == 0 && !(data1 && lba < t1_end && check_sector(lba, g_sec));
 		}
 		g_rr_max = 0;
-		if (ok && fseek(g_out, (long)lba * RAW_SIZE, SEEK_SET) == 0 && fwrite(g_sec, RAW_SIZE, 1, g_out) == 1) {
+		if (ok && vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, g_sec, RAW_SIZE) == RAW_SIZE) {
 			fixed++;
 			if (edc_bad) g_badsect--; else g_readerrs--;
 			g_recovered++;
@@ -908,7 +909,7 @@ static int second_pass()
 // Recomputes the per-track MD5s from the finished image (after the second pass patched it).
 static void md5_from_file(const char *path)
 {
-	FILE *f = fopen(path, "rb");
+	VFile *f = vf_open(path, "rb");
 	if (!f) return;
 	uint8_t *b = (uint8_t *)malloc(256 * RAW_SIZE);
 	uint32_t lba = 0;
@@ -916,7 +917,7 @@ static void md5_from_file(const char *path)
 	md5_init(&g_md5[0]);
 	while (b && lba < g_leadout) {
 		uint32_t n = g_leadout - lba < 256 ? g_leadout - lba : 256;
-		if (fread(b, RAW_SIZE, n, f) != n) break;
+		if (vf_read(f, b, (size_t)RAW_SIZE * n) != (size_t)RAW_SIZE * n) break;
 		for (uint32_t i = 0; i < n;) {
 			while (t + 1 < g_ntracks && lba + i >= g_tstart[t + 1]) {
 				md5_final(&g_md5[t], g_track_md5bin[t]);
@@ -931,7 +932,7 @@ static void md5_from_file(const char *path)
 	}
 	while (t < g_ntracks) { md5_final(&g_md5[t], g_track_md5bin[t]); if (++t < g_ntracks) md5_init(&g_md5[t]); }
 	free(b);
-	fclose(f);
+	vf_close(f);
 	logf("md5 recomputed from %s", path);
 }
 
@@ -939,9 +940,8 @@ static void rip_thread(void *arg)
 {
 	char path[300];
 	snprintf(path, sizeof(path), "%s.bin.part", g_base);   // renamed to .bin when complete
-	g_out = fopen(path, "wb");
+	g_out = vf_open(path, "wb");
 	if (!g_out) { logf("cannot create %s", path); g_result = -1; g_finished = 1; sysThreadExit(0); }
-	setvbuf(g_out, NULL, _IONBF, 0);   // we always write whole 2.4 MB blocks
 
 	g_bufs[0] = (uint8_t *)memalign(128, CHUNK * SECT_Q);
 	g_bufs[1] = (uint8_t *)memalign(128, CHUNK * SECT_Q);
@@ -1075,7 +1075,7 @@ static void rip_thread(void *arg)
 	sysThreadJoin(wtid, &rv);
 	if (g_er_valid) er_set_retries(-1);   // the drive's own retries back for the second pass
 	int patched = second_pass();
-	fclose(g_out);
+	vf_close(g_out);
 	if (patched) md5_from_file(path);   // the streamed MD5s no longer match the patched file
 	for (int t = 0; t < g_ntracks; t++) {
 		if (!patched) md5_final(&g_md5[t], g_track_md5bin[t]);
@@ -1096,20 +1096,20 @@ static void write_cue(const char *binname)
 {
 	char path[300];
 	snprintf(path, sizeof(path), "%s.cue", g_base);
-	FILE *f = fopen(path, "wb");
+	VFile *f = vf_open(path, "wb");
 	if (!f) return;
-	fprintf(f, "FILE \"%s\" BINARY\r\n", binname);
+	vf_printf(f, "FILE \"%s\" BINARY\r\n", binname);
 	for (int t = 0; t < g_ntracks; t++) {
 		int audio = !(g_tracks[t].ctrl & 0x4);
-		fprintf(f, "  TRACK %02d %s\r\n", g_tracks[t].num, audio ? "AUDIO" : "MODE2/2352");
+		vf_printf(f, "  TRACK %02d %s\r\n", g_tracks[t].num, audio ? "AUDIO" : "MODE2/2352");
 		uint32_t l = g_tracks[t].lba;
 		if (t > 0 && g_tstart[t] < l) {
 			uint32_t p = g_tstart[t];   // pregap, from the Q subchannel
-			fprintf(f, "    INDEX 00 %02u:%02u:%02u\r\n", p / 4500, (p / 75) % 60, p % 75);
+			vf_printf(f, "    INDEX 00 %02u:%02u:%02u\r\n", p / 4500, (p / 75) % 60, p % 75);
 		}
-		fprintf(f, "    INDEX 01 %02u:%02u:%02u\r\n", l / 4500, (l / 75) % 60, l % 75);
+		vf_printf(f, "    INDEX 01 %02u:%02u:%02u\r\n", l / 4500, (l / 75) % 60, l % 75);
 	}
-	fclose(f);
+	vf_close(f);
 }
 
 static void sanitize(char *s)
@@ -1251,13 +1251,18 @@ static void target_name(const char *dir, char *out, size_t n)
 {
 	int port;
 	if (sscanf(dir, "/dev_usb%3d", &port) == 1) snprintf(out, n, T(STR_TARGET_USB), port, dir);
+	else if (sscanf(dir, "exfat%1d:", &port) == 1) {
+		uint64_t mb = 0;
+		vf_free_mb(dir, &mb);
+		snprintf(out, n, T(STR_TARGET_EXFAT), port, (unsigned)(mb / 1024));
+	}
 	else snprintf(out, n, T(STR_TARGET_HDD), dir);
 }
 
 // Next available destination after the current one: hdd0, then each connected USB device.
 static void next_target()
 {
-	char cands[9][32];
+	char cands[17][32];
 	int nc = 0;
 	snprintf(cands[nc++], 32, "/dev_hdd0/PSXISO");
 	for (int i = 0; i < 8; i++) {
@@ -1266,6 +1271,10 @@ static void next_target()
 		struct stat st;
 		if (stat(dev, &st) == 0) snprintf(cands[nc++], 32, "%s/PSXISO", dev);
 	}
+	// drives the PS3 does not mount (exFAT) are reached through FatFs
+	VfVolume vols[8];
+	int nv = vf_scan(vols, 8);
+	for (int i = 0; i < nv && i < 8; i++) snprintf(cands[nc++], 32, "%s/PSXISO", vols[i].root);
 	int cur = 0;
 	for (int i = 0; i < nc; i++) if (!strcmp(cands[i], g_outdir)) cur = i;
 	snprintf(g_outdir, sizeof(g_outdir), "%s", cands[(cur + 1) % nc]);
@@ -1960,7 +1969,8 @@ static int rip_disc_inner(int fresh, int autorip)
 	snprintf(g_state_title, sizeof(g_state_title), "%s", name);
 	snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
 	fire_event("rip_started");
-	mkdir(OUT_DIR, 0777);
+	if (!strncmp(OUT_DIR, "exfat", 5)) { VfVolume v[8]; vf_scan(v, 8); }   // (re)mount exFAT drives
+	if (vf_mkdir(OUT_DIR) && !vf_exists(OUT_DIR)) logf("cannot create %s", OUT_DIR);
 	g_done = 0; g_readpos = 0; g_total = g_leadout; g_abort = 0; g_finished = 0;
 
 	{
@@ -2016,7 +2026,7 @@ static int rip_disc_inner(int fresh, int autorip)
 
 	if (g_result) {
 		snprintf(msg, sizeof(msg), "%s.bin.part", g_base);
-		unlink(msg);
+		vf_unlink(msg);
 		g_state = ST_HOME;
 		fire_event(g_result == 1 ? "rip_cancelled" : "rip_failed");
 		tell(g_result == 1 ? T(STR_ABORTED) : T(STR_CREATE_FAILED));
@@ -2027,8 +2037,8 @@ static int rip_disc_inner(int fresh, int autorip)
 		char part[300], bin[300];
 		snprintf(part, sizeof(part), "%s.bin.part", g_base);
 		snprintf(bin, sizeof(bin), "%s.bin", g_base);
-		unlink(bin);
-		if (rename(part, bin)) logf("rename %s failed", part);
+		vf_unlink(bin);
+		if (vf_rename(part, bin)) logf("rename %s failed", part);
 	}
 	const char *slash = strrchr(g_base, '/');
 	char binname[256];
@@ -2037,10 +2047,10 @@ static int rip_disc_inner(int fresh, int autorip)
 	{
 		char mpath[300];
 		snprintf(mpath, sizeof(mpath), "%s.md5", g_base);
-		FILE *mf = fopen(mpath, "w");
+		VFile *mf = vf_open(mpath, "wb");
 		if (mf) {
-			for (int t = 0; t < g_ntracks; t++) fprintf(mf, "%s  track %02d\n", g_track_md5[t], g_tracks[t].num);
-			fclose(mf);
+			for (int t = 0; t < g_ntracks; t++) vf_printf(mf, "%s  track %02d\n", g_track_md5[t], g_tracks[t].num);
+			vf_close(mf);
 		}
 	}
 
@@ -2122,6 +2132,11 @@ int main(int argc, char *argv[])
 	lang_init();
 	netInitialize();
 	cfg_load();
+	{
+		VfVolume v[8];
+		int nv = vf_scan(v, 8);
+		for (int i = 0; i < nv && i < 8; i++) logf("exFAT drive on USB port %d (%llu MB free)", v[i].port, (unsigned long long)v[i].free_mb);
+	}
 	{
 		static const RemoteHooks hooks = {status_json, get_webhook, set_webhook, test_webhook};
 		remote_init(&hooks);

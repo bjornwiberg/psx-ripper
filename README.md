@@ -129,6 +129,15 @@ the disc in your drive; PSX Ripper does not ship or download `.sbi` files.
 Verify your rips against [Redump](http://redump.org) (webMAN can compute MD5 with
 `/md5.ps3<path>`).
 
+## Ideas
+
+- **USB DVD drives in parallel** (for example two Apple SuperDrives next to the internal drive,
+  three discs at once). The PS3 system does not use USB optical drives, but PSL1GHT's USB driver
+  API (`usbd`) lets an app drive such a device itself: USB Mass Storage bulk-only transport and
+  the same SCSI READ CD (0xBE) the internal drive uses. A SuperDrive needs its vendor unlock
+  command first. To find out: whether the system claims the drive before the app, and `usbd`
+  bulk transfer limits. Each drive would get its own reader/writer threads and progress bar.
+
 ## Building
 
 The build runs in Docker with a prebuilt PSL1GHT toolchain:

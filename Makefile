@@ -17,9 +17,9 @@ include $(PSL1GHT)/ppu_rules
 #---------------------------------------------------------------------------------
 TARGET		:=	psxripper
 BUILD		:=	build
-SOURCES		:=	source
+SOURCES		:=	source fatfs
 DATA		:=
-INCLUDES	:=	include
+INCLUDES	:=	include fatfs
 
 TITLE		:=	PSX Ripper
 ICON0		:=	$(CURDIR)/pkgfiles/ICON0.PNG

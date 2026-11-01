@@ -46,6 +46,32 @@ static inline int sys_storage_read(int fd, uint32_t start, uint32_t count, uint8
 	return_to_user_prog(int);
 }
 
+static inline int sys_storage_write(int fd, uint32_t start, uint32_t count, const uint8_t *buf, uint32_t *nwritten)
+{
+	lv2syscall7(603, fd, 0, start, count, (uint64_t)buf, (uint64_t)nwritten, 0);
+	return_to_user_prog(int);
+}
+
+// Layout of the device info returned by syscall 609 (from libntfs_ext/sacd-ripper).
+struct storage_device_info {
+	uint8_t  name[7];
+	uint8_t  unknown01;
+	uint32_t unknown02;
+	uint32_t zero01;
+	uint32_t unknown03;
+	uint32_t unknown04;
+	uint8_t  zero02[16];
+	uint64_t total_sectors;
+	uint32_t sector_size;
+	uint32_t unknown05;
+	uint8_t  writable;
+	uint8_t  unknown06[3];
+	uint32_t unknown07;
+} __attribute__((packed));
+
+// USB mass storage devices: port 0-5 are ...0A-...0F, 6 and 7 follow after a gap.
+static inline uint64_t usb_device_id(int port) { return 0x010300000000000AULL + port + (port >= 6 ? 0xF : 0); }
+
 static inline int sys_storage_get_device_info(uint64_t device, uint8_t *info)
 {
 	lv2syscall2(609, device, (uint64_t)info);
