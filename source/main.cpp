@@ -106,7 +106,8 @@ struct Card {
 	char outdir[64];                  // chosen destination
 	char dest[64];                    // used: the chosen one, or the hard disk while it is out
 	int retries, speed, eject, autostart, check;   // the drive's settings
-	volatile int job;                 // a rip runs on this card (its own thread)
+	volatile int job;                 // a rip, check or repair runs on this card (its own thread)
+	int repairing;                    // that job is a repair: progress is the re-read sectors
 	char res[200];                    // last rip: one line, coloured res_col
 	uint32_t res_col;
 	int res_failed;                   // it was cancelled or failed: an earlier rip there is untouched
@@ -3694,7 +3695,8 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		if (k.job) {
 			OnCard o(c);
 			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
-			snprintf(stt[i], sizeof(stt[0]), "%u %%", g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
+			if (k.repairing && g_pass2_total) snprintf(stt[i], sizeof(stt[0]), "%u %%", (unsigned)((uint64_t)g_pass2_done * 100 / g_pass2_total));
+			else snprintf(stt[i], sizeof(stt[0]), "%u %%", g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
 			scol[i] = 0xC8E05A;
 		} else if (k.res[0] && (k.state == DISC_READY || k.state == DISC_NONE)) {
 			snprintf(stt[i], sizeof(stt[0]), "%s", T(k.res_failed ? STR_TAB_FAILED : STR_TAB_DONE));
@@ -3727,6 +3729,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 			OnCard o(list[i]);
 			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
 			int bw = g_total ? (int)((uint64_t)w[i] * (pos > g_total ? g_total : pos) / g_total) : 0;
+			if (g_cards[list[i]].repairing) bw = g_pass2_total ? (int)((uint64_t)w[i] * g_pass2_done / g_pass2_total) : 0;
 			int bh = ui_line(UI_SMALL) / 5;   // subtle: about 6 px at 1080p
 			ui_rect(x, y + th - bh, w[i], bh, 0x40FFFFFF);
 			ui_rect(x, y + th - bh, bw, bh, 0xFFC8E05A);
@@ -3795,6 +3798,7 @@ static void draw_page(int c, int y)
 		OnCard o(c);
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done, tot = g_total ? g_total : 1;
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / tot);
+		if (k.repairing) pct = g_pass2_total ? (uint32_t)((uint64_t)g_pass2_done * 100 / g_pass2_total) : 0;   // the re-reads
 		if (pct > 100) pct = 100;
 		int bh = ls * 2 / 3;
 		ui_rect(L, y, R - L, bh, 0x50FFFFFF);
@@ -3896,6 +3900,7 @@ static void draw_page(int c, int y)
 
 static void rip_job_start(int c, int fresh);
 static void check_job_start(int c);
+static void repair_job_start(int c);
 
 
 // Home screen: a card per drive. Up/down picks a card; left/right its destination; X, square and
@@ -4084,8 +4089,9 @@ static int home_screen()
 			int shown_prev = g_prev_rip;
 			prev_rip_check();
 			if (g_prev_rip != shown_prev || !g_repair_n) { g_redraw = 2; continue; }
-			if (any_ripping()) { own_dialog(T(STR_REPAIR_WAIT), 0); g_redraw = 2; continue; }   // a repair takes the screen
-			return 3;
+			repair_job_start(sel);   // on its tab, like a rip; the other drives go on
+			g_redraw = 2;
+			continue;
 		}
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
 		if (p & B_SELECT) {   // this drive's settings
@@ -4729,18 +4735,48 @@ static void repair_thread(void *arg)
 static int repair_disc_inner();
 static int repair_disc()
 {
-	g_repairing = 1;
 	int r = repair_disc_inner();
-	lv1_storage_unpatch();   // whatever happened
-	g_repairing = 0;
+	if (g_use == SRC_BD) lv1_storage_unpatch();   // whatever happened
 	return r;
+}
+
+// A repair in the background, for one card, like a rip.
+static void repair_job_thread(void *arg)
+{
+	t_card = (int)(long)arg;
+	Card &k = g_cards[t_card];
+	logf("start repair");
+	repair_disc();
+	g_state = ST_HOME;
+	k.state = DISC_NONE;   // identify again: the log changed
+	k.tried = 0;
+	__sync_synchronize();
+	k.job = 0;
+	k.repairing = 0;
+	g_redraw = 2;
+	sysThreadExit(0);
+}
+
+static void repair_job_start(int c)
+{
+	Card &k = g_cards[c];
+	if (k.job) return;
+	k.job = 1;
+	k.repairing = 1;
+	k.res[0] = 0;
+	k.eta_t0 = 0;
+	OnCard o(c);
+	g_state = ST_RIPPING;   // busy (status, the poll thread, deploy)
+	g_abort = 0; g_finished = 0; g_skip = 0;
+	sys_ppu_thread_t t;
+	if (sysThreadCreate(&t, repair_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxrepairjob")) { k.job = 0; k.repairing = 0; g_state = ST_HOME; }
 }
 
 static int repair_disc_inner()
 {
 	while (g_ident_busy) usleep(10000);
 	int err = 0, code = 0;
-	if (prepare_disc(&err, &code)) { lv1_storage_unpatch(); return 0; }
+	if (prepare_disc(&err, &code)) { if (g_use == SRC_BD) lv1_storage_unpatch(); return 0; }
 	if (g_cards[cur_card()].exist[0]) snprintf(g_base, sizeof(g_base), "%s", g_cards[cur_card()].exist);   // maybe another name
 	char path[320];
 	snprintf(path, sizeof(path), "%s.log", g_base);
@@ -4751,12 +4787,19 @@ static int repair_disc_inner()
 	buf[n > 0 ? n : 0] = 0;
 	snprintf(path, sizeof(path), "%s.bin", g_base);
 	g_out = vf_open(path, "r+b");
-	if (!g_out || !n) { if (g_out) vf_close(g_out); sys_storage_close(g_fd); lv1_storage_unpatch(); tell(T(STR_CREATE_FAILED)); return 0; }
+	if (!g_out || !n) {
+		if (g_out) vf_close(g_out);
+		sys_storage_close(g_fd);
+		if (g_use == SRC_BD) lv1_storage_unpatch();
+		Card &k = g_cards[cur_card()];
+		snprintf(k.res, sizeof(k.res), "%s", T(STR_CREATE_FAILED)); k.res_col = 0xFF8A80; k.res_failed = 1;
+		return 0;
+	}
 	if (!riplog_open_count()) {
 		// nothing listed: the previous rip stands as it is
 		vf_close(g_out);
 		sys_storage_close(g_fd);
-		lv1_storage_unpatch();
+		if (g_use == SRC_BD) lv1_storage_unpatch();
 		g_nres = 0;
 		snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", g_name, g_serial);
 		snprintf(g_res_path, sizeof(g_res_path), "%s.bin", g_base);
@@ -4816,35 +4859,17 @@ static int repair_disc_inner()
 	int check = g_check; g_check = CHECK_BITPERFECT;   // the repair always confirms
 	sys_ppu_thread_t tid;
 	sysThreadCreate(&tid, repair_thread, (void *)(long)cur_card(), 1000, 0x10000, THREAD_JOINABLE, (char *)"psxrepair");
-	char title[256];
-	snprintf(title, sizeof(title), T(STR_REPAIRING), g_name, g_serial);
-	pad_pressed();
-	uint32_t shown = ~0u; int shown_try = -1, shown_abort = 0, shown_ev = -1;
 	g_nev = 0;
-	Eta eta;
-	eta_start(&eta);
-	uint64_t shown_ms = 0;
-	while (!g_finished) {
-		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
-		uint32_t tot = g_pass2_total ? g_pass2_total : 1, done = g_pass2_done;
-		int rtry = g_rr_max ? g_rr_try : 0;
-		if (done != shown || rtry != shown_try || g_abort != shown_abort || g_ev_seq != shown_ev || now_ms() - shown_ms >= 1000) {
-			shown_ev = g_ev_seq; shown_ms = now_ms();
-			char pm[96], note[200] = "", tl[96];
-			eta_line(&eta, done, g_pass2_total, tl, sizeof(tl));
-			snprintf(pm, sizeof(pm), T(STR_PROGRESS), done, g_pass2_total);
-			if (g_rr_max) snprintf(note, sizeof(note), T(STR_REREAD), g_rr_lba, rtry, g_rr_max);
-			progress_draw(title, pm, (uint32_t)((uint64_t)done * 100 / tot), note, g_abort, tl);
-			shown = done; shown_try = rtry; shown_abort = g_abort;
-		}
-		flip_frame();
+	while (!g_finished) {   // the drive's tab shows the progress; this thread just waits
+		if (exit_requested) g_abort = 1;
+		usleep(100 * 1000);
 	}
 	u64 rv;
 	sysThreadJoin(tid, &rv);
 	g_check = check;
 	if (g_eject) { uint8_t cdb[12] = {0x1B, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0, 0}; atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO); }
 	sys_storage_close(g_fd);
-	lv1_storage_unpatch();
+	if (g_use == SRC_BD) lv1_storage_unpatch();
 	for (int t = 0; t < g_ntracks; t++) md5_hex(g_track_md5bin[t], g_track_md5[t]);   // fresh when patched
 	char rdinfo[RD_NAME + 80] = "";
 	if (g_redump != RD_OFF) redump_verify(rdinfo, sizeof(rdinfo));
@@ -4864,6 +4889,12 @@ static int repair_disc_inner()
 	}
 	write_riplog();
 	logf("repair done: %u recovered, %u changed, %u unreadable, %u bad", g_recovered, g_changed, g_readerrs, g_badsect);
+	{   // the tab: how the repair went
+		Card &k = g_cards[cur_card()];
+		snprintf(k.res, sizeof(k.res), T(STR_REPAIRED), g_recovered + g_changed, g_pass2_total);
+		k.res_col = g_readerrs || g_badsect ? 0xF0C060 : 0x7CE0A0;
+		k.res_failed = 0;
+	}
 	g_state = ST_HOME;
 	fire_event("repair_finished");
 	g_repair_n = 0;
