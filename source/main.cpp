@@ -1352,18 +1352,43 @@ static int webman_get(const char *path)
 	sa.sin_family = AF_INET;
 	sa.sin_port = htons(80);
 	sa.sin_addr.s_addr = htonl(0x7F000001);
+	// short socket timeouts and an overall limit: a busy or hung webMAN must never freeze the app
+	struct timeval tv = {1, 0};
+	setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+	setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 	int ret = -1;
 	if (connect(sock, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
-		char req[256];
+		char req[600];
 		int n = snprintf(req, sizeof(req), "GET %s HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n", path);
 		send(sock, req, n, 0);
 		char tmp[256];
-		while (recv(sock, tmp, sizeof(tmp), 0) > 0) {}
+		time_t t0 = time(NULL);
+		for (;;) {
+			int r = recv(sock, tmp, sizeof(tmp), 0);
+			if (r == 0) break;
+			if (r < 0 && time(NULL) - t0 >= 3) { logf("webMAN %s: no answer within 3 s", path); break; }
+			if (r < 0) usleep(20000);
+		}
 		ret = 0;
 	}
 	close(sock);
 	logf("webMAN %s -> %s", path, ret ? "not reachable" : "ok");
 	return ret;
+}
+
+// webMAN request from a background thread (notifications): the caller never waits for it.
+static void webman_thread(void *arg)
+{
+	webman_get((const char *)arg);
+	free(arg);
+	sysThreadExit(0);
+}
+
+static void webman_get_async(const char *path)
+{
+	char *p = strdup(path);
+	sys_ppu_thread_t t;
+	if (p && sysThreadCreate(&t, webman_thread, p, 1500, 0x4000, 0, (char *)"psxwebman")) free(p);
 }
 
 // Unmounts any mounted disc image so the real disc is read.
@@ -2000,7 +2025,7 @@ static void notify_url(StrId fmt, const char *page)
 		else o += snprintf(url + o, sizeof(url) - o, "%%%02X", *p);
 	}
 	url[o] = 0;
-	webman_get(url);
+	webman_get_async(url);
 }
 
 // PS3 on-screen keyboard: edits `text` (UTF-8, BMP characters). Returns 1 when OK was pressed.
@@ -2409,8 +2434,9 @@ static int home_screen()
 			if (st == DISC_READY) {
 				char info[96];
 				snprintf(info, sizeof(info), "%s  ·  %u MB", g_disc_serial, g_disc_mb);
+				// group 1: the disc (title, serial and size, Redump name) close together
 				ui_text(UI_TITLE, ui_w() / 2, y - ui_line(UI_BODY), 0xFFFFFF, g_disc_title, UI_CENTER);
-				ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_TITLE) - ui_line(UI_BODY) / 2, 0xA8B0C8, info, UI_CENTER);
+				ui_text(UI_BODY, ui_w() / 2, y - ui_line(UI_BODY) + ui_line(UI_TITLE) * 9 / 10, 0xA8B0C8, info, UI_CENTER);
 			} else {
 				const char *msg = st == DISC_READING ? T(STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
 				ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, msg, UI_CENTER);
@@ -2422,20 +2448,23 @@ static int home_screen()
 				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
 				footer_note(wl);
 			}
-			// under the title: Redump line, whether the disc is already ripped here, the destination
-			int ls = ui_line(UI_SMALL), ly = y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 3 / 2 - ls / 2;
-			if (st == DISC_READY && g_disc_rd[0]) { ui_text(UI_SMALL, ui_w() / 2, ly, 0x9AD0A8, g_disc_rd, UI_CENTER); ly += ls * 13 / 10; }
+			int ls = ui_line(UI_SMALL), lb = ui_line(UI_BODY);
+			int ly = y - lb + ui_line(UI_TITLE) * 9 / 10 + lb;   // just under serial and size
+			if (st == DISC_READY && g_disc_rd[0]) { ui_text(UI_SMALL, ui_w() / 2, ly, 0x9AD0A8, g_disc_rd, UI_CENTER); ly += ls; }
+			// group 2: already ripped here? one line, the "known errors" part in yellow as a warning
 			if (st == DISC_READY && g_prev_rip) {
-				ui_text(UI_SMALL, ui_w() / 2, ly, 0xE8E8F0, T(STR_ALREADY_RIPPED), UI_CENTER);
-				ly += ls * 13 / 10;
-				char rl[128];
-				if (g_repair_n) snprintf(rl, sizeof(rl), T(STR_REPAIR_AVAIL), g_repair_n);
-				else snprintf(rl, sizeof(rl), "%s", T(STR_PREV_CLEAN));
-				ui_text(UI_SMALL, ui_w() / 2, ly, g_repair_n ? 0xF0C060 : 0x7CE0A0, rl, UI_CENTER);
-				ly += ls * 13 / 10;
+				ly += lb;
+				char p2[96];
+				if (g_repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), g_repair_n);
+				else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
+				const char *p1 = T(STR_ALREADY_HERE);
+				int w1 = ui_text_width(UI_SMALL, p1), w2 = ui_text_width(UI_SMALL, p2), x0 = (ui_w() - w1 - w2) / 2;
+				ui_text(UI_SMALL, x0, ly, 0x8FA8D8, p1);
+				ui_text(UI_SMALL, x0 + w1, ly, g_repair_n ? 0xF0C060 : 0x8FA8D8, p2);
+				ly += ls;
 			}
-			int sy = y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2;
-			if (ly + ls / 2 > sy) sy = ly + ls / 2;
+			// group 3: where it goes
+			int sy = ly + lb;
 			ui_text(UI_SMALL, ui_w() / 2, sy, 0x8890A8, saving, UI_CENTER);
 			if (st == DISC_READY && g_space_short && !g_prev_rip) {   // will not fit (a re-rip replaces the old image)
 				char sl[200];
