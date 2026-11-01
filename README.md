@@ -15,6 +15,9 @@ straight to the internal hard disk, ready to play with webMAN MOD / Cobra.
 - Detects disc insertion while the app is open
 - Automatic mode: after a rip the disc is ejected, and the next disc you insert is ripped
   without asking. Press O to leave automatic mode
+- Settings (No on the start screen → Settings): destination (internal HDD or a connected USB
+  drive), re-reads on read errors, read speed (Max/8×/4×/2×) and eject on/off, saved in
+  `/dev_hdd0/tmp/psxrip.cfg`
 - English and Swedish UI, picked from the PS3 system language
 - Works fully offline once installed
 

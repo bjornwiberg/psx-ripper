@@ -31,6 +31,37 @@ static const char *OUT_DIR = "/dev_hdd0/PSXISO";
 static const char *SBI_DIR = "/dev_hdd0/tmp/sbi";
 static int g_mounttest = 0;   // flag psxrip.mounttest: rip the image Cobra has mounted (development aid)
 
+// ---------------------------------------------------------------- settings (saved in CFG_PATH)
+#define CFG_PATH "/dev_hdd0/tmp/psxrip.cfg"
+static char g_outdir[64] = "/dev_hdd0/PSXISO";
+static int g_retries = 4;          // attempts per READ CD before falling back / giving up
+static int g_speed = 0;            // 0 = max, 1 = 8x, 2 = 4x, 3 = 2x
+static int g_eject = 1;            // eject the disc after a successful rip
+static const int speed_x[4] = {0, 8, 4, 2};
+
+static void cfg_load()
+{
+	FILE *f = fopen(CFG_PATH, "r");
+	if (!f) return;
+	char line[128];
+	while (fgets(line, sizeof(line), f)) {
+		line[strcspn(line, "\r\n")] = 0;
+		if (!strncmp(line, "outdir=", 7) && line[7] == '/') snprintf(g_outdir, sizeof(g_outdir), "%s", line + 7);
+		else if (!strncmp(line, "retries=", 8)) { int r = atoi(line + 8); if (r >= 1 && r <= 64) g_retries = r; }
+		else if (!strncmp(line, "speed=", 6)) { int v = atoi(line + 6); if (v >= 0 && v <= 3) g_speed = v; }
+		else if (!strncmp(line, "eject=", 6)) g_eject = atoi(line + 6) ? 1 : 0;
+	}
+	fclose(f);
+}
+
+static void cfg_save()
+{
+	FILE *f = fopen(CFG_PATH, "w");
+	if (!f) return;
+	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\n", g_outdir, g_retries, g_speed, g_eject);
+	fclose(f);
+}
+
 #define RAW_SIZE   2352
 #define SUBQ_SIZE  16
 #define CHUNK      1024            // sectors per READ CD (same as IRISMAN)
@@ -611,13 +642,13 @@ static void rip_thread(void *arg)
 		if (lba + n > g_leadout) n = g_leadout - lba;
 
 		int ret = -1;
-		for (int tries = 0; tries < 4 && ret; tries++) ret = read_cd(lba, n, buf);
+		for (int tries = 0; tries < g_retries && ret; tries++) ret = read_cd(lba, n, buf);
 		if (ret) {
 			// fall back to single sectors so one bad sector doesn't zero the whole chunk
 			for (uint32_t i = 0; i < n; i++) {
 				uint8_t *sp = buf + i * SECT_Q;
 				int r = -1;
-				for (int tries = 0; tries < 4 && r; tries++) r = read_cd(lba + i, 1, sp);
+				for (int tries = 0; tries < g_retries && r; tries++) r = read_cd(lba + i, 1, sp);
 				if (r) { memset(sp, 0, SECT_Q); g_readerrs++; logf("unreadable sector %u (0x%x)", lba + i, r); }
 			}
 		}
@@ -798,6 +829,66 @@ static void lv1_storage_unpatch()
 	logf("lv1 storage patch removed (%s)", ok ? "verified" : "VERIFY FAILED");
 }
 
+// ---------------------------------------------------------------- settings UI
+// Human-readable name of a destination directory.
+static void target_name(const char *dir, char *out, size_t n)
+{
+	int port;
+	if (sscanf(dir, "/dev_usb%3d", &port) == 1) snprintf(out, n, T(STR_TARGET_USB), port, dir);
+	else snprintf(out, n, T(STR_TARGET_HDD), dir);
+}
+
+// Next available destination after the current one: hdd0, then each connected USB device.
+static void next_target()
+{
+	char cands[9][32];
+	int nc = 0;
+	snprintf(cands[nc++], 32, "/dev_hdd0/PSXISO");
+	for (int i = 0; i < 8; i++) {
+		char dev[16];
+		snprintf(dev, sizeof(dev), "/dev_usb%03d", i);
+		struct stat st;
+		if (stat(dev, &st) == 0) snprintf(cands[nc++], 32, "%s/PSXISO", dev);
+	}
+	int cur = 0;
+	for (int i = 0; i < nc; i++) if (!strcmp(cands[i], g_outdir)) cur = i;
+	snprintf(g_outdir, sizeof(g_outdir), "%s", cands[(cur + 1) % nc]);
+}
+
+static void settings_menu()
+{
+	char msg[512], name[96];
+	for (;;) {
+		target_name(g_outdir, name, sizeof(name));
+		snprintf(msg, sizeof(msg), T(STR_SET_TARGET), name);
+		if (!ask_yesno(msg)) break;
+		next_target();
+	}
+	static const int steps[] = {1, 2, 4, 8, 16, 32};
+	for (;;) {
+		snprintf(msg, sizeof(msg), T(STR_SET_RETRIES), g_retries);
+		if (!ask_yesno(msg)) break;
+		int k = 0;
+		while (k < 6 && steps[k] <= g_retries) k++;
+		g_retries = steps[k % 6];
+	}
+	for (;;) {
+		char sp[16];
+		if (g_speed) snprintf(sp, sizeof(sp), "%d\xC3\x97", speed_x[g_speed]); else snprintf(sp, sizeof(sp), "%s", T(STR_SPEED_MAX));
+		snprintf(msg, sizeof(msg), T(STR_SET_SPEED), sp);
+		if (!ask_yesno(msg)) break;
+		g_speed = (g_speed + 1) % 4;
+	}
+	for (;;) {
+		snprintf(msg, sizeof(msg), T(STR_SET_EJECT), g_eject ? T(STR_ON) : T(STR_OFF));
+		if (!ask_yesno(msg)) break;
+		g_eject = !g_eject;
+	}
+	cfg_save();
+	logf("settings: outdir=%s retries=%d speed=%d eject=%d", g_outdir, g_retries, g_speed, g_eject);
+}
+
+
 // ---------------------------------------------------------------- one disc
 static char g_done_msg[512];   // summary of the last successful rip
 
@@ -871,8 +962,9 @@ static int rip_disc_inner(int fresh, int autorip)
 
 	{
 		// SET CD SPEED: maximum read speed
-		uint8_t cdb[12] = {0xBB, 0, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0};
-		logf("set cd speed -> 0x%x", atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
+		uint16_t kbs = g_speed ? (uint16_t)(176 * speed_x[g_speed]) : 0xFFFF;
+		uint8_t cdb[12] = {0xBB, 0, (uint8_t)(kbs >> 8), (uint8_t)kbs, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0};
+		logf("set cd speed %u KB/s -> 0x%x", kbs, atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
 	}
 	sys_ppu_thread_t tid;
 	sysThreadCreate(&tid, rip_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxrip");
@@ -903,7 +995,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		verify_lc_candidates(tmp);
 		free(tmp);
 	}
-	if (!g_result && !g_headless) {
+	if (!g_result && !g_headless && g_eject) {
 		// eject so the next disc can go straight in (START STOP UNIT, LoEj)
 		uint8_t cdb[12] = {0x1B, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0, 0};
 		logf("eject -> 0x%x", atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
@@ -992,6 +1084,8 @@ int main(int argc, char *argv[])
 	g_sec = (uint8_t *)memalign(128, 4096);
 	lang_init();
 	netInitialize();
+	cfg_load();
+	OUT_DIR = g_outdir;
 #ifdef PRIVATE_SBI
 	install_missing_sbis();
 #endif
@@ -1025,11 +1119,19 @@ int main(int argc, char *argv[])
 			// wait for a disc to be inserted, or for the user to confirm one is already in
 			disc_inserted = 0;
 			dialog_action = 0;
+			char welcome[512], tname[96];
+			target_name(g_outdir, tname, sizeof(tname));
+			snprintf(welcome, sizeof(welcome), T(STR_WELCOME), tname);
 			msgDialogOpen2((msgType)(MSG_DIALOG_NORMAL | MSG_DIALOG_BTN_TYPE_YESNO | MSG_DIALOG_DISABLE_CANCEL_ON),
-			               T(STR_WELCOME), dialog_handler, NULL, NULL);
+			               welcome, dialog_handler, NULL, NULL);
 			while (!dialog_action && !disc_inserted && !exit_requested) do_flip();
 			msgDialogAbort();
-			if (exit_requested || dialog_action == 2) break;
+			if (exit_requested) break;
+			if (dialog_action == 2 && !disc_inserted) {
+				// No: Settings or Exit
+				if (ask_yesno(T(STR_MENU))) { settings_menu(); continue; }
+				break;
+			}
 			fresh = disc_inserted;
 		}
 		logf("start rip (%s%s)", fresh ? "disc inserted" : "disc already in drive", autorip ? ", auto" : "");
@@ -1045,8 +1147,8 @@ int main(int argc, char *argv[])
 		int show_summary = 1;
 		while (!exit_requested) {
 			char text[700];
-			if (show_summary) snprintf(text, sizeof(text), "%s\n\n%s", g_done_msg, T(STR_NEXT_DISC));
-			else snprintf(text, sizeof(text), "%s", T(STR_NEXT_DISC));
+			if (show_summary) snprintf(text, sizeof(text), "%s\n\n%s", g_done_msg, T(g_eject ? STR_NEXT_DISC : STR_NEXT_DISC_NOEJECT));
+			else snprintf(text, sizeof(text), "%s", T(g_eject ? STR_NEXT_DISC : STR_NEXT_DISC_NOEJECT));
 			disc_inserted = 0;
 			dialog_action = 0;
 			msgDialogOpen2((msgType)(MSG_DIALOG_NORMAL | MSG_DIALOG_BTN_TYPE_OK), text, dialog_handler, NULL, NULL);

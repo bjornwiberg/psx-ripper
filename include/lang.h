@@ -3,7 +3,7 @@
 #define PSXRIP_LANG_H
 
 enum StrId {
-	STR_WELCOME,
+	STR_WELCOME,            // %s target
 	STR_OPEN_FAILED,        // %x
 	STR_TOC_FAILED,         // %x, %s log path
 	STR_READCD_FAILED,      // %x, %s log path
@@ -24,6 +24,17 @@ enum StrId {
 	STR_ASK_REFRESH,
 	STR_NEXT_DISC,
 	STR_REFRESH_MANUAL,
+	STR_SET_TARGET,         // %s target
+	STR_SET_RETRIES,        // %d retries
+	STR_TARGET_HDD,         // %s path
+	STR_TARGET_USB,         // %d port, %s path
+	STR_SET_SPEED,          // %s speed
+	STR_SET_EJECT,          // %s on/off
+	STR_SPEED_MAX,
+	STR_ON,
+	STR_OFF,
+	STR_MENU,
+	STR_NEXT_DISC_NOEJECT,
 	STR_COUNT
 };
 

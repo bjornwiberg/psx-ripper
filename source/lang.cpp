@@ -7,7 +7,7 @@
 #define PS3_LANG_ENGLISH_UK 18
 
 static const char *en[STR_COUNT] = {
-	"PSX Ripper\n\nInsert a PS1 disc - it is detected automatically.\nIs the disc already in the drive? Select Yes.\nSelect No to exit.",
+	"PSX Ripper\n\nInsert a PS1 disc - it is detected automatically.\nIs the disc already in the drive? Select Yes.\nSelect No for settings or to exit.\n\nSaving to: %s",
 	"Could not open the disc drive (0x%x).",
 	"Could not read the disc's table of contents (0x%x).\nIs this a PS1 disc?\n\nLog: %s",
 	"The drive refused raw reading (READ CD 0x%x).\n\nLog: %s",
@@ -16,7 +16,7 @@ static const char *en[STR_COUNT] = {
 	"Ripping %s [%s]\n○ cancels",
 	"%u / %u sectors",
 	"Ripping was cancelled. The incomplete file has been removed.",
-	"Could not create the file on the hard disk.",
+	"Could not create the file. Is the destination full or write-protected?",
 	"LibCrypt: could not be checked (no subchannel data).",
 	"LibCrypt: no protection found.",
 	"LibCrypt: this game is protected, but no protection data was found on the disc. This can happen if the disc is not an original. The game may not start.",
@@ -28,10 +28,21 @@ static const char *en[STR_COUNT] = {
 	"Update the webMAN game list now?",
 	"The disc has been ejected. Insert the next disc and it will be ripped automatically.\n○ stops automatic ripping.",
 	"webMAN did not answer. Run Refresh XML in webMAN to see the new games.",
+	"Settings\n\nSave to: %s\n\nYes = change destination\nNo = next setting",
+	"Settings\n\nRe-reads on read errors: %d\n\nYes = change\nNo = next setting",
+	"Hard disk (%s)",
+	"USB %d (%s)",
+	"Settings\n\nRead speed: %s\nLower speeds can help with scratched discs.\n\nYes = change\nNo = next setting",
+	"Settings\n\nEject the disc when done: %s\n\nYes = change\nNo = save and go back",
+	"Max",
+	"On",
+	"Off",
+	"PSX Ripper\n\nYes = Settings\nNo = Exit",
+	"Done. Remove the disc and insert the next one and it will be ripped automatically.\n○ stops automatic ripping.",
 };
 
 static const char *sv[STR_COUNT] = {
-	"PSX Ripper\n\nSätt i en PS1-skiva – den upptäcks automatiskt.\nSitter skivan redan i? Välj Ja.\nVälj Nej för att avsluta.",
+	"PSX Ripper\n\nSätt i en PS1-skiva – den upptäcks automatiskt.\nSitter skivan redan i? Välj Ja.\nVälj Nej för inställningar eller avsluta.\n\nSparas till: %s",
 	"Kunde inte öppna skivläsaren (0x%x).",
 	"Kunde inte läsa skivans innehållsförteckning (0x%x).\nÄr det en PS1-skiva?\n\nLogg: %s",
 	"Skivläsaren vägrar rå läsning (READ CD 0x%x).\n\nLogg: %s",
@@ -40,7 +51,7 @@ static const char *sv[STR_COUNT] = {
 	"Rippar %s [%s]\n○ avbryter",
 	"%u / %u sektorer",
 	"Rippningen avbröts. Den ofullständiga filen är borttagen.",
-	"Kunde inte skapa filen på hårddisken.",
+	"Kunde inte skapa filen. Är målet fullt eller skrivskyddat?",
 	"LibCrypt: kunde inte kontrolleras (subkanal saknas).",
 	"LibCrypt: inget skydd hittat.",
 	"LibCrypt: spelet är skyddat, men inga skyddsdata hittades på skivan. Det kan hända om skivan inte är ett original. Spelet kanske inte startar.",
@@ -52,6 +63,17 @@ static const char *sv[STR_COUNT] = {
 	"Uppdatera webMANs spellista nu?",
 	"Skivan har matats ut. Sätt i nästa skiva så rippas den automatiskt.\n○ avslutar den automatiska rippningen.",
 	"webMAN svarade inte. Kör Refresh XML i webMAN för att se de nya spelen.",
+	"Inställningar\n\nSpara till: %s\n\nJa = byt plats\nNej = nästa inställning",
+	"Inställningar\n\nOmläsningar vid läsfel: %d\n\nJa = ändra\nNej = nästa inställning",
+	"Hårddisk (%s)",
+	"USB %d (%s)",
+	"Inställningar\n\nLäshastighet: %s\nLägre hastighet kan hjälpa på repiga skivor.\n\nJa = ändra\nNej = nästa inställning",
+	"Inställningar\n\nMata ut skivan när den är klar: %s\n\nJa = ändra\nNej = spara och gå tillbaka",
+	"Max",
+	"På",
+	"Av",
+	"PSX Ripper\n\nJa = Inställningar\nNej = Avsluta",
+	"Klart. Ta ut skivan och sätt i nästa så rippas den automatiskt.\n○ avslutar den automatiska rippningen.",
 };
 
 static const char **table = en;
