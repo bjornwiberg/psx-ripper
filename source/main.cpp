@@ -52,6 +52,7 @@ enum { CHECK_OFF, CHECK_ON, CHECK_BITPERFECT };
 static int g_check = CHECK_BITPERFECT;   // sector check: off, EDC/ECC + re-read, + secure read and confirmation
 static int g_webhook_on = 0;       // send webhooks
 static char g_webhook[512] = "";   // webhook address (http://...); may contain a secret id, never logged
+static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
 static const int speed_x[4] = {0, 8, 4, 2};
 
 static void cfg_load()
@@ -71,6 +72,7 @@ static void cfg_load()
 		else if (!strncmp(line, "check=", 6)) { int v = atoi(line + 6); if (v >= CHECK_OFF && v <= CHECK_BITPERFECT) g_check = v; }
 		else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
 		else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
+		else if (!strncmp(line, "webhook_events=", 15)) g_webhook_mask = atoi(line + 15) & ((1 << WH_COUNT) - 1);
 	}
 	fclose(f);
 }
@@ -79,8 +81,8 @@ static void cfg_save()
 {
 	FILE *f = fopen(CFG_PATH, "w");
 	if (!f) return;
-	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\n",
-	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook, g_check);
+	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\n",
+	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook, g_check, g_webhook_mask);
 	fclose(f);
 }
 
@@ -1589,6 +1591,8 @@ static void redump_verify(char *out, size_t n)
 	snprintf(g_rd_result_name, sizeof(g_rd_result_name), "%s", name);
 }
 
+static void fire_event(const char *event);
+static char g_state_title[128], g_state_serial[16];
 static void identify_thread(void *arg)
 {
 	if ((long)arg) usleep(2000 * 1000);   // freshly inserted: let the drive spin up
@@ -1605,6 +1609,9 @@ static void identify_thread(void *arg)
 		g_disc_mb = (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024));
 		{ char bp[320]; snprintf(bp, sizeof(bp), "%s.bin", g_base); g_prev_rip = vf_exists(bp); }
 		g_repair_n = g_prev_rip ? riplog_open_count() : 0;
+		snprintf(g_state_title, sizeof(g_state_title), "%s", g_name);
+		snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
+		fire_event("disc_identified");
 		if (g_repair_n) logf("previous rip has %d sector(s) to repair", g_repair_n);
 		__sync_synchronize();
 		g_disc_state = DISC_READY;
@@ -1905,7 +1912,13 @@ static void settings_screen()
 		else snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_OFF));
 		if (!webhook_on) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
 		else if (!g_webhook[0]) snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_WEBHOOK_NOURL));
-		else { char host[96]; webhook_host(g_webhook, host, sizeof(host)); snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON), host); }
+		else {
+			char host[96];
+			webhook_host(g_webhook, host, sizeof(host));
+			int ne = 0;
+			for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
+			snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON_N), host, ne);
+		}
 		snprintf(vals[9], sizeof(vals[9]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
 		const char *labels[10] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
 		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK)};
@@ -1987,6 +2000,7 @@ static void eject_disc()
 	if (sys_storage_open(BD_DEVICE, &g_fd)) return;
 	uint8_t cdb[12] = {0x1B, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0, 0};
 	logf("eject (home) -> 0x%x", atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
+	fire_event("disc_ejected");
 	sys_storage_close(g_fd);
 	g_disc_state = DISC_NONE;
 }
@@ -2057,6 +2071,14 @@ static int home_screen()
 			} else {
 				const char *msg = st == DISC_READING ? T(STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
 				ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, msg, UI_CENTER);
+			}
+			if (g_webhook_on && g_webhook[0]) {   // which events go where
+				char host[96], evs[200] = "", wl[320];
+				webhook_host(g_webhook, host, sizeof(host));
+				for (int i = 0; i < WH_COUNT; i++)
+					if ((g_webhook_mask >> i) & 1) snprintf(evs + strlen(evs), sizeof(evs) - strlen(evs), "%s%s", evs[0] ? ", " : "", T((StrId)(STR_WH_SHORT_0 + i)));
+				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK), host, evs[0] ? evs : "-");
+				ui_text(UI_SMALL, ui_w() / 2, ui_h() - ui_h() / 8 - ui_line(UI_SMALL) * 2, 0x8890A8, wl, UI_CENTER);
 			}
 			if (st == DISC_READY && g_repair_n) {
 				char rl[128];
@@ -2173,7 +2195,6 @@ static int prepare_disc(int *err, int *code)
 // ---------------------------------------------------------------- remote view and webhooks
 enum { ST_HOME, ST_RIPPING };
 static volatile int g_state = ST_HOME;
-static char g_state_title[128], g_state_serial[16];
 static time_t g_rip_t0;
 
 static const char *rd_result_str()
@@ -2216,6 +2237,8 @@ static int status_json(char *js, int n)
 }
 
 static void get_webhook(char *out, int n) { snprintf(out, n, "%s", g_webhook); }
+static int get_events() { return g_webhook_mask; }
+static void set_events(int mask) { g_webhook_mask = mask & ((1 << WH_COUNT) - 1); }
 
 static void set_webhook(const char *url)
 {
@@ -2229,7 +2252,9 @@ static void set_webhook(const char *url)
 
 static void event_json(char *js, size_t n, const char *event)
 {
-	snprintf(js, n, "{\"event\":\"%s\",\"app\":\"PSX Ripper\",", event);
+	uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
+	snprintf(js, n, "{\"event\":\"%s\",\"app\":\"PSX Ripper\",\"percent\":%u,", event,
+	         g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
 	json_fields(js, n);
 	size_t o = strlen(js);
 	snprintf(js + o, n - o, ",\"seconds\":%ld,\"path\":", g_rip_t0 ? (long)(time(NULL) - g_rip_t0) : 0L);
@@ -2251,7 +2276,8 @@ static int test_webhook()
 
 static void fire_event(const char *event)
 {
-	if (!g_webhook_on || !g_webhook[0]) return;
+	int idx = webhook_event_index(event);
+	if (!g_webhook_on || !g_webhook[0] || idx < 0 || !((g_webhook_mask >> idx) & 1)) return;
 	char js[1024];
 	event_json(js, sizeof(js), event);
 	webhook_send_async(g_webhook, js);
@@ -2302,11 +2328,12 @@ static int rip_disc_inner(int fresh, int autorip)
 	Eta eta;
 	eta_start(&eta);
 	uint64_t shown_ms = 0;
-	int shown_ev = -1;
+	int shown_ev = -1, quarter = 0;
 	while (!g_finished) {
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / (g_total ? g_total : 1));
+		if (quarter < 3 && pct >= (uint32_t)(25 * (quarter + 1)) && !g_phase) { quarter++; fire_event("rip_progress"); }
 		int rmax = g_rr_max, rtry = rmax ? g_rr_try : 0;
 		uint32_t rlba = g_rr_lba;
 		// redraw on a new percentage, every 256 sectors, or when the re-read state changes
@@ -2345,6 +2372,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		// eject so the next disc can go straight in (START STOP UNIT, LoEj)
 		uint8_t cdb[12] = {0x1B, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0, 0};
 		logf("eject -> 0x%x", atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO));
+		fire_event("disc_ejected");
 	}
 	sys_storage_close(g_fd);
 	lv1_storage_unpatch();   // done with the drive: never keep the patch while a dialog waits
@@ -2761,7 +2789,7 @@ int main(int argc, char *argv[])
 		for (int i = 0; i < nv && i < 8; i++) logf("exFAT drive on USB port %d (%llu MB free)", v[i].port, (unsigned long long)v[i].free_mb);
 	}
 	{
-		static const RemoteHooks hooks = {status_json, get_webhook, set_webhook, test_webhook};
+		static const RemoteHooks hooks = {status_json, get_webhook, set_webhook, test_webhook, get_events, set_events};
 		remote_init(&hooks);
 		if (g_remote) { remote_set(1); notify_url(STR_REMOTE_HELP, ""); }
 	}

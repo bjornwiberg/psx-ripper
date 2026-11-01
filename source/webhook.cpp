@@ -119,3 +119,9 @@ void json_str(char *out, size_t n, const char *s)
 	out[o++] = '"';
 	out[o] = 0;
 }
+
+int webhook_event_index(const char *name)
+{
+	for (int i = 0; i < WH_COUNT; i++) if (!strcmp(name, WEBHOOK_EVENTS[i])) return i;
+	return -1;
+}

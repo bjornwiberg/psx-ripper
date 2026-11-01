@@ -10,6 +10,8 @@ struct RemoteHooks {
 	void (*get_webhook)(char *out, int n);        // webhook address
 	void (*set_webhook)(const char *url);         // save a new address
 	int (*test_webhook)();                        // send a test event, returns the HTTP status
+	int (*get_events)();                          // bit mask of WEBHOOK_EVENTS that are sent
+	void (*set_events)(int mask);
 };
 
 void remote_init(const RemoteHooks *hooks);
