@@ -2050,7 +2050,7 @@ static void space_check(uint32_t disc_mb)
 // drive is mounted by the PS3 as /dev_usbNNN, an exFAT drive is reached through FatFs).
 // dir = +1 forward, -1 back.
 // "Mål: Hårddisk · PSXISO/Croc 2 (Europe) [SLES_020.88].bin · 339 GB ledigt" (no file: just the folder)
-static void dest_line(const char *dir, const char *fname, char *out, size_t n, int maxw = 0, const char *wrap = "%s")
+static void dest_line(const char *dir, const char *fname, char *out, size_t n, int maxw = 0, const char *wrap = "%s", UiFont font = UI_SMALL)
 {
 	int port;
 	uint64_t mb = 0;
@@ -2076,7 +2076,7 @@ static void dest_line(const char *dir, const char *fname, char *out, size_t n, i
 	snprintf(line, sizeof(line), T(STR_DEST_LINE), label, path, (unsigned)(mb / 1024));
 	snprintf(out, n, wrap, line);
 	// too wide: the file name gives way ("Croc 2 (Euro….bin"), the drive, folder and free space stay
-	if (maxw && fname && fname[0] && ui_text_width(UI_SMALL, out) > maxw) {
+	if (maxw && fname && fname[0] && ui_text_width(font, out) > maxw) {
 		char f[200];
 		snprintf(f, sizeof(f), "%s", fname);
 		int l = (int)strlen(f);
@@ -2086,7 +2086,7 @@ static void dest_line(const char *dir, const char *fname, char *out, size_t n, i
 			snprintf(path, sizeof(path), "%s/%s….bin", folder, f);
 			snprintf(line, sizeof(line), T(STR_DEST_LINE), label, path, (unsigned)(mb / 1024));
 			snprintf(out, n, wrap, line);
-			if (ui_text_width(UI_SMALL, out) <= maxw) break;
+			if (ui_text_width(font, out) <= maxw) break;
 		}
 	}
 }
@@ -3673,6 +3673,13 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		tx += isz + igap;
 		tx += ui_text(UI_SMALL, tx, y + (th - ls) / 2, on ? 0xFFFFFF : 0xC8D0E0, name[i]) + gap;
 		ui_text(UI_SMALL, tx, y + (th - ls) / 2, scol[i], stt[i]);
+		if (g_cards[list[i]].job) {   // ripping: a thin bar along the bottom of the tab
+			OnCard o(list[i]);
+			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
+			int bw = g_total ? (int)((uint64_t)w[i] * (pos > g_total ? g_total : pos) / g_total) : 0;
+			ui_rect(x, y + th - 4, w[i], 4, 0x50FFFFFF);
+			ui_rect(x, y + th - 4, bw, 4, 0xFFC8E05A);
+		}
 		x += w[i] + gap;
 		last = i;
 	}
@@ -3793,7 +3800,7 @@ static void draw_page(int c, int y)
 		y += lb + ls / 3;
 	}
 	y += ls / 2;
-	dest_line(k.dest[0] ? k.dest : HDD_DIR, known ? k.fname : "", dl, sizeof(dl), R - L, "‹ %s ›");   // ←→ where this drive saves
+	dest_line(k.dest[0] ? k.dest : HDD_DIR, known ? k.fname : "", dl, sizeof(dl), R - L, "‹ %s ›", UI_BODY);   // ←→ where this drive saves
 	ui_text_fit(UI_BODY, L, y, 0xC8D0E0, dl, R - L);
 	y += lb + ls;
 	if (st == DISC_READY && k.prev_rip && k.repair_n) {   // what square does
