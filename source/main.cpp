@@ -1773,11 +1773,12 @@ int main(int argc, char *argv[])
 			snprintf(text, sizeof(text), "%s\n\n%s", g_done_msg, T(g_eject ? STR_NEXT_DISC : STR_NEXT_DISC_NOEJECT));
 			disc_inserted = 0;
 			dialog_action = 0;
-			msgDialogOpen2((msgType)(MSG_DIALOG_NORMAL | MSG_DIALOG_BTN_TYPE_OK), text, dialog_handler, NULL, NULL);
+			// no button: O (cancel) is the only way out, so the dialog shows just "O Back"
+			msgDialogOpen2((msgType)MSG_DIALOG_NORMAL, text, dialog_handler, NULL, NULL);
 			while (!dialog_action && !disc_inserted && !exit_requested) do_flip();
 			msgDialogAbort();
 			if (disc_inserted) { autorip = 1; break; }
-			break;   // X or O: back to the start screen
+			break;   // O: back to the start screen
 		}
 	}
 	sysDiscUnregisterDiscChangeCallback();
