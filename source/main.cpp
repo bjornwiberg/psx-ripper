@@ -198,13 +198,10 @@ static void do_flip()
 }
 
 // Shows a dialog and blocks until answered. Returns 1 = OK/YES, 2 = NO/cancel.
+static int own_dialog(const char *msg, int yesno);   // own UI, defined with the other screens
 static int ask(int type, const char *msg)
 {
-	dialog_action = 0;
-	msgDialogOpen2((msgType)type, msg, dialog_handler, NULL, NULL);
-	while (!dialog_action && !exit_requested) do_flip();
-	msgDialogAbort();
-	return exit_requested ? 2 : dialog_action;
+	return own_dialog(msg, (type & MSG_DIALOG_BTN_TYPE_YESNO) != 0);
 }
 
 static int ask_yesno(const char *msg)
@@ -2569,6 +2566,77 @@ static int repair_disc()
 	fire_event("repair_finished");
 	g_repair_n = 0;
 	return 1;
+}
+
+// Text with line breaks and word wrap, centred; returns the y below it.
+static int draw_wrapped(UiFont f, const char *text, int y, uint32_t col)
+{
+	int maxw = ui_w() * 3 / 4, lh = ui_line(f) * 12 / 10;
+	char line[256];
+	const char *p = text;
+	while (*p) {
+		size_t len = strcspn(p, "\n"), o = 0;
+		const char *end = p + len;
+		while (p < end) {
+			// take words while they fit
+			const char *q = p, *cut = NULL;
+			o = 0;
+			while (q < end) {
+				const char *w = q;
+				while (w < end && *w != ' ') w++;
+				size_t add = (size_t)(w - q) + (o ? 1 : 0);
+				if (o + add >= sizeof(line)) break;
+				char tmp[256];
+				memcpy(tmp, line, o);
+				if (o) tmp[o] = ' ';
+				memcpy(tmp + o + (o ? 1 : 0), q, w - q);
+				tmp[o + add] = 0;
+				if (o && ui_text_width(f, tmp) > maxw) break;
+				memcpy(line, tmp, o + add + 1);
+				o += add;
+				cut = w;
+				q = w < end ? w + 1 : w;
+			}
+			if (!cut) { cut = end; }   // a single word longer than the line
+			line[o] = 0;
+			ui_text(f, ui_w() / 2, y, col, line, UI_CENTER);
+			y += lh;
+			p = cut < end ? cut + 1 : end;
+		}
+		if (!len) y += lh;   // empty line
+		p = *end ? end + 1 : end;
+	}
+	return y;
+}
+
+// Message (X OK) or question (X Yes, O No) in the app's own style. Returns 1 = OK/yes, 2 = no.
+static int own_dialog(const char *msg, int yesno)
+{
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			draw_backdrop();
+			draw_wrapped(UI_BODY, msg, ui_h() / 3, 0xE8E8F0);
+			if (yesno) {
+				const char *b[] = {"cross", "circle"};
+				const char *l[] = {T(STR_HINT_YES), T(STR_HINT_NO)};
+				hint_bar(b, l, 2);
+			} else {
+				const char *b[] = {"cross"};
+				const char *l[] = {T(STR_HINT_OK)};
+				hint_bar(b, l, 1);
+			}
+			g_drawn = 2;
+			g_backdrop_shown = 0;
+		}
+		flip_frame();
+		int p = pad_pressed();
+		if (p & B_CROSS) return 1;
+		if (yesno && (p & B_CIRCLE)) return 2;
+	}
+	return 2;
 }
 
 // Own result screen after a rip (instead of the system dialog). Returns 1 when a new disc was

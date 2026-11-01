@@ -117,6 +117,9 @@ static const char *en[STR_COUNT] = {
 	"Time: %s",
 	"Checking sectors without EDC (%u of %u) ",
 	"Sectors without EDC: %u checked, %u read differently (corrected)",
+	"Yes",
+	"No",
+	"OK",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -230,6 +233,9 @@ static const char *sv[STR_COUNT] = {
 	"Tid: %s",
 	"Kontrollerar sektorer utan EDC (%u av %u) ",
 	"Sektorer utan EDC: %u kontrollerade, %u lästes olika (rättade)",
+	"Ja",
+	"Nej",
+	"OK",
 };
 
 static const char **table = en;
