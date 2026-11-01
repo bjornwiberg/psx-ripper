@@ -54,8 +54,9 @@ static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
 #define WH_HEADERS 3
 static char g_webhook_hdr[WH_HEADERS][256];    // extra headers "Name: value" (often a secret: never logged or shown)
 static int g_webhook_hdr_on = 0;               // send them (off keeps them stored)
-// File name of a rip: %T title (Redump's name without the language list, else the app's title),
-// %R region, %D disc ID, %N Redump's whole name. Text in [ ] does not show in webMAN's game list.
+// File name of a rip: %T title (Redump's name without the language list, else the app's title;
+// with "(Disc 1)" for a disc of several), %R region, %D disc ID, %C "Disc 1" (then not in %T),
+// %N Redump's whole name. Text in [ ] does not show in webMAN's game list.
 static char g_name_pat[96] = "%T [%D]";
 enum { SRC_BD, SRC_USB };
 static char g_outdir_usb[8][64];               // destination per USB drive, by its port ("" = the hard disk)
@@ -2157,10 +2158,13 @@ static void region_of(const char *rdname, const char *serial, char *out, size_t 
 // The file name for a pattern; illegal characters replaced, empty brackets and double spaces gone.
 static void name_from(const char *pat, const char *rdname, const char *title, const char *serial, char *out, size_t n)
 {
-	char t[160], r[64], b[300];
-	if (rdname && rdname[0]) {   // Redump's name up to its first bracket: the title
-		const char *q = strstr(rdname, " (");
+	char t[160], r[64], b[300], dk[32] = "";
+	const char *dp = rdname ? strstr(rdname, "(Disc ") : NULL;   // a disc of several: "(Disc 1)"
+	if (dp) { const char *e = strchr(dp, ')'); if (e) snprintf(dk, sizeof(dk), "%.*s", (int)(e - dp - 1), dp + 1); }
+	if (rdname && rdname[0]) {   // Redump's name up to its first bracket: the title (with its disc,
+		const char *q = strstr(rdname, " (");                       // unless %C places that)
 		snprintf(t, sizeof(t), "%.*s", q ? (int)(q - rdname) : (int)strlen(rdname), rdname);
+		if (dk[0] && !strstr(pat, "%C")) snprintf(t + strlen(t), sizeof(t) - strlen(t), " (%s)", dk);
 	} else snprintf(t, sizeof(t), "%s", title);
 	region_of(rdname, serial, r, sizeof(r));
 	size_t o = 0;
@@ -2168,7 +2172,7 @@ static void name_from(const char *pat, const char *rdname, const char *title, co
 		const char *ins = NULL;
 		if (*p == '%' && p[1]) {
 			p++;
-			ins = *p == 'T' ? t : *p == 'R' ? r : *p == 'D' ? serial : *p == 'N' ? (rdname && rdname[0] ? rdname : title) : *p == '%' ? "%" : "";
+			ins = *p == 'T' ? t : *p == 'R' ? r : *p == 'D' ? serial : *p == 'C' ? dk : *p == 'N' ? (rdname && rdname[0] ? rdname : title) : *p == '%' ? "%" : "";
 		}
 		if (ins) o += snprintf(b + o, sizeof(b) - o, "%s", ins);
 		else b[o++] = *p;
@@ -3082,9 +3086,9 @@ static void filename_screen()
 {
 	char pat[96];
 	snprintf(pat, sizeof(pat), "%s", g_name_pat);
-	static const char *parts[] = {"%T", "%R", "%D", "%N", " ", "(", ")", "[", "]", "-"};
-	static const StrId plbl[] = {STR_FN_B_TITLE, STR_FN_B_REGION, STR_FN_B_ID, STR_FN_B_NAME, STR_FN_B_SPACE};
-	const int NP = 10;
+	static const char *parts[] = {"%T", "%R", "%D", "%C", "%N", " ", "(", ")", "[", "]", "-"};
+	static const StrId plbl[] = {STR_FN_B_TITLE, STR_FN_B_REGION, STR_FN_B_ID, STR_FN_B_DISC, STR_FN_B_NAME, STR_FN_B_SPACE};
+	const int NP = 11, NL = 6;   // the first NL parts have a name
 	int sel = 0;
 	// the pattern as parts ("%T" or one character) and a cursor between them: L1/R1 move it, X puts
 	// a part in at the cursor, square removes the part before it
@@ -3115,7 +3119,7 @@ static void filename_screen()
 				if (pi == cur) cx = x;
 				if (*q == '%' && q[1]) {
 					q++;
-					int k = *q == 'T' ? 0 : *q == 'R' ? 1 : *q == 'D' ? 2 : *q == 'N' ? 3 : -1;
+					int k = *q == 'T' ? 0 : *q == 'R' ? 1 : *q == 'D' ? 2 : *q == 'C' ? 3 : *q == 'N' ? 4 : -1;
 					const char *w = k >= 0 ? T(plbl[k]) : "%";
 					int tw = ui_text_width(UI_BODY, w);
 					ui_rect(x, y - lb / 8, tw + pad * 2, lb + lb / 4, 0xFF3D6FD9);
@@ -3129,8 +3133,19 @@ static void filename_screen()
 			}
 			if (cur >= pi) cx = x;   // at the end
 			if (on) ui_rect(cx - 3, y - lb / 8, 3, lb + lb / 4, 0xFFFFFFFF);   // where the next part goes
-			y += lb + ls / 2;
-			ui_text(UI_SMALL, L, y, 0x8890A8, pat);
+			y += lb + ls;
+			// parts to add
+			y += section_head(L, R, y, T(STR_FN_ADD));
+			x = L;
+			for (int i = 0; i < NP; i++) {
+				const char *w = i < NL ? T(plbl[i]) : parts[i];
+				int tw = ui_text_width(UI_SMALL, w);
+				ui_rect(x, y - ls / 8, tw + pad * 3, ls + ls / 4, i == sel ? 0xFF3D6FD9 : 0xFF404668);
+				ui_text(UI_SMALL, x + pad * 3 / 2, y, i == sel ? 0xFFFFFF : 0xC8D0E0, w);
+				x += tw + pad * 4;
+			}
+			y += ls * 2;
+			ui_text_fit(UI_SMALL, L, y, 0x8FA8D8, T(STR_FN_NOTE), R - L);
 			y += ls + ls / 2;
 			// preview: each disc in a drive, else an example
 			y += section_head(L, R, y, T(STR_FN_PREVIEW));
@@ -3153,25 +3168,31 @@ static void filename_screen()
 				snprintf(fb, sizeof(fb), "%s.bin", fn);
 				listed_name(fn, ln, sizeof(ln));
 				snprintf(lv, sizeof(lv), T(STR_FN_LISTED), ln);
-				ui_text_fit(UI_BODY, L, y, 0xFFFFFF, fb, R - L - ui_w() / 5);
+				// the whole name if it fits; else smaller, and if even that is too long cut in the middle,
+				// so the start and the end (disc ID, .bin) always show
+				{
+					int room = R - L - ui_w() / 5;
+					if (ui_text_width(UI_BODY, fb) <= room) ui_text(UI_BODY, L, y, 0xFFFFFF, fb);
+					else {
+						char mid[240];
+						snprintf(mid, sizeof(mid), "%s", fb);
+						int n = (int)strlen(fb), keep = n / 2;
+						while (ui_text_width(UI_SMALL, mid) > room && keep > 4) {
+							keep--;
+							int head = keep / 2 + keep % 2, tail = keep / 2;
+							while (head > 0 && ((unsigned char)fb[head] & 0xC0) == 0x80) head--;   // whole UTF-8 characters
+							int ts = n - tail;
+							while (ts < n && ((unsigned char)fb[ts] & 0xC0) == 0x80) ts++;
+							snprintf(mid, sizeof(mid), "%.*s…%s", head, fb, fb + ts);
+						}
+						ui_text(UI_SMALL, L, y + (lb - ls) / 2, 0xFFFFFF, mid);
+					}
+				}
 				int cw = dn[0] ? drive_column(list[i], R, y, sr) + ui_w() / 60 : 0;   // like on the cards, ID without size
 				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, lv, R - L - ui_w() / 60 - cw);
 				y += lb + ls * 2 + ls / 3;
 				shown++;
 			}
-			// parts to add
-			y += ls / 2;
-			y += section_head(L, R, y, T(STR_FN_ADD));
-			x = L;
-			for (int i = 0; i < NP; i++) {
-				const char *w = i < 5 ? T(plbl[i]) : parts[i];
-				int tw = ui_text_width(UI_SMALL, w);
-				ui_rect(x, y - ls / 8, tw + pad * 3, ls + ls / 4, i == sel ? 0xFF3D6FD9 : 0xFF404668);
-				ui_text(UI_SMALL, x + pad * 3 / 2, y, i == sel ? 0xFFFFFF : 0xC8D0E0, w);
-				x += tw + pad * 4;
-			}
-			y += ls * 2;
-			ui_text_fit(UI_SMALL, L, y, 0x8FA8D8, T(STR_FN_NOTE), R - L);
 			const char *b[] = {"l1r1", "leftright", "cross", "square", "triangle", "circle"};
 			const char *l[] = {T(STR_HINT_CURSOR), T(STR_HINT_PICK_PART), T(STR_HINT_ADD), T(STR_HINT_DEL_LAST), T(STR_HINT_TYPE), T(STR_HINT_BACK)};
 			hint_bar(b, l, 6);
