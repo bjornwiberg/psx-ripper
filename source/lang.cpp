@@ -105,6 +105,13 @@ static const char *en[STR_COUNT] = {
 	"Sector check",
 	"Check and re-read",
 	"Bit-perfect",
+	"%d sector(s) of the previous rip can be read again",
+	"Repair",
+	"Repairing %s [%s]",
+	"Repaired sectors: %u of %u",
+	"This disc has already been ripped to this destination.",
+	"The previous rip has no known errors.",
+	"New rip",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -206,6 +213,13 @@ static const char *sv[STR_COUNT] = {
 	"Sektorkontroll",
 	"Kontrollera och läs om",
 	"Bitperfekt",
+	"%d sektor(er) i den tidigare rippen kan läsas om",
+	"Laga",
+	"Lagar %s [%s]",
+	"Lagade sektorer: %u av %u",
+	"Skivan är redan rippad till den här platsen.",
+	"Den tidigare rippen har inga kända fel.",
+	"Ny rippning",
 };
 
 static const char **table = en;

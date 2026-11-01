@@ -242,10 +242,14 @@ static int disc_size()
 	return cap * 3 / 2;
 }
 
+// SELECT: a pill like the controller's small button, with the word in it
+static int select_width() { return ui_text_width(UI_SMALL, "SELECT") + disc_size(); }
+
 int ui_hint_width(const char *button, const char *label)
 {
 	uint32_t col;
 	int sw = disc_size();   // face buttons and the d-pad share the icon size
+	if (!strcmp(button, "select")) sw = select_width();
 	(void)col;
 	return sw + ui_text_width(UI_BODY, " ") + ui_text_width(UI_BODY, label);
 }
@@ -267,7 +271,18 @@ int ui_hint(int x, int y, const char *button, const char *label)
 	int d = disc_size();
 	int oy = (int)(y + (top + bot + 1) / 2.0f - d / 2.0f + 0.5f);
 	float cx = x + d / 2.0f, cy = oy + d / 2.0f;
-	if (is_face_button(button)) {
+	if (!strcmp(button, "select")) {
+		int pw = select_width(), r = d * 2 / 5;
+		disc(x + r, cy, r, 0x1E2234, 0x5A6280);
+		disc(x + pw - r, cy, r, 0x1E2234, 0x5A6280);
+		ui_rect(x + r, (int)(cy - r), pw - 2 * r, 2 * r, 0xFF1E2234);
+		ui_rect(x + r, (int)(cy - r), pw - 2 * r, 2, 0xFF5A6280);
+		ui_rect(x + r, (int)(cy + r) - 2, pw - 2 * r, 2, 0xFF5A6280);
+		ui_text(UI_SMALL, x + pw / 2, (int)(cy - ui_line(UI_SMALL) / 2), 0xE8E8F0, "SELECT", UI_CENTER);
+		int w = pw + ui_text_width(UI_BODY, " ");
+		w += ui_text(UI_BODY, x + w, y, 0xE8E8F0, label);
+		return w;
+	} else if (is_face_button(button)) {
 		disc(cx, cy, d / 2.0f, 0x1E2234, 0x5A6280);
 		ui_text(UI_BTN, x, oy, col, sym);
 	} else {

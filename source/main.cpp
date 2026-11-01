@@ -1389,6 +1389,28 @@ static volatile int g_disc_state = DISC_NONE;
 static volatile int g_ident_busy = 0;
 static char g_disc_title[128], g_disc_serial[16];
 static uint32_t g_disc_mb;
+static volatile int g_repair_n = 0;   // sectors a previous rip of this disc still has wrong (from its log)
+static volatile int g_prev_rip = 0;   // the destination already has <name>.bin for this disc
+
+// Counts the sectors in <g_base>.log that are still wrong (unreadable, bad, unconfirmed).
+static int riplog_open_count()
+{
+	char path[320];
+	snprintf(path, sizeof(path), "%s.log", g_base);
+	snprintf(path + strlen(path) - 4, 8, ".bin");
+	if (!vf_exists(path)) return 0;
+	snprintf(path, sizeof(path), "%s.log", g_base);
+	VFile *f = vf_open(path, "rb");
+	if (!f) return 0;
+	static char buf[65536];
+	int n = (int)vf_read(f, buf, sizeof(buf) - 1), cnt = 0;
+	vf_close(f);
+	buf[n > 0 ? n : 0] = 0;
+	for (char *l = strtok(buf, "\n"); l; l = strtok(NULL, "\n"))
+		if (!strncmp(l, "unreadable=", 11) || !strncmp(l, "bad=", 4) || (!strncmp(l, "uncertain=", 10) && strstr(l, "unconfirmed")))
+			cnt++;
+	return cnt;
+}
 
 // Redump lookup for the home screen; runs after identification (network only, no drive access).
 static char g_disc_rd[RD_NAME + 48];   // line shown on the home screen, empty = none
@@ -1513,6 +1535,9 @@ static void identify_thread(void *arg)
 		snprintf(g_disc_title, sizeof(g_disc_title), "%s", g_name);
 		snprintf(g_disc_serial, sizeof(g_disc_serial), "%s", g_serial[0] ? g_serial : T(STR_UNKNOWN));
 		g_disc_mb = (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024));
+		{ char bp[320]; snprintf(bp, sizeof(bp), "%s.bin", g_base); g_prev_rip = vf_exists(bp); }
+		g_repair_n = g_prev_rip ? riplog_open_count() : 0;
+		if (g_repair_n) logf("previous rip has %d sector(s) to repair", g_repair_n);
 		__sync_synchronize();
 		g_disc_state = DISC_READY;
 	} else {
@@ -1537,7 +1562,7 @@ static void identify_start(int fresh)
 }
 
 // ---------------------------------------------------------------- own screens (home, settings)
-enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT = 32, B_RIGHT = 64, B_START = 128, B_SQUARE = 256 };
+enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT = 32, B_RIGHT = 64, B_START = 128, B_SQUARE = 256, B_SELECT = 512 };
 
 // Buttons newly pressed since the last call, over all connected pads. Each pad keeps its own
 // last state: ioPadGetData only reports changes, so a quiet pad must not resurrect another pad's buttons.
@@ -1562,6 +1587,7 @@ static int pad_pressed()
 				if (pd.BTN_RIGHT) b |= B_RIGHT;
 				if (pd.BTN_START) b |= B_START;
 				if (pd.BTN_SQUARE) b |= B_SQUARE;
+				if (pd.BTN_SELECT) b |= B_SELECT;
 				pad_state[i] = b;
 			}
 			now |= pad_state[i];
@@ -1847,6 +1873,45 @@ static void eject_disc()
 	g_disc_state = DISC_NONE;
 }
 
+// The disc has been ripped to this destination before: X new rip, square repair the previous rip
+// (only offered when its log lists sectors to read again), O back.
+// Returns 1 = repair, 2 = new rip, 0 = back.
+static int already_ripped_screen()
+{
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			draw_backdrop();
+			int y = ui_h() * 2 / 5 - ui_line(UI_BODY);
+			ui_text(UI_TITLE, ui_w() / 2, y - ui_line(UI_TITLE), 0xFFFFFF, g_disc_title, UI_CENTER);
+			ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_BODY), 0xE8E8F0, T(STR_ALREADY_RIPPED), UI_CENTER);
+			if (g_repair_n) {
+				char rl[128];
+				snprintf(rl, sizeof(rl), T(STR_REPAIR_AVAIL), g_repair_n);
+				ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_BODY) * 5 / 2, 0xF0C060, rl, UI_CENTER);
+				const char *b[] = {"cross", "square", "circle"};
+				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_BACK)};
+				hint_bar(b, l, 3);
+			} else {
+				ui_text(UI_BODY, ui_w() / 2, y + ui_line(UI_BODY) * 5 / 2, 0x7CE0A0, T(STR_PREV_CLEAN), UI_CENTER);
+				const char *b[] = {"cross", "circle"};
+				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_BACK)};
+				hint_bar(b, l, 2);
+			}
+			g_drawn = 2;
+			g_backdrop_shown = 0;
+		}
+		flip_frame();
+		int p = pad_pressed();
+		if (p & B_CROSS) return 2;
+		if ((p & B_SQUARE) && g_repair_n) return 1;
+		if (p & B_CIRCLE) return 0;
+	}
+	return 0;
+}
+
 // Home screen. Returns 1 = rip the disc in the drive, 2 = rip a freshly inserted disc, 0 = exit.
 static int home_screen()
 {
@@ -1880,6 +1945,11 @@ static int home_screen()
 				const char *msg = st == DISC_READING ? T(STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
 				ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, msg, UI_CENTER);
 			}
+			if (st == DISC_READY && g_repair_n) {
+				char rl[128];
+				snprintf(rl, sizeof(rl), T(STR_REPAIR_AVAIL), g_repair_n);
+				ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 3 + ui_line(UI_SMALL) * 3 / 2, 0xF0C060, rl, UI_CENTER);
+			}
 			if (st == DISC_READY && g_disc_rd[0])
 				ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 3 / 2 - ui_line(UI_SMALL) / 2, 0x9AD0A8, g_disc_rd, UI_CENTER);
 			ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2 + (st == DISC_READY && g_disc_rd[0] ? ui_line(UI_SMALL) : 0), 0x8890A8, saving, UI_CENTER);
@@ -1899,7 +1969,13 @@ static int home_screen()
 		}
 		flip_frame();
 		int p = pad_pressed();
-		if ((p & B_CROSS) && st == DISC_READY) return inserted ? 2 : 1;
+		if ((p & B_CROSS) && st == DISC_READY) {
+			if (!g_prev_rip) return inserted ? 2 : 1;
+			int c = already_ripped_screen();   // X repair, square new rip, O back
+			if (c == 1) return 3;
+			if (c == 2) return inserted ? 2 : 1;
+			g_redraw = 2;
+		}
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
 		if (p & (B_SQUARE | B_START)) {
 			int old = g_redump;
@@ -2281,6 +2357,124 @@ static void write_riplog()
 	logf("rip log written: %s", path);
 }
 
+// Repairs a previous rip from its log: re-reads only the sectors that are still wrong (with the
+// same confirmation as the second pass) and writes the ones that now read correctly into the
+// existing image. The disc in the drive must be the same one (same name and serial).
+static void repair_thread(void *arg)
+{
+	int patched = second_pass();
+	vf_close(g_out);
+	char bin[320];
+	snprintf(bin, sizeof(bin), "%s.bin", g_base);
+	if (patched) md5_from_file(bin);
+	g_result = g_abort ? 1 : 0;
+	g_finished = 1;
+	sysThreadExit(0);
+}
+
+static int repair_disc()
+{
+	while (g_ident_busy) usleep(10000);
+	int err = 0, code = 0;
+	if (prepare_disc(&err, &code)) { lv1_storage_unpatch(); return 0; }
+	char path[320];
+	snprintf(path, sizeof(path), "%s.log", g_base);
+	VFile *lf = vf_open(path, "rb");
+	static char buf[65536];
+	int n = lf ? (int)vf_read(lf, buf, sizeof(buf) - 1) : 0;
+	if (lf) vf_close(lf);
+	buf[n > 0 ? n : 0] = 0;
+	snprintf(path, sizeof(path), "%s.bin", g_base);
+	g_out = vf_open(path, "r+b");
+	if (!g_out || !n) { if (g_out) vf_close(g_out); sys_storage_close(g_fd); lv1_storage_unpatch(); tell(T(STR_CREATE_FAILED)); return 0; }
+
+	// rebuild the state the second pass works on
+	edc_init(); ecc_init();
+	g_nhard = 0; g_nsuspect = 0; g_confirmed = 0; g_changed = 0; g_readerrs = 0; g_badsect = 0; g_recovered = 0;
+	g_pass2_total = 0; g_pass2_done = 0; g_abort = 0; g_finished = 0; g_rd_result = -3; g_rd_result_name[0] = 0;
+	tstart_init();
+	for (char *l = strtok(buf, "\n"); l; l = strtok(NULL, "\n")) {
+		unsigned v, tn, st;
+		if (sscanf(l, "unreadable=%u", &v) == 1) { note_hard(v, 0); g_readerrs++; }
+		else if (sscanf(l, "bad=%u", &v) == 1) { note_hard(v, 1); g_badsect++; }
+		else if (sscanf(l, "uncertain=%u", &v) == 1) {
+			uint8_t sec[RAW_SIZE];
+			if (vf_seek(g_out, (uint64_t)v * RAW_SIZE) == 0 && vf_read(g_out, sec, RAW_SIZE) == RAW_SIZE) {
+				note_suspect(v, sec);
+				if (!strstr(l, "unconfirmed")) g_suspect_ok[g_nsuspect - 1] = 1, g_confirmed++;
+			}
+		}
+		else if (sscanf(l, "track=%u start=%u", &tn, &st) == 2) {
+			for (int t = 0; t < g_ntracks; t++) if (g_tracks[t].num == (int)tn) g_tstart[t] = st;
+		}
+	}
+	// confirmed sectors need no new reads: keep only the unconfirmed ones for the pass
+	uint32_t keep = 0;
+	for (uint32_t k = 0; k < g_nsuspect; k++)
+		if (!g_suspect_ok[k]) {
+			g_suspect[keep] = g_suspect[k];
+			memmove(g_suspect_data + keep * RAW_SIZE, g_suspect_data + k * RAW_SIZE, RAW_SIZE);
+			g_suspect_ok[keep++] = 0;
+		}
+	g_nsuspect = keep; g_confirmed = 0;
+	logf("repair %s: %u failed and %u uncertain sector(s)", g_base, g_nhard, g_nsuspect);
+
+	g_state = ST_RIPPING;
+	snprintf(g_state_title, sizeof(g_state_title), "%s", g_name);
+	snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
+	g_rip_t0 = time(NULL);
+	g_done = g_total = g_leadout;
+	int check = g_check; g_check = CHECK_BITPERFECT;   // the repair always confirms
+	sys_ppu_thread_t tid;
+	sysThreadCreate(&tid, repair_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxrepair");
+	char title[256];
+	snprintf(title, sizeof(title), T(STR_REPAIRING), g_name, g_serial);
+	pad_pressed();
+	uint32_t shown = ~0u; int shown_try = -1, shown_abort = 0;
+	while (!g_finished) {
+		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_abort = 1;
+		uint32_t tot = g_pass2_total ? g_pass2_total : 1, done = g_pass2_done;
+		int rtry = g_rr_max ? g_rr_try : 0;
+		if (done != shown || rtry != shown_try || g_abort != shown_abort) {
+			char pm[96], note[200] = "";
+			snprintf(pm, sizeof(pm), T(STR_PROGRESS), done, g_pass2_total);
+			if (g_rr_max) snprintf(note, sizeof(note), T(STR_REREAD), g_rr_lba, rtry, g_rr_max);
+			progress_draw(title, pm, (uint32_t)((uint64_t)done * 100 / tot), note, g_abort);
+			shown = done; shown_try = rtry; shown_abort = g_abort;
+		}
+		flip_frame();
+	}
+	u64 rv;
+	sysThreadJoin(tid, &rv);
+	g_check = check;
+	if (g_eject) { uint8_t cdb[12] = {0x1B, 0, 0, 0, 0x02, 0, 0, 0, 0, 0, 0, 0}; atapi(cdb, NULL, 0, ATAPI_NON_DATA_PROTO); }
+	sys_storage_close(g_fd);
+	lv1_storage_unpatch();
+	for (int t = 0; t < g_ntracks; t++) md5_hex(g_track_md5bin[t], g_track_md5[t]);   // fresh when patched
+	char rdinfo[RD_NAME + 80] = "";
+	if (g_redump != RD_OFF) redump_verify(rdinfo, sizeof(rdinfo));
+	// results, the .md5 file and the log as after a rip
+	g_nres = 0;
+	snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", g_name, g_serial);
+	snprintf(g_res_path, sizeof(g_res_path), "%s.bin", g_base);
+	if (rdinfo[0]) res_add(g_rd_result == 1 ? 0x7CE0A0 : g_rd_result == 0 ? 0xFF8A80 : 0xA8B0C8, "%s", rdinfo);
+	res_add(0xE8E8F0, T(STR_REPAIRED), g_recovered + g_changed, g_pass2_total);
+	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
+	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);
+	{
+		char mpath[300];
+		snprintf(mpath, sizeof(mpath), "%s.md5", g_base);
+		VFile *mf = vf_open(mpath, "wb");
+		if (mf) { for (int t = 0; t < g_ntracks; t++) vf_printf(mf, "%s  track %02d\n", g_track_md5[t], g_tracks[t].num); vf_close(mf); }
+	}
+	write_riplog();
+	logf("repair done: %u recovered, %u changed, %u unreadable, %u bad", g_recovered, g_changed, g_readerrs, g_badsect);
+	g_state = ST_HOME;
+	fire_event("repair_finished");
+	g_repair_n = 0;
+	return 1;
+}
+
 // Own result screen after a rip (instead of the system dialog). Returns 1 when a new disc was
 // inserted (rip it right away), 0 for O (back to the start screen).
 static int result_screen()
@@ -2377,6 +2571,11 @@ int main(int argc, char *argv[])
 		} else {
 			int a = home_screen();
 			if (exit_requested || a == 0) break;
+			if (a == 3) {
+				if (repair_disc() && result_screen()) autorip = 1;
+				g_disc_state = DISC_NONE;
+				continue;
+			}
 			fresh = (a == 2);
 		}
 		logf("start rip (%s%s)", fresh ? "disc inserted" : "disc already in drive", autorip ? ", auto" : "");
