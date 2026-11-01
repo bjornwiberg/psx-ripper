@@ -14,8 +14,8 @@ FULL = [chr(c) for c in range(0x20, 0x7F)] + [chr(c) for c in range(0xA0, 0x100)
 UI = [chr(c) for c in range(0x20, 0x7F)] + list("åäöÅÄÖéèêëüÜáàíóúñçßøØæÆ×·…–•‹›")
 # (name, file, pixel size) for 1080p and 720p layouts
 FONTS = [
-    ("f1080_small", "DejaVuSans.ttf", 28, UI), ("f1080_body", "DejaVuSans.ttf", 36, FULL), ("f1080_title", "DejaVuSans-Bold.ttf", 64, FULL),
-    ("f720_small", "DejaVuSans.ttf", 19, UI), ("f720_body", "DejaVuSans.ttf", 24, FULL), ("f720_title", "DejaVuSans-Bold.ttf", 43, FULL),
+    ("f1080_tiny", "DejaVuSans.ttf", 22, UI), ("f1080_small", "DejaVuSans.ttf", 28, UI), ("f1080_body", "DejaVuSans.ttf", 36, FULL), ("f1080_title", "DejaVuSans-Bold.ttf", 64, FULL),
+    ("f720_tiny", "DejaVuSans.ttf", 15, UI), ("f720_small", "DejaVuSans.ttf", 19, UI), ("f720_body", "DejaVuSans.ttf", 24, FULL), ("f720_title", "DejaVuSans-Bold.ttf", 43, FULL),
 ]
 
 def pack4(img):

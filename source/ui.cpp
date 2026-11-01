@@ -7,7 +7,7 @@ struct Glyph { uint32_t cp; int16_t w, h, xoff, yoff, adv; uint32_t off; };
 struct Font { const Glyph *glyphs; int count; const uint8_t *data; int height; };
 #include "font.inc"
 
-static const Font *fonts[5];
+static const Font *fonts[6];
 static uint32_t *row_bg;   // one precomputed background colour per scanline
 static uint32_t *canvas;   // the UI is drawn here (cached RAM), never read back from VRAM
 
@@ -19,6 +19,7 @@ void ui_init()
 	fonts[UI_TITLE] = hd ? &f1080_title : &f720_title;
 	fonts[UI_SYM]   = hd ? &f1080_sym   : &f720_sym;
 	fonts[UI_BTN]   = hd ? &f1080_btn   : &f720_btn;
+	fonts[UI_TINY]  = hd ? &f1080_tiny  : &f720_tiny;
 	row_bg = new uint32_t[display_height];
 	canvas = new uint32_t[display_width * display_height];
 	for (u32 y = 0; y < display_height; y++) {

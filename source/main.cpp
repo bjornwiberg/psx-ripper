@@ -3612,14 +3612,15 @@ static int draw_card(int c, int y, int focused, int single)
 		int ty = y + (lb - ls) / 2;
 		ui_icon(dicon, right - tw - igap - isz, ty + (ls - isz) / 2, isz, 0x8890A8);
 		ui_text(UI_SMALL, right - tw, ty, 0x8890A8, drive);
-		if (model[0]) ui_text(UI_SMALL, right, y + lb, 0x6870A0, model, UI_RIGHT);
+		// the model: there, but small (it matters less than the drive and the disc)
+		if (model[0]) ui_text(UI_TINY, right, y + lb + (ls - ui_line(UI_TINY)) / 2, 0x7078A0, model, UI_RIGHT);
 		int iw = 0;
 		if (idl[0]) {
 			iw = ui_text_width(UI_SMALL, idl) + isz + igap;
 			ui_icon("disc", right - iw, y + lb + ls + (ls - isz) / 2, isz, 0x8890A8);
 			ui_text(UI_SMALL, right, y + lb + ls, 0x8890A8, idl, UI_RIGHT);
 		}
-		int mw = ui_text_width(UI_SMALL, model), w = tw + isz + igap;
+		int mw = ui_text_width(UI_TINY, model), w = tw + isz + igap;
 		if (mw > w) w = mw;
 		if (iw > w) w = iw;
 		rw = w + gap;

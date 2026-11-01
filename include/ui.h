@@ -4,7 +4,7 @@
 
 #include <stdint.h>
 
-enum UiFont { UI_SMALL, UI_BODY, UI_TITLE, UI_SYM, UI_BTN };   // UI_BTN: symbols inside button discs   // UI_SYM: button symbols at cap height
+enum UiFont { UI_SMALL, UI_BODY, UI_TITLE, UI_SYM, UI_BTN, UI_TINY };   // UI_BTN: symbols inside button discs   // UI_SYM: button symbols at cap height   // UI_TINY: details that matter less
 enum UiAlign { UI_LEFT, UI_CENTER, UI_RIGHT };
 
 void ui_init();
