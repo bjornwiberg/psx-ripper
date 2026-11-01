@@ -1,11 +1,12 @@
 #!/bin/sh
 # Installs psxripper.pkg on the PS3 via webMAN and starts it again.
-# Refuses while a rip is running (remote view status.json says "ripping").
+# Refuses while the app uses the drive (remote view status.json says "ripping" or "busy":true):
+# killing it then leaves the lv1 patch on and the install hangs the console.
 PS3=${PS3:-192.168.1.50}
 cd "$(dirname "$0")/.." || exit 1
 pad() { curl -s --max-time 8 "http://$PS3/pad.ps3?$1" >/dev/null; sleep 1; curl -s --max-time 8 "http://$PS3/pad.ps3?release" >/dev/null; curl -s --max-time 8 "http://$PS3/pad.ps3?off" >/dev/null; }
 st=$(curl -s --max-time 8 "http://$PS3:8090/status.json")
-case "$st" in *'"state":"ripping"'*) echo "a rip is running, not installing"; exit 2;; esac
+case "$st" in *'"state":"ripping"'*|*'"busy":true'*) echo "the app is using the drive (rip, repair, identify or lv1 patch on), not installing"; exit 2;; esac
 old=$(curl -s --max-time 8 "ftp://$PS3/dev_hdd0/game/PSXR00001/USRDIR/" | grep EBOOT | awk '{print $6,$7,$8}')
 curl -s --max-time 300 -T psxripper.pkg "ftp://$PS3/dev_hdd0/packages/psxripper.pkg" || { echo "upload failed"; exit 1; }
 curl -s --max-time 10 "http://$PS3/xmb.ps3\$exit" >/dev/null

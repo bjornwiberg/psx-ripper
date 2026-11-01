@@ -1443,6 +1443,25 @@ static int lv1_storage_patch()
 	return 0;
 }
 
+// At start: if an earlier run was killed while patched, put the original lv1 code back now
+// (from the backup), before anything touches the drive. Returns 0 = clean, 1 = restored,
+// -1 = patched but no valid backup (a reboot fixes it), -2 = unexpected code (left alone).
+static int lv1_startup_check()
+{
+	u64 v[4];
+	for (int i = 0; i < 4; i++) v[i] = lv1_peek(lv1_off[i]);
+	if (lv1_is_orig(v)) { unlink(LV1_BAK); return 0; }
+	if (memcmp(v, lv1_patch, sizeof(v))) { logf("startup: lv1 code unexpected, left alone"); return -2; }
+	FILE *f = fopen(LV1_BAK, "rb");
+	int ok = f && fread(lv1_saved, sizeof(lv1_saved), 1, f) == 1 && lv1_is_orig(lv1_saved);
+	if (f) fclose(f);
+	if (!ok) { logf("startup: lv1 still patched and no valid backup"); return -1; }
+	lv1_patched = 1;
+	lv1_storage_unpatch();
+	logf("startup: lv1 was left patched by an earlier run, originals restored");
+	return 1;
+}
+
 static void lv1_storage_unpatch()
 {
 	if (!lv1_patched) return;
@@ -1464,6 +1483,27 @@ static int disk_free(const char *dev, uint64_t *mb)
 	int r = (int)p1;
 	if (r == 0) *mb = avail / (1024 * 1024);
 	return r;
+}
+
+// Free space at a destination in MB (0 when unknown).
+static uint64_t dest_free_mb(const char *dir)
+{
+	uint64_t mb = 0;
+	if (!strncmp(dir, "exfat", 5)) { vf_free_mb(dir, &mb); return mb; }
+	char dev[16];
+	snprintf(dev, sizeof(dev), "%.12s", dir);
+	char *sl = strchr(dev + 1, '/');
+	if (sl) *sl = 0;
+	if (disk_free(dev, &mb)) mb = 0;
+	return mb;
+}
+
+// Does the identified disc fit at the destination? (image + some room for cue/md5/log/sbi)
+static int g_space_short = 0;   // MB missing, 0 = fits or unknown
+static void space_check(uint32_t disc_mb)
+{
+	uint64_t fr = dest_free_mb(OUT_DIR);
+	g_space_short = (fr && fr < (uint64_t)disc_mb + 2) ? (int)(disc_mb + 2 - fr) : 0;
 }
 
 static void target_name(const char *dir, char *out, size_t n)
@@ -1515,6 +1555,7 @@ static int prepare_disc(int *err, int *code);
 enum { DISC_NONE, DISC_READING, DISC_READY, DISC_ERROR };
 static volatile int g_disc_state = DISC_NONE;
 static volatile int g_ident_busy = 0;
+static volatile int g_repairing = 0;   // a repair reads the drive
 static char g_disc_title[128], g_disc_serial[16];
 static uint32_t g_disc_mb;
 static volatile int g_repair_n = 0;   // sectors a previous rip of this disc still has wrong (from its log)
@@ -1664,6 +1705,7 @@ static void prev_rip_check()
 	snprintf(bp, sizeof(bp), "%s.bin", g_base);
 	g_prev_rip = vf_exists(bp);
 	g_repair_n = g_prev_rip ? riplog_open_count() : 0;
+	space_check(g_disc_mb ? g_disc_mb : (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024)));
 }
 
 static void fire_event(const char *event);
@@ -2188,6 +2230,11 @@ static void settings_screen()
 		char save_dir[64]; snprintf(save_dir, sizeof(save_dir), "%s", g_outdir);
 		snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
 		target_name(outdir, vals[0], sizeof(vals[0]));
+		if (g_disc_state == DISC_READY && g_disc_mb && dest_free_mb(outdir) && dest_free_mb(outdir) < (uint64_t)g_disc_mb + 2) {
+			char t[96];
+			snprintf(t, sizeof(t), "(!) %s", vals[0]);   // the disc in the drive does not fit here
+			snprintf(vals[0], sizeof(vals[0]), "%s", t);
+		}
 		snprintf(g_outdir, sizeof(g_outdir), "%s", save_dir);
 		snprintf(vals[1], sizeof(vals[1]), "%d", retries);
 		if (speed) snprintf(vals[2], sizeof(vals[2]), "%d\xC3\x97", speed_x[speed]); else snprintf(vals[2], sizeof(vals[2]), "%s", T(STR_SPEED_MAX));
@@ -2390,6 +2437,11 @@ static int home_screen()
 			int sy = y + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2;
 			if (ly + ls / 2 > sy) sy = ly + ls / 2;
 			ui_text(UI_SMALL, ui_w() / 2, sy, 0x8890A8, saving, UI_CENTER);
+			if (st == DISC_READY && g_space_short && !g_prev_rip) {   // will not fit (a re-rip replaces the old image)
+				char sl[200];
+				snprintf(sl, sizeof(sl), T(STR_NO_SPACE), g_disc_mb, (unsigned)(g_disc_mb + 2 - g_space_short));
+				ui_text(UI_SMALL, ui_w() / 2, sy + ls * 13 / 10, 0xFF8A80, sl, UI_CENTER);
+			}
 			if (st == DISC_READY && g_prev_rip) {   // already ripped here: X repairs, square rips again
 				const char *b[] = {"cross", "square", "triangle", "start", "circle"};
 				const char *l[] = {T(STR_HINT_REPAIR), T(STR_HINT_NEWRIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
@@ -2415,6 +2467,13 @@ static int home_screen()
 			prev_rip_check();   // the destination may have changed since the disc was identified
 			if (g_prev_rip != shown_prev) { g_redraw = 2; continue; }   // the screen was out of date: show it first
 			if (g_prev_rip) return 3;                                    // repair
+			if (g_space_short) {                                          // would run out of space half way
+				char m[256];
+				snprintf(m, sizeof(m), T(STR_NO_SPACE), g_disc_mb, (unsigned)(g_disc_mb + 2 - g_space_short));
+				own_dialog(m, 0);
+				g_redraw = 2;
+				continue;
+			}
 			return inserted ? 2 : 1;                                      // rip
 		}
 		if ((p & B_SQUARE) && st == DISC_READY && g_prev_rip) return inserted ? 2 : 1;   // new rip over the old one
@@ -2529,7 +2588,9 @@ static void json_fields(char *js, size_t n)
 static int status_json(char *js, int n)
 {
 	uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
-	snprintf(js, n, "{\"state\":\"%s\",\"percent\":%u,", g_state == ST_RIPPING ? "ripping" : "idle",
+	// busy: the drive is in use or the lv1 patch is on; never stop or reinstall the app then
+	int busy = g_state == ST_RIPPING || g_ident_busy || g_repairing || lv1_patched;
+	snprintf(js, n, "{\"state\":\"%s\",\"busy\":%s,\"percent\":%u,", g_state == ST_RIPPING ? "ripping" : "idle", busy ? "true" : "false",
 	         g_state == ST_RIPPING && g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
 	if (g_state != ST_RIPPING) {   // idle: describe the disc on the home screen
 		size_t o = strlen(js);
@@ -2854,7 +2915,17 @@ static void repair_thread(void *arg)
 	sysThreadExit(0);
 }
 
+static int repair_disc_inner();
 static int repair_disc()
+{
+	g_repairing = 1;
+	int r = repair_disc_inner();
+	lv1_storage_unpatch();   // whatever happened
+	g_repairing = 0;
+	return r;
+}
+
+static int repair_disc_inner()
 {
 	while (g_ident_busy) usleep(10000);
 	int err = 0, code = 0;
@@ -3116,7 +3187,14 @@ int main(int argc, char *argv[])
 	g_sec = (uint8_t *)memalign(128, 4096);
 	lang_init();
 	netInitialize();
-	if (!cfg_load()) { mkdir("/dev_hdd0/tmp", 0777); cfg_save(); }   // first start: write the defaults, so the file can be edited over FTP
+	// start-up checks: config, lv1 state after an earlier crash, USB file systems
+	char warn[400] = "";
+	if (!cfg_load()) { mkdir("/dev_hdd0/tmp", 0777); cfg_save(); logf("startup: no config, defaults written"); }   // editable over FTP
+	{
+		int lv = lv1_startup_check();
+		if (lv == 1) snprintf(warn + strlen(warn), sizeof(warn) - strlen(warn), "%s\n", T(STR_START_LV1_FIXED));
+		else if (lv == -1) snprintf(warn + strlen(warn), sizeof(warn) - strlen(warn), "%s\n", T(STR_START_LV1_REBOOT));
+	}
 	{
 		VfVolume v[8];
 		int nv = vf_scan(v, 8);
@@ -3125,7 +3203,7 @@ int main(int argc, char *argv[])
 	{
 		static const RemoteHooks hooks = {status_json};
 		remote_init(&hooks);
-		if (g_remote) { remote_set(1); notify_url(STR_REMOTE_HELP, ""); }
+		if (g_remote) remote_set(1);
 	}
 	OUT_DIR = g_outdir;
 	{ struct stat gs; ui_guides = stat("/dev_hdd0/tmp/psxrip.guides", &gs) == 0; }
@@ -3134,6 +3212,7 @@ int main(int argc, char *argv[])
 #endif
 
 	logf("---- PSX Ripper start ----");
+	if (warn[0]) logf("startup checks: %s", warn);
 	logf("video %ux%u pitch=%u", display_width, display_height, color_pitch);
 	struct stat ast;
 	if (stat(AUTO_FLAG, &ast) == 0) {
@@ -3153,6 +3232,7 @@ int main(int argc, char *argv[])
 		logf("---- PSX Ripper exit ----");
 		return 0;
 	}
+	if (warn[0]) own_dialog(warn, 0);   // what the start-up checks found and fixed
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
 	int autorip = 0;   // set after a successful rip: the next inserted disc is ripped without asking
 	while (!exit_requested) {

@@ -180,6 +180,9 @@ static const char *en[STR_COUNT] = {
 	"Header (Name: value, for example Authorization: Bearer …); empty removes it",
 	"Headers",
 	"On · %d",
+	"Not enough free space here: the disc needs %u MB, %u MB is free",
+	"An earlier run was stopped while reading the disc. The drive access patch was removed again.",
+	"An earlier run was stopped while reading the disc and could not be cleaned up. Restart the console before ripping.",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -356,6 +359,9 @@ static const char *sv[STR_COUNT] = {
 	"Header (Namn: värde, till exempel Authorization: Bearer …); tom tar bort den",
 	"Headers",
 	"På · %d st",
+	"Inte tillräckligt med ledigt utrymme här: skivan behöver %u MB, %u MB är ledigt",
+	"En tidigare körning avbröts medan skivan lästes. Patchen för skivåtkomst är borttagen igen.",
+	"En tidigare körning avbröts medan skivan lästes och kunde inte städas upp. Starta om konsolen innan du rippar.",
 };
 
 static const char **table = en;
