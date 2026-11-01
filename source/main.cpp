@@ -60,10 +60,9 @@ static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
 static char g_webhook_hdr[WH_HEADERS][256];    // extra headers "Name: value" (often a secret: never logged or shown)
 static int g_webhook_hdr_on = 0;               // send them (off keeps them stored)
 enum { SRC_BD, SRC_USB };
-static int g_src = SRC_BD;                     // drive to rip from: the PS3's own or a USB SuperDrive (usbodd)
-static int g_src_port = -1;                    // chosen USB drive by port (as "Spara till" counts them), -1 = the first one
 static volatile int g_usb = 0;                 // usbodd drive number of the USB drive in use
-static volatile int g_use = SRC_BD;            // the drive actually used: the chosen one when it is connected, else the PS3's
+static volatile int g_use = SRC_BD;            // the drive the drive commands go to (set by select_card)
+static char g_outdir_usb[8][64];               // destination per USB drive, by its port ("" = the hard disk)
 
 // "Name: value" cleaned of CR/LF, so a header can never add lines to the request
 static void clean_header(char *h)
@@ -110,10 +109,9 @@ static int cfg_load()
 			snprintf(g_webhook_hdr[line[14] - '1'], sizeof(g_webhook_hdr[0]), "%s", line + 16);
 			clean_header(g_webhook_hdr[line[14] - '1']);
 		}
-		else if (!strncmp(line, "source=", 7)) {   // bd, usb (any) or usbN (the drive on port N)
-			g_src = !strncmp(line + 7, "usb", 3) ? SRC_USB : SRC_BD;
-			g_src_port = g_src == SRC_USB && line[10] >= '0' && line[10] <= '9' ? atoi(line + 10) : -1;
-		}
+		else if (!strncmp(line, "outdir_usb", 10) && line[10] >= '0' && line[10] <= '7' && line[11] == '=' &&
+		         (line[12] == '/' || !strncmp(line + 12, "exfat", 5)))   // destination of the USB drive on port N
+			snprintf(g_outdir_usb[line[10] - '0'], sizeof(g_outdir_usb[0]), "%s", line + 12);
 		else if (!strncmp(line, "webhook_step=", 13)) { int v = atoi(line + 13); for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
 	}
 	fclose(f);
@@ -126,8 +124,7 @@ static void cfg_save()
 	if (!f) return;
 	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\nwebhook_step=%d\n",
 	        g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on, g_webhook, g_check, g_webhook_mask, g_webhook_step);
-	if (g_src == SRC_USB && g_src_port >= 0) fprintf(f, "source=usb%d\n", g_src_port);
-	else fprintf(f, "source=%s\n", g_src == SRC_USB ? "usb" : "bd");
+	for (int i = 0; i < 8; i++) if (g_outdir_usb[i][0]) fprintf(f, "outdir_usb%d=%s\n", i, g_outdir_usb[i]);
 	fprintf(f, "webhook_headers_on=%d\n", g_webhook_hdr_on);
 	for (int i = 0; i < WH_HEADERS; i++) fprintf(f, "webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
 	fclose(f);
@@ -175,10 +172,32 @@ static void sysutil_callback(u64 status, u64 param, void *usrdata)
 	if (status >= SYSUTIL_OSK_LOADED && status <= SYSUTIL_OSK_INPUT_CANCELED) g_osk_event = (int)status;
 }
 
-static volatile int disc_inserted = 0, disc_present = 1;   // assume a disc until the drive says otherwise
-static int g_src_cb_ignore();   // the system's disc callbacks are about the PS3 drive only
-static void disc_eject_cb(void) { if (g_src_cb_ignore()) return; disc_inserted = 0; disc_present = 0; }
-static void disc_insert_cb(u32 type, char *title) { if (g_src_cb_ignore()) return; disc_inserted = 1; disc_present = 1; }
+// One card per drive on the home screen: card 0 = the PS3's drive, card 1 + n = USB drive n (usbodd).
+// Identify, rip, repair and eject work on one card at a time, g_card: its drive gets the commands,
+// its destination is OUT_DIR, and the disc globals below (g_disc_state, ...) are its fields.
+enum { DISC_NONE, DISC_READING, DISC_READY, DISC_ERROR };
+#define NCARDS (1 + USBODD_DRIVES)
+struct Card {
+	volatile int present, inserted;   // a disc in the drive / just put in, not handled yet
+	volatile int state;               // DISC_*
+	int tried;                        // identification ran since the disc went in
+	int fresh;                        // put in while the app runs: auto-rip, disc_identified
+	char title[128], serial[16];
+	uint32_t mb;
+	char rd[160];                     // Redump line, "" = none
+	volatile int prev_rip, repair_n, space_short;
+	volatile int recheck;             // the destination changed: look again for an earlier rip there
+	char base[256];                   // destination + file name without extension (g_base of the card)
+	char outdir[64];                  // chosen destination
+	char dest[64];                    // used: the chosen one, or the hard disk while it is out
+};
+static Card g_cards[NCARDS];
+static volatile int g_card = 0;       // changes only while no identification, rip or repair runs
+#define disc_inserted (g_cards[g_card].inserted)
+#define disc_present (g_cards[g_card].present)
+// the system's disc callbacks are about its own drive only
+static void disc_eject_cb(void) { g_cards[0].inserted = 0; g_cards[0].present = 0; }
+static void disc_insert_cb(u32 type, char *title) { g_cards[0].inserted = 1; g_cards[0].present = 1; }
 
 static void lv1_storage_unpatch();
 static void program_exit_callback()
@@ -1802,7 +1821,7 @@ static uint64_t dest_free_mb(const char *dir)
 }
 
 // Does the identified disc fit at the destination? (image + some room for cue/md5/log/sbi)
-static int g_space_short = 0;   // MB missing, 0 = fits or unknown
+#define g_space_short (g_cards[g_card].space_short)   // MB missing, 0 = fits or unknown
 static void space_check(uint32_t disc_mb)
 {
 	uint64_t fr = dest_free_mb(OUT_DIR);
@@ -1832,7 +1851,7 @@ static void target_name(const char *dir, char *out, size_t n)
 // Destination next to the current one in the list hard disk, USB 0, USB 1, ... (by port; a FAT32
 // drive is mounted by the PS3 as /dev_usbNNN, an exFAT drive is reached through FatFs).
 // dir = +1 forward, -1 back.
-static void next_target(int dir)
+static void next_target(char *outdir, int dir)
 {
 	char cands[9][32];
 	int nc = 0;
@@ -1848,21 +1867,21 @@ static void next_target(int dir)
 			if (vols[i].port == port) snprintf(cands[nc++], 32, "%s/PSXISO", vols[i].root);
 	}
 	int cur = 0;
-	for (int i = 0; i < nc; i++) if (!strcmp(cands[i], g_outdir)) cur = i;
-	snprintf(g_outdir, sizeof(g_outdir), "%s", cands[(cur + (dir < 0 ? nc - 1 : 1)) % nc]);
+	for (int i = 0; i < nc; i++) if (!strcmp(cands[i], outdir)) cur = i;   // not there any more: from the hard disk
+	snprintf(outdir, 64, "%s", cands[(cur + (dir < 0 ? nc - 1 : 1)) % nc]);
 }
 
 // ---------------------------------------------------------------- disc identification for the home screen
 static char g_name[128];   // title (or volume id) of the disc in the drive
 static int prepare_disc(int *err, int *code);
-enum { DISC_NONE, DISC_READING, DISC_READY, DISC_ERROR };
-static volatile int g_disc_state = DISC_NONE;
+#define g_disc_state (g_cards[g_card].state)
 static volatile int g_ident_busy = 0;
 static volatile int g_repairing = 0;   // a repair reads the drive
-static char g_disc_title[128], g_disc_serial[16];
-static uint32_t g_disc_mb;
-static volatile int g_repair_n = 0;   // sectors a previous rip of this disc still has wrong (from its log)
-static volatile int g_prev_rip = 0;   // the destination already has <name>.bin for this disc
+#define g_disc_title (g_cards[g_card].title)
+#define g_disc_serial (g_cards[g_card].serial)
+#define g_disc_mb (g_cards[g_card].mb)
+#define g_repair_n (g_cards[g_card].repair_n)   // sectors a previous rip of this disc still has wrong (from its log)
+#define g_prev_rip (g_cards[g_card].prev_rip)   // the destination already has <name>.bin for this disc
 
 // Counts the sectors in <g_base>.log that are still wrong (unreadable, bad, unconfirmed).
 static int riplog_open_count()
@@ -1885,7 +1904,8 @@ static int riplog_open_count()
 }
 
 // Redump lookup for the home screen; runs after identification (network only, no drive access).
-static char g_disc_rd[RD_NAME + 48];   // line shown on the home screen, empty = none
+static volatile int g_rd_card = 0;     // card the Redump lookup running now is for
+#define g_disc_rd (g_cards[g_rd_card].rd)  // line shown on the home screen, empty = none
 static volatile int g_rd_seq = 0;      // bumped when g_disc_rd changes
 static volatile int g_rd_busy = 0;     // a lookup is running (redump.cpp uses static buffers)
 static RdDisc g_rd_discs[4];           // online results, reused to verify the rip
@@ -1949,6 +1969,7 @@ static void lookup_thread(void *arg)
 
 static void lookup_start()
 {
+	g_rd_card = g_card;
 	sys_ppu_thread_t t;
 	sysThreadCreate(&t, lookup_thread, NULL, 1000, 0x10000, 0, (char *)"psxlookup");
 }
@@ -2015,6 +2036,7 @@ static void fire_event(const char *event);
 static char g_state_title[128], g_state_serial[16];
 static void identify_thread(void *arg)
 {
+	g_rd_card = g_card;
 	if ((long)arg) usleep(2000 * 1000);   // freshly inserted: let the drive spin up
 	int err = 0, code = 0;
 	int r = prepare_disc(&err, &code);
@@ -2028,6 +2050,7 @@ static void identify_thread(void *arg)
 		snprintf(g_disc_serial, sizeof(g_disc_serial), "%s", g_serial[0] ? g_serial : T(STR_UNKNOWN));
 		g_disc_mb = (uint32_t)((uint64_t)g_leadout * RAW_SIZE / (1024 * 1024));
 		prev_rip_check();
+		snprintf(g_cards[g_card].base, sizeof(g_cards[0].base), "%s", g_base);
 		snprintf(g_state_title, sizeof(g_state_title), "%s", g_name);
 		snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
 		// only for a disc inserted while the app runs; a disc already in the drive at start is part
@@ -2508,6 +2531,25 @@ static void webhook_settings_screen()
 	}
 }
 
+// Is a destination still there? The hard disk always is; USB drives can be pulled out.
+static int dest_available(const char *dir)
+{
+	if (!strncmp(dir, "exfat", 5)) {
+		VfVolume v[8];
+		int n = vf_scan(v, 8);
+		for (int i = 0; i < n && i < 8; i++) if (!strncmp(dir, v[i].root, strlen(v[i].root))) return 1;
+		return 0;
+	}
+	if (!strncmp(dir, "/dev_usb", 8)) {
+		char dev[16];
+		snprintf(dev, sizeof(dev), "%.11s", dir);   // "/dev_usb001"
+		struct stat st;
+		return stat(dev, &st) == 0;
+	}
+	return 1;
+}
+static const char *HDD_DIR = "/dev_hdd0/PSXISO";
+
 // "PS3:ans läsare", "USB 1 · Apple SuperDrive": like the destinations, by port. drv = usbodd drive, -1 = the PS3's.
 static void source_name(int drv, char *out, size_t n)
 {
@@ -2517,26 +2559,12 @@ static void source_name(int drv, char *out, size_t n)
 	else snprintf(out, n, T(STR_SRC_USB_NOPORT), m);
 }
 
-// The drives to choose from, in order: the PS3's (-1), then the connected USB drives by port.
-static int source_list(int *out)
-{
-	int n = 0;
-	out[n++] = -1;
-	for (int port = -1; port < 8; port++)
-		for (int i = 0; i < USBODD_DRIVES; i++)
-			if (usbodd_attached(i) && usbodd_port(i) == port) out[n++] = i;
-	return n;
-}
-
 static void settings_screen()
 {
 	// edit locally; each change is applied and saved at once, O goes back
-	char outdir[64];
-	snprintf(outdir, sizeof(outdir), "%s", OUT_DIR);   // what is used now: the hard disk while the chosen USB drive is out
-	int outdir_set = 0;   // chosen here: only then does it replace the saved choice
 	int retries = g_retries, speed = g_speed, eject = g_eject, autostart = g_autostart, redump = g_redump, row = 0;
-	int src = g_src, remote = g_remote, webhook_on = g_webhook_on, check = g_check, whstep = g_webhook_step;
-	const int NROWS = 11, VIS = 9;   // the list scrolls when it is longer than VIS rows
+	int remote = g_remote, webhook_on = g_webhook_on, check = g_check, whstep = g_webhook_step;
+	const int NROWS = 9, VIS = 9;   // the list scrolls when it is longer than VIS rows
 	int first = 0;
 	char rdver[64] = "";
 	time_t rdwhen = 0;
@@ -2550,48 +2578,37 @@ static void settings_screen()
 		g_drawn = 2;
 		draw_backdrop();
 		ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_SETTINGS_TITLE), UI_CENTER);
-		char vals[13][96];
-		if (strcmp(outdir, OUT_DIR) && !outdir_set) snprintf(outdir, sizeof(outdir), "%s", OUT_DIR);   // a drive came or went
-		char save_dir[64]; snprintf(save_dir, sizeof(save_dir), "%s", g_outdir);
-		snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
-		target_name(outdir, vals[1], sizeof(vals[1]));
-		if (g_disc_state == DISC_READY && g_disc_mb && dest_free_mb(outdir) && dest_free_mb(outdir) < (uint64_t)g_disc_mb + 2) {
-			char t[96];
-			snprintf(t, sizeof(t), "(!) %s", vals[1]);   // the disc in the drive does not fit here
-			snprintf(vals[1], sizeof(vals[1]), "%s", t);
-		}
-		snprintf(g_outdir, sizeof(g_outdir), "%s", save_dir);
-		source_name(g_use == SRC_USB ? g_usb : -1, vals[0], sizeof(vals[0]));   // only drives that are there
-		snprintf(vals[2], sizeof(vals[2]), "%d", retries);
-		if (speed) snprintf(vals[3], sizeof(vals[3]), "%d\xC3\x97", speed_x[speed]); else snprintf(vals[3], sizeof(vals[3]), "%s", T(STR_SPEED_MAX));
-		snprintf(vals[4], sizeof(vals[4]), "%s", eject ? T(STR_ON) : T(STR_OFF));
-		snprintf(vals[5], sizeof(vals[5]), "%s", autostart ? T(STR_ON) : T(STR_OFF));
-		snprintf(vals[6], sizeof(vals[6]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
+		char vals[9][96];   // drive and destination are chosen per drive on the home screen
+		snprintf(vals[0], sizeof(vals[0]), "%d", retries);
+		if (speed) snprintf(vals[1], sizeof(vals[1]), "%d\xC3\x97", speed_x[speed]); else snprintf(vals[1], sizeof(vals[1]), "%s", T(STR_SPEED_MAX));
+		snprintf(vals[2], sizeof(vals[2]), "%s", eject ? T(STR_ON) : T(STR_OFF));
+		snprintf(vals[3], sizeof(vals[3]), "%s", autostart ? T(STR_ON) : T(STR_OFF));
+		snprintf(vals[4], sizeof(vals[4]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
 		if (rdcount > 0) {
 			// Redump's version (date) and when this copy was downloaded (date and time)
 			char date[16], ver[24], when[32];
 			snprintf(date, sizeof(date), "%.10s", rdver);
 			fmt_rd_version(date, ver, sizeof(ver));
 			fmt_local(rdwhen, when, sizeof(when));
-			snprintf(vals[7], sizeof(vals[7]), T(STR_RD_COPY_VALUE), ver, when);
+			snprintf(vals[5], sizeof(vals[5]), T(STR_RD_COPY_VALUE), ver, when);
 		} else {
-			snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_RD_MISSING));
+			snprintf(vals[5], sizeof(vals[5]), "%s", T(STR_RD_MISSING));
 		}
 		char ip[20];
 		remote_ip(ip, sizeof(ip));
-		if (remote) snprintf(vals[8], sizeof(vals[8]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
-		else snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
-		if (!webhook_on) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_OFF));
-		else if (!g_webhook[0]) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_WEBHOOK_NOURL));
+		if (remote) snprintf(vals[6], sizeof(vals[6]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
+		else snprintf(vals[6], sizeof(vals[6]), "%s", T(STR_OFF));
+		if (!webhook_on) snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_OFF));
+		else if (!g_webhook[0]) snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_WEBHOOK_NOURL));
 		else {
 			char host[96];
 			webhook_host(g_webhook, host, sizeof(host));
 			int ne = 0;
 			for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
-			snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
+			snprintf(vals[7], sizeof(vals[7]), T(STR_WEBHOOK_ON_N), host, ne);
 		}
-		snprintf(vals[10], sizeof(vals[10]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
-		const char *labels[11] = {T(STR_L_SOURCE), T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
+		snprintf(vals[8], sizeof(vals[8]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
+		const char *labels[9] = {T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
 		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK)};
 		if (row < first) first = row;
 		if (row >= first + VIS) first = row - VIS + 1;
@@ -2602,8 +2619,7 @@ static void settings_screen()
 			if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
 			ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
 			char v[128];
-			// row 7 is an action; row 0 has nothing to choose from without a USB drive
-			snprintf(v, sizeof(v), r == row && r != 7 && (r != 0 || usbodd_count()) ? "‹ %s ›" : "%s", vals[r]);
+			snprintf(v, sizeof(v), r == row && r != 5 ? "‹ %s ›" : "%s", vals[r]);   // row 5 is an action
 			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 		}
 		{   // all settings live in one file that can also be edited over FTP
@@ -2611,13 +2627,13 @@ static void settings_screen()
 			snprintf(foot, sizeof(foot), T(STR_WH_CFG_PATH), CFG_PATH);
 			footer_note(foot);
 		}
-		if (row == 9) {
+		if (row == 7) {
 			const char *b[] = {"updown", "leftright", "cross", "triangle", "circle"};
 			const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 			hint_bar(b, l, 5);
 		} else {
-			const char *b[] = {"updown", row == 7 ? "cross" : "leftright", "triangle", "circle"};
-			const char *l[] = {T(STR_HINT_SELECT), row == 7 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+			const char *b[] = {"updown", row == 5 ? "cross" : "leftright", "triangle", "circle"};
+			const char *l[] = {T(STR_HINT_SELECT), row == 5 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 			hint_bar(b, l, 4);
 		}
 		}
@@ -2626,13 +2642,13 @@ static void settings_screen()
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
-		if ((p & B_CROSS) && row == 9) {
+		if ((p & B_CROSS) && row == 7) {
 			webhook_settings_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 7) {
+		if ((p & B_CROSS) && row == 5) {
 			redump_download_screen();
 			rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
 			pad_pressed();
@@ -2640,65 +2656,51 @@ static void settings_screen()
 			continue;
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (row == 7) d = 0;
+		if (row == 5) d = 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) {
 			reset = own_dialog(T(STR_RESET_Q), 1) == 1;
 			pad_pressed();
 			g_redraw = 2;
 			if (reset) {   // defaults; the webhook address and the Redump copy are kept
-				snprintf(outdir, sizeof(outdir), "/dev_hdd0/PSXISO");
-				outdir_set = 1;
-				src = SRC_BD; retries = 4; speed = 0; eject = 1; autostart = 0; redump = RD_OFF;
+				for (int c = 0; c < NCARDS; c++) snprintf(g_cards[c].outdir, sizeof(g_cards[0].outdir), "%s", HDD_DIR);
+				snprintf(g_outdir, sizeof(g_outdir), "%s", HDD_DIR);
+				memset(g_outdir_usb, 0, sizeof(g_outdir_usb));
+				retries = 4; speed = 0; eject = 1; autostart = 0; redump = RD_OFF;
 				if (remote) remote_set(0);
 				remote = 0; webhook_on = 0; check = CHECK_BITPERFECT; whstep = 5;   // step: web page only
 			}
 		}
 		if (d && !reset) {
-			if (row == 0) {   // the PS3's drive and the USB drives that are connected, nothing else
-				int list[1 + USBODD_DRIVES], nl = source_list(list), cur = 0;
-				for (int k = 0; k < nl; k++) if (list[k] == (g_use == SRC_USB ? g_usb : -1)) cur = k;
-				int nx = list[(cur + (d > 0 ? 1 : nl - 1)) % nl];
-				src = nx < 0 ? SRC_BD : SRC_USB;
-				if (nx >= 0) { g_src_port = usbodd_port(nx); g_usb = nx; }
-				g_use = src;   // the drive in use changes at once; home identifies what it holds
-			} else if (row == 1) {
-				char save_dir2[64]; snprintf(save_dir2, sizeof(save_dir2), "%s", g_outdir);
-				snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
-				next_target(d);
-				outdir_set = 1;
-				snprintf(outdir, sizeof(outdir), "%s", g_outdir);
-				snprintf(g_outdir, sizeof(g_outdir), "%s", save_dir2);
-			} else if (row == 2) {
+			if (row == 0) {
 				int k = 0; while (k < 6 && steps[k] != retries) k++;
 				retries = steps[(k + (d > 0 ? 1 : 5)) % 6];
-			} else if (row == 3) {
+			} else if (row == 1) {
 				// right = faster: 2x, 4x, 8x, max (index 3 ... 0)
 				if (d > 0 && speed > 0) speed--;
 				if (d < 0 && speed < 3) speed++;
-			} else if (row == 4) {
+			} else if (row == 2) {
 				eject = !eject;
-			} else if (row == 5) {
+			} else if (row == 3) {
 				autostart = !autostart;
-			} else if (row == 6) {
+			} else if (row == 4) {
 				redump = (redump + (d > 0 ? 1 : 2)) % 3;
-			} else if (row == 8) {
+			} else if (row == 6) {
 				remote = !remote;
 				remote_set(remote);
 				if (remote) notify_url(STR_REMOTE_HELP, "");
-			} else if (row == 9) {
+			} else if (row == 7) {
 				webhook_on = !webhook_on;
-			} else if (row == 10) {
+			} else if (row == 8) {
 				check = (check + (d > 0 ? 1 : 2)) % 3;
 			}
 		}
 		if (d || reset) {
 			// every change is applied and saved immediately
-			if (outdir_set) { snprintf(g_outdir, sizeof(g_outdir), "%s", outdir); OUT_DIR = g_outdir; }
-			g_src = src; g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on; g_check = check; g_webhook_step = whstep;
+			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on; g_check = check; g_webhook_step = whstep;
 			cfg_save();
-			logf("settings saved: source=%d outdir=%s retries=%d speed=%d eject=%d autostart=%d redump=%d remote=%d webhook=%d",
-			     g_src, g_outdir, g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on);
+			logf("settings saved: retries=%d speed=%d eject=%d autostart=%d redump=%d remote=%d webhook=%d",
+			     g_retries, g_speed, g_eject, g_autostart, g_redump, g_remote, g_webhook_on);
 		}
 		if (p & B_CIRCLE) return;
 	}
@@ -2724,138 +2726,194 @@ static void eject_disc()
 	g_disc_state = DISC_NONE;
 }
 
-static int g_src_cb_ignore() { return g_use == SRC_USB; }
-
-// The chosen USB drive when it is connected (usbodd number), else -1.
-static int usb_wanted()
+// Makes card c the one the drive commands, OUT_DIR and the disc globals refer to. Only while idle.
+static void select_card(int c)
 {
-	if (g_src != SRC_USB) return -1;
-	for (int i = 0; i < USBODD_DRIVES; i++)
-		if (usbodd_attached(i) && (g_src_port < 0 || usbodd_port(i) == g_src_port)) return i;
-	return -1;
+	g_card = c;
+	g_use = c ? SRC_USB : SRC_BD;
+	if (c) g_usb = c - 1;
+	if (!g_cards[c].dest[0]) snprintf(g_cards[c].dest, sizeof(g_cards[0].dest), "%s", HDD_DIR);
+	OUT_DIR = g_cards[c].dest;
+	if (g_cards[c].base[0]) snprintf(g_base, sizeof(g_base), "%s", g_cards[c].base);
 }
 
-// Is a destination still there? The hard disk always is; USB drives can be pulled out.
-static int dest_available(const char *dir)
+// The cards there are, in screen order: the PS3's drive, then the USB drives by port.
+static int card_list(int *out)
 {
-	if (!strncmp(dir, "exfat", 5)) {
-		VfVolume v[8];
-		int n = vf_scan(v, 8);
-		for (int i = 0; i < n && i < 8; i++) if (!strncmp(dir, v[i].root, strlen(v[i].root))) return 1;
-		return 0;
-	}
-	if (!strncmp(dir, "/dev_usb", 8)) {
-		char dev[16];
-		snprintf(dev, sizeof(dev), "%.11s", dir);   // "/dev_usb001"
-		struct stat st;
-		return stat(dev, &st) == 0;
-	}
-	return 1;
+	int n = 0;
+	out[n++] = 0;
+	for (int port = -1; port < 8; port++)
+		for (int i = 0; i < USBODD_DRIVES; i++)
+			if (usbodd_attached(i) && usbodd_port(i) == port) out[n++] = 1 + i;
+	return n;
 }
-static const char *HDD_DIR = "/dev_hdd0/PSXISO";
+
+// A destination was chosen for card c: remember it (per USB port for the USB drives) and save.
+static void card_set_outdir(int c, const char *dir)
+{
+	Card &k = g_cards[c];
+	snprintf(k.outdir, sizeof(k.outdir), "%s", dir);
+	snprintf(k.dest, sizeof(k.dest), "%s", dir);
+	if (c == 0) snprintf(g_outdir, sizeof(g_outdir), "%s", dir);
+	else if (usbodd_port(c - 1) >= 0) snprintf(g_outdir_usb[usbodd_port(c - 1)], sizeof(g_outdir_usb[0]), "%s", dir);
+	k.recheck = 1;
+	cfg_save();
+	logf("card %d: destination %s", c, dir);
+}
 
 // The system reports discs only for its own drive and nothing about USB drives coming and going.
-// A thread looks every two seconds: USB optical drives (model, unlock so the slot takes a disc,
-// disc in/out of the one in use), the drive to use (the chosen one when it is there, else the
-// PS3's), and the destination (the chosen one when it is there, else the hard disk). Drives the
-// app is reading from, and the destination of a running rip, are left alone.
+// A thread looks every two seconds: USB optical drives (model and port when they connect, unlock
+// so the slot takes a disc, disc in and out) and each card's destination (the chosen one when it
+// is there, else the hard disk). A drive the app is reading from is left alone.
 static void usb_presence_thread(void *arg)
 {
-	int was = -1;                         // disc in the USB drive in use: unknown
-	int empty[USBODD_DRIVES];             // the other USB drives: known to be empty (unlocked)
-	for (int i = 0; i < USBODD_DRIVES; i++) empty[i] = -1;
+	int was[USBODD_DRIVES];   // disc in USB drive n: -1 unknown, 0 no, 1 yes
+	for (int i = 0; i < USBODD_DRIVES; i++) was[i] = -1;
 	while (!exit_requested) {
 		usleep(2000 * 1000);
 		int busy = g_state_busy();
 		for (int i = 0; i < USBODD_DRIVES; i++) {
-			if (!usbodd_attached(i)) { empty[i] = -1; continue; }
-			int in_use = g_use == SRC_USB && i == g_usb;
-			if (in_use && busy) continue;
-			if (!usbodd_name(i)[0]) {   // just connected: model and port
-				usbodd_identify(i);
-				logf("usb drive %d: %s, port %d", i, usbodd_name(i), usbodd_port(i));
-				g_redraw = 2;   // the screens list it
+			Card &k = g_cards[1 + i];
+			if (!usbodd_attached(i)) {
+				if (was[i] != -1 || k.present) { k.present = 0; k.inserted = 0; was[i] = -1; g_redraw = 2; }
+				continue;
 			}
-			if (in_use) continue;   // below, with the disc events
+			if (busy && g_card == 1 + i) { was[i] = -1; continue; }   // in use: its own commands tell
+			if (!usbodd_name(i)[0]) {   // just connected: model, port and the destination chosen for that port
+				usbodd_identify(i);
+				int port = usbodd_port(i);
+				const char *od = port >= 0 && g_outdir_usb[port][0] ? g_outdir_usb[port] : HDD_DIR;
+				snprintf(k.outdir, sizeof(k.outdir), "%s", od);
+				k.dest[0] = 0;
+				k.state = DISC_NONE; k.tried = 0; k.base[0] = 0;
+				logf("usb drive %d: %s, port %d", i, usbodd_name(i), port);
+				g_redraw = 2;
+			}
 			const uint8_t tur[6] = {0};
 			int r = usbodd_cmd(i, tur, 6, NULL, 0, 0);
-			int none = r != 0 && r != -1 && (r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A;
-			if (none && empty[i] != 1) usbodd_unlock(i);   // without it the slot does not take a disc
-			empty[i] = none;
+			// a disc that is still spinning up (not ready, unit attention) counts as present
+			int now = r == 0 || (r != -1 && !((r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A));
+			if (!now && was[i] != 0) usbodd_unlock(i);   // without it the slot does not take a disc
+			if (was[i] == 0 && now) { k.present = 1; k.inserted = 1; logf("usb drive %d: disc inserted", i); }
+			if (was[i] == 1 && !now) { k.present = 0; k.inserted = 0; logf("usb drive %d: disc removed", i); }
+			if (was[i] == -1) k.present = now;
+			if (was[i] != now) g_redraw = 2;
+			was[i] = now;
 		}
-		if (busy) { was = -1; continue; }
-		// destination: back to the hard disk while the chosen USB drive is out, and back again
-		const char *dest = dest_available(g_outdir) ? g_outdir : HDD_DIR;
-		if (strcmp(dest, OUT_DIR)) {
-			logf("destination now %s", dest);
-			OUT_DIR = dest;
-			if (g_disc_state == DISC_READY) prev_rip_check();   // "already ripped here", free space
-			g_redraw = 2;
+		if (busy) continue;   // a rip may be writing to a destination: leave them be
+		for (int c = 0; c < NCARDS; c++) {
+			Card &k = g_cards[c];
+			if (!k.outdir[0]) continue;
+			const char *dest = dest_available(k.outdir) ? k.outdir : HDD_DIR;
+			if (strcmp(dest, k.dest)) {
+				snprintf(k.dest, sizeof(k.dest), "%s", dest);
+				logf("card %d: destination now %s", c, dest);
+				k.recheck = 1;   // "already ripped here", free space
+				g_redraw = 2;
+			}
 		}
-		// drive: the chosen one came or went: switch and identify what the drive now in use holds
-		int want = usb_wanted();
-		int use = want >= 0 ? SRC_USB : SRC_BD;
-		if (use != g_use || (use == SRC_USB && want != g_usb)) {
-			logf("drive in use: %s %d", use == SRC_USB ? "usb" : "ps3", want);
-			if (want >= 0) g_usb = want;
-			g_use = use;
-			was = -1;
-			disc_present = 1;
-			g_disc_state = DISC_NONE;
-			disc_inserted = 1;
-			g_redraw = 2;
-			continue;
-		}
-		if (g_use != SRC_USB) { was = -1; continue; }
-		const uint8_t tur[6] = {0};
-		int r = usbodd_cmd(g_usb, tur, 6, NULL, 0, 0);
-		// a disc that is still spinning up (not ready, unit attention) counts as present
-		int now = r == 0 || (r != -1 && !((r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A));
-		if (!now && was != 0) usbodd_unlock(g_usb);   // lets the slot take the next disc
-		if (was == 0 && now) { disc_present = 1; disc_inserted = 1; logf("usb drive: disc inserted"); }
-		if (was == 1 && !now) { disc_present = 0; disc_inserted = 0; logf("usb drive: disc removed"); }
-		if (was == -1) disc_present = now;
-		was = now;
 	}
 	sysThreadExit(0);
 }
 
-// Home screen. Returns 1 = rip the disc in the drive, 2 = rip a freshly inserted disc, 0 = exit.
+// One card: drive, disc, what is known about it here, and where it goes. Returns its height.
+static int draw_card(int c, int y, int focused, int single)
+{
+	Card &k = g_cards[c];
+	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
+	int left = ui_w() / 8, right = ui_w() * 7 / 8, cx = ui_w() / 2;
+	int h = ls + lb + ls * 3 + lb / 2;
+	if (!single) ui_rect(left - ui_w() / 60, y - lb / 3, right - left + ui_w() / 30, h, focused ? 0x703D6FD9 : 0x30FFFFFF);
+	int st = k.state;
+	char drive[96];
+	source_name(c ? c - 1 : -1, drive, sizeof(drive));
+	int ly = y;
+	ui_text(UI_SMALL, single ? cx : left, ly, 0x8890A8, drive, (UiAlign)(single ? UI_CENTER : UI_LEFT));
+	ly += ls;
+	if (st == DISC_READY) {
+		char line[200];
+		snprintf(line, sizeof(line), "%s  ·  %s  ·  %u MB", k.title, k.serial, k.mb);
+		ui_text(UI_BODY, single ? cx : left, ly, 0xFFFFFF, line, (UiAlign)(single ? UI_CENTER : UI_LEFT));
+	} else {
+		const char *msg = st == DISC_READING ? T(c ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
+		ui_text(UI_BODY, single ? cx : left, ly, 0xFFFFFF, msg, (UiAlign)(single ? UI_CENTER : UI_LEFT));
+	}
+	ly += lb;
+	int ax = single ? cx : left;
+	UiAlign al = single ? UI_CENTER : UI_LEFT;
+	if (st == DISC_READY && k.rd[0]) ui_text(UI_SMALL, ax, ly, 0x9AD0A8, k.rd, al);
+	ly += ls;
+	if (st == DISC_READY && k.prev_rip) {   // already ripped here: one line, "known errors" in yellow
+		char p2[96];
+		if (k.repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), k.repair_n);
+		else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
+		const char *p1 = T(STR_ALREADY_HERE);
+		int w1 = ui_text_width(UI_SMALL, p1), w2 = ui_text_width(UI_SMALL, p2), x0 = single ? (ui_w() - w1 - w2) / 2 : left;
+		ui_text(UI_SMALL, x0, ly, 0x8FA8D8, p1);
+		ui_text(UI_SMALL, x0 + w1, ly, k.repair_n ? 0xF0C060 : 0x8FA8D8, p2);
+	} else if (st == DISC_READY && k.space_short) {   // will not fit (a re-rip replaces the old image)
+		char sl[200];
+		snprintf(sl, sizeof(sl), T(STR_NO_SPACE), k.mb, (unsigned)(k.mb + 2 - k.space_short));
+		ui_text(UI_SMALL, ax, ly, 0xFF8A80, sl, al);
+	}
+	ly += ls;
+	char tname[96], saving[160], v[180];
+	target_name(k.dest[0] ? k.dest : HDD_DIR, tname, sizeof(tname));
+	snprintf(saving, sizeof(saving), T(STR_HOME_SAVING), tname);
+	snprintf(v, sizeof(v), focused ? "‹ %s ›" : "%s", saving);   // ←→ chooses where this drive saves
+	ui_text(UI_SMALL, ax, ly, focused ? 0xC8D0E0 : 0x8890A8, v, al);
+	return h;
+}
+
+// Home screen: a card per drive. Up/down picks a card; left/right its destination; X, square and
+// triangle act on it. Returns 1 = rip the disc in g_card's drive, 2 = rip a freshly inserted disc,
+// 3 = repair, 0 = exit.
 static volatile int g_insert_pending = 0;   // a disc was inserted on the result screen (auto-rip off)
 static int home_screen()
 {
-	disc_inserted = g_insert_pending;   // treat it as freshly inserted: identify (and report) it
+	if (g_insert_pending) g_cards[g_card].inserted = 1;   // treat it as freshly inserted: identify (and report) it
 	g_insert_pending = 0;
 	g_redraw = 2;
 	pad_pressed();   // swallow buttons still held from a previous screen
-	if (g_disc_state != DISC_READY && !g_ident_busy && !disc_inserted) identify_start(0);
-	int last_state = -1, inserted = 0, last_rd = -1;
+	static int sel = 0;
+	int last_rd = -1, last_sig = -1;
 	while (!exit_requested) {
+		int list[NCARDS], nc = card_list(list);
+		int si = 0;
+		for (int i = 0; i < nc; i++) if (list[i] == sel) si = i;
+		sel = list[si];
 		if (g_rd_seq != last_rd) { last_rd = g_rd_seq; g_redraw = 2; }
-		if (disc_inserted) { disc_inserted = 0; inserted = 1; while (g_ident_busy) usleep(10000); identify_start(1); }
-		if (!disc_present) { if (g_disc_state != DISC_NONE && !g_ident_busy) g_disc_state = DISC_NONE; inserted = 0; }
-		int st = g_disc_state;
-		if (st != last_state) { last_state = st; g_redraw = 2; }
+		// disc events and identification, one drive at a time
+		if (!g_ident_busy && !g_repairing) {
+			for (int i = 0; i < nc; i++) {
+				Card &k = g_cards[list[i]];
+				if (k.inserted) { k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0; }
+				if (!k.present) { if (k.state != DISC_NONE) k.state = DISC_NONE; k.tried = 0; k.fresh = 0; continue; }
+				if (!k.tried) { k.tried = 1; select_card(list[i]); identify_start(k.fresh); break; }
+				if (k.recheck) { k.recheck = 0; if (k.state == DISC_READY) { select_card(list[i]); prev_rip_check(); } g_redraw = 2; }
+			}
+		}
+		int sig = nc;
+		for (int i = 0; i < nc; i++) sig = sig * 7 + g_cards[list[i]].state * 2 + g_cards[list[i]].prev_rip;
+		if (sig != last_sig) { last_sig = sig; g_redraw = 2; }
 		// automatic rip only for a disc not ripped to this destination yet: never overwrite one
-		if (st == DISC_READY && inserted && g_autostart && !g_prev_rip) return 2;
-		char tname[96], saving[160];
-		target_name(OUT_DIR, tname, sizeof(tname));   // the chosen one, or the hard disk while it is out
-		snprintf(saving, sizeof(saving), T(STR_HOME_SAVING), tname);
+		if (g_autostart && !g_ident_busy)
+			for (int i = 0; i < nc; i++) {
+				Card &k = g_cards[list[i]];
+				if (k.state == DISC_READY && k.fresh && !k.prev_rip) { select_card(list[i]); k.fresh = 0; return 2; }
+			}
+		Card &f = g_cards[sel];
+		int st = f.state;
 		g_backdrop_shown = 0;   // a dialog opened later must redraw its backdrop
 		if (g_redraw > 0) {
 			g_redraw = 0;
 			g_drawn = 2;
 			draw_backdrop();
-			int y = ui_h() * 2 / 5;
-			if (st == DISC_READY) {
-				char info[96];
-				snprintf(info, sizeof(info), "%s  ·  %u MB", g_disc_serial, g_disc_mb);
-				// group 1: the disc (title, serial and size, Redump name) close together
-				ui_text(UI_TITLE, ui_w() / 2, y - ui_line(UI_BODY), 0xFFFFFF, g_disc_title, UI_CENTER);
-				ui_text(UI_BODY, ui_w() / 2, y - ui_line(UI_BODY) + ui_line(UI_TITLE) * 9 / 10, 0xA8B0C8, info, UI_CENTER);
+			if (nc == 1) {   // one drive: the card without a frame, in the middle as before
+				draw_card(sel, ui_h() * 2 / 5 - ui_line(UI_BODY), 1, 1);
 			} else {
-				const char *msg = st == DISC_READING ? T(g_use == SRC_USB ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
-				ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, msg, UI_CENTER);
+				int y = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2;
+				for (int i = 0; i < nc; i++) y += draw_card(list[i], y, list[i] == sel, 0) + ui_line(UI_BODY) / 2;
 			}
 			if (g_webhook_on && g_webhook[0]) {   // just a hint that webhooks are on; details in the settings
 				int ne = 0;
@@ -2864,47 +2922,13 @@ static int home_screen()
 				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
 				footer_note(wl);
 			}
-			int ls = ui_line(UI_SMALL), lb = ui_line(UI_BODY);
-			int ly = y - lb + ui_line(UI_TITLE) * 9 / 10 + lb;   // just under serial and size
-			if (st == DISC_READY && g_disc_rd[0]) { ui_text(UI_SMALL, ui_w() / 2, ly, 0x9AD0A8, g_disc_rd, UI_CENTER); ly += ls; }
-			// group 2: already ripped here? one line, the "known errors" part in yellow as a warning
-			if (st == DISC_READY && g_prev_rip) {
-				ly += lb;
-				char p2[96];
-				if (g_repair_n) snprintf(p2, sizeof(p2), T(STR_HERE_ERRORS), g_repair_n);
-				else snprintf(p2, sizeof(p2), "%s", T(STR_HERE_CLEAN));
-				const char *p1 = T(STR_ALREADY_HERE);
-				int w1 = ui_text_width(UI_SMALL, p1), w2 = ui_text_width(UI_SMALL, p2), x0 = (ui_w() - w1 - w2) / 2;
-				ui_text(UI_SMALL, x0, ly, 0x8FA8D8, p1);
-				ui_text(UI_SMALL, x0 + w1, ly, g_repair_n ? 0xF0C060 : 0x8FA8D8, p2);
-				ly += ls;
-			}
-			// group 3: where it comes from (only when it is not the PS3's own drive) and where it goes
-			int sy = ly + lb;
-			if (g_use == SRC_USB) {
-				char from[96], name[80];
-				source_name(g_usb, name, sizeof(name));
-				snprintf(from, sizeof(from), T(STR_SRC_LINE), name);
-				ui_text(UI_SMALL, ui_w() / 2, sy, 0x8890A8, from, UI_CENTER);
-				sy += ls;
-			}
-			ui_text(UI_SMALL, ui_w() / 2, sy, 0x8890A8, saving, UI_CENTER);
-			if (st == DISC_READY && g_space_short && !g_prev_rip) {   // will not fit (a re-rip replaces the old image)
-				char sl[200];
-				snprintf(sl, sizeof(sl), T(STR_NO_SPACE), g_disc_mb, (unsigned)(g_disc_mb + 2 - g_space_short));
-				ui_text(UI_SMALL, ui_w() / 2, sy + ls * 13 / 10, 0xFF8A80, sl, UI_CENTER);
-			}
-			if (st == DISC_READY && g_prev_rip && g_repair_n) {   // ripped here with known errors: square repairs
+			if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
 				const char *b[] = {"cross", "square", "triangle", "start", "circle"};
 				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
 				hint_bar(b, l, 5);
-			} else if (st == DISC_READY && g_prev_rip) {   // ripped here without known errors: nothing to repair
-				const char *b[] = {"cross", "triangle", "start", "circle"};
-				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
-				hint_bar(b, l, 4);
 			} else if (st == DISC_READY) {
 				const char *b[] = {"cross", "triangle", "start", "circle"};
-				const char *l[] = {T(STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
+				const char *l[] = {T(f.prev_rip ? STR_HINT_NEWRIP : STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_SETTINGS), T(STR_HINT_EXIT)};
 				hint_bar(b, l, 4);
 			} else if (st == DISC_ERROR) {
 				const char *b[] = {"triangle", "start", "circle"};
@@ -2918,6 +2942,19 @@ static int home_screen()
 		}
 		flip_frame();
 		int p = pad_pressed();
+		if ((p & B_UP) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }
+		if ((p & B_DOWN) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }
+		if (p & (B_LEFT | B_RIGHT)) {   // where this drive saves
+			char od[64];
+			snprintf(od, sizeof(od), "%s", f.dest[0] ? f.dest : HDD_DIR);
+			next_target(od, (p & B_RIGHT) ? 1 : -1);
+			card_set_outdir(sel, od);
+			g_redraw = 2;
+		}
+		if ((p & (B_CROSS | B_SQUARE | B_TRIANGLE)) && (st == DISC_READY || st == DISC_ERROR)) {
+			while (g_ident_busy) usleep(10000);
+			select_card(sel);
+		}
 		if ((p & B_CROSS) && st == DISC_READY) {
 			int shown_prev = g_prev_rip;
 			prev_rip_check();   // the destination may have changed since the disc was identified
@@ -2930,9 +2967,11 @@ static int home_screen()
 				g_redraw = 2;
 				continue;
 			}
-			return inserted ? 2 : 1;   // rip, also over an existing rip (X is always a rip)
+			int fr = f.fresh;
+			f.fresh = 0;
+			return fr ? 2 : 1;   // rip, also over an existing rip (X is always a rip)
 		}
-		if ((p & B_SQUARE) && st == DISC_READY && g_prev_rip && g_repair_n) {   // repair the sectors the log lists
+		if ((p & B_SQUARE) && st == DISC_READY && f.prev_rip && f.repair_n) {   // repair the sectors the log lists
 			int shown_prev = g_prev_rip;
 			prev_rip_check();
 			if (g_prev_rip != shown_prev || !g_repair_n) { g_redraw = 2; continue; }
@@ -2940,18 +2979,10 @@ static int home_screen()
 		}
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
 		if (p & B_START) {
-			int old = g_redump, old_src = g_use * 16 + g_usb;
+			int old = g_redump;
 			settings_screen();
-			if (g_use * 16 + g_usb != old_src) {   // another drive: forget the disc and identify what is in the new one
-				while (g_ident_busy) usleep(10000);
-				disc_present = 1;
-				g_disc_state = DISC_NONE;
-				identify_start(0);
-				g_redraw = 2;
-				continue;
-			}
 			if (g_redump != old && g_disc_state == DISC_READY && !g_ident_busy) lookup_start();
-			if (g_disc_state == DISC_READY && !g_ident_busy) prev_rip_check();   // destination may have changed
+			for (int i = 0; i < NCARDS; i++) g_cards[i].recheck = 1;   // destinations may have been reset
 			g_redraw = 2;
 		}
 		if (p & B_CIRCLE) return 0;
@@ -3693,7 +3724,12 @@ int main(int argc, char *argv[])
 		remote_init(&hooks);
 		if (g_remote) remote_set(1);
 	}
-	OUT_DIR = dest_available(g_outdir) ? g_outdir : HDD_DIR;   // the hard disk while the chosen USB drive is out
+	// card 0 = the PS3's drive: its destination is the "outdir" of the config (the hard disk while
+	// a chosen USB drive is out); the USB drives get theirs when they connect
+	snprintf(g_cards[0].outdir, sizeof(g_cards[0].outdir), "%s", g_outdir);
+	snprintf(g_cards[0].dest, sizeof(g_cards[0].dest), "%s", dest_available(g_outdir) ? g_outdir : HDD_DIR);
+	g_cards[0].present = 1;   // assume a disc until the drive says otherwise
+	select_card(0);
 	{ struct stat gs; ui_guides = stat("/dev_hdd0/tmp/psxrip.guides", &gs) == 0; }
 #ifdef PRIVATE_SBI
 	install_missing_sbis();
@@ -3723,12 +3759,6 @@ int main(int argc, char *argv[])
 	if (warn[0]) own_dialog(warn, 0);   // what the start-up checks found and fixed
 	{ struct stat ds; g_debug_on = stat("/dev_hdd0/tmp/psxrip.debug", &ds) == 0; if (g_debug_on) logf("debug commands on (/dbg)"); }
 	usbodd_init();   // USB SuperDrive (setting "Läsare")
-	if (g_src == SRC_USB) {   // let a chosen USB drive attach first; without it the PS3's drive is used
-		for (int i = 0; i < 30 && !usbodd_attached(g_usb); i++) usleep(100 * 1000);
-		int w = usb_wanted();
-		if (w >= 0) g_usb = w;
-		g_use = w >= 0 ? SRC_USB : SRC_BD;
-	}
 	{ sys_ppu_thread_t t; sysThreadCreate(&t, usb_presence_thread, NULL, 1500, 0x4000, 0, (char *)"psxusbpoll"); }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
@@ -3743,6 +3773,7 @@ int main(int argc, char *argv[])
 			if (a == 3) {
 				if (repair_disc() && result_screen()) autorip = 1;
 				g_disc_state = DISC_NONE;
+				g_cards[g_card].tried = 0;   // identify it again (the log changed)
 				continue;
 			}
 			fresh = (a == 2);
@@ -3754,6 +3785,7 @@ int main(int argc, char *argv[])
 		}
 		int ok = rip_disc(fresh, 1);   // the home screen already shows what will be ripped
 		g_disc_state = DISC_NONE;     // ejected (or ripped): identify again on the next home screen
+		g_cards[g_card].tried = 0;
 		autorip = 0;
 		if (!ok) continue;
 
