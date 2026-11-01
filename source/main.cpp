@@ -1610,7 +1610,8 @@ static void settings_screen()
 		else { char host[96]; webhook_host(g_webhook, host, sizeof(host)); snprintf(vals[8], sizeof(vals[8]), T(STR_WEBHOOK_ON), host); }
 		const char *labels[9] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
 		                         T(STR_L_REMOTE), T(STR_L_WEBHOOK)};
-		int top = ui_h() * 2 / 9, lh = ui_line(UI_BODY) * 17 / 10, left = ui_w() / 6, right = ui_w() * 5 / 6;
+		// first row below the "Settings" subtitle (drawn at h/10 + title + body/2), then nine rows
+		int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10, left = ui_w() / 6, right = ui_w() * 5 / 6;
 		for (int r = 0; r < NROWS; r++) {
 			int y = top + r * lh;
 			if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
