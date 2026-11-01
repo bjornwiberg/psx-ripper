@@ -25,6 +25,7 @@
 #include "storage.h"
 #include "lang.h"
 #include "ui.h"
+#include "md5.h"
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
 // Output locations; the mount test redirects both so a mounted image is never overwritten
@@ -422,17 +423,24 @@ static void detect_disc_id()
 static const char *lookup_title(const char *serial)
 {
 	if (strlen(serial) != 11) return NULL;
-	char key[10];
-	memcpy(key, serial, 4);
-	memcpy(key + 4, serial + 5, 3);
-	memcpy(key + 7, serial + 9, 2);
-	key[9] = 0;
-	int lo = 0, hi = (int)(sizeof(psx_titles) / sizeof(psx_titles[0])) - 1;
+	int px = -1;
+	for (unsigned i = 0; i < sizeof(title_prefixes) / sizeof(title_prefixes[0]); i++)
+		if (!strncmp(serial, title_prefixes[i], 4)) { px = i; break; }
+	if (px < 0) return NULL;
+	uint32_t num = (serial[5] - '0') * 10000 + (serial[6] - '0') * 1000 + (serial[7] - '0') * 100 + (serial[9] - '0') * 10 + (serial[10] - '0');
+	uint32_t key = px * 100000 + num;
+	static const uint32_t n = sizeof(title_keys) / sizeof(title_keys[0]);
+	static const char **ptrs = NULL;
+	if (!ptrs) {   // titles are stored back to back in key order: index them once
+		ptrs = (const char **)malloc(n * sizeof(*ptrs));
+		const char *s = (const char *)title_blob;
+		for (uint32_t i = 0; i < n; i++) { ptrs[i] = s; s += strlen(s) + 1; }
+	}
+	int lo = 0, hi = (int)n - 1;
 	while (lo <= hi) {
 		int mid = (lo + hi) / 2;
-		int c = strcmp(key, psx_titles[mid].serial);
-		if (!c) return psx_titles[mid].title;
-		if (c < 0) hi = mid - 1; else lo = mid + 1;
+		if (title_keys[mid] == key) return ptrs[mid];
+		if (title_keys[mid] < key) lo = mid + 1; else hi = mid - 1;
 	}
 	return NULL;
 }
@@ -650,6 +658,10 @@ static int track_is_audio(uint32_t lba)
 
 // Double buffering: the reader thread fills one buffer from the drive while the writer
 // thread flushes the other to the hard disk, so drive and disk work in parallel.
+// MD5 per track, computed by the writer thread (Redump hashes each track separately)
+static Md5 g_md5[MAX_TRACKS + 1];
+static char g_track_md5[MAX_TRACKS + 1][33];
+
 static uint8_t *g_bufs[2];
 static volatile uint32_t g_buf_len[2];   // sectors in buffer, 0 = empty
 static volatile uint32_t g_buf_end[2];   // lba after the last sector in buffer
@@ -664,6 +676,18 @@ static void writer_thread(void *arg)
 		__sync_synchronize();
 		uint32_t n = g_buf_len[k];
 		if (fwrite(g_bufs[k], RAW_SIZE, n, g_out) != n) g_write_failed = 1;
+		// feed each sector range to the MD5 of the track it belongs to
+		uint32_t first = g_buf_end[k] - n;
+		for (uint32_t i = 0; i < n;) {
+			uint32_t lba = first + i;
+			int t = g_ntracks - 1;
+			while (t > 0 && lba < g_tracks[t].lba) t--;
+			uint32_t end = (t + 1 < g_ntracks) ? g_tracks[t + 1].lba : g_leadout;
+			uint32_t cnt = end - lba;
+			if (cnt > n - i) cnt = n - i;
+			md5_update(&g_md5[t], g_bufs[k] + i * RAW_SIZE, cnt * RAW_SIZE);
+			i += cnt;
+		}
 		g_done = g_buf_end[k];
 		g_buf_len[k] = 0;
 	}
@@ -681,6 +705,7 @@ static void rip_thread(void *arg)
 	g_bufs[0] = (uint8_t *)memalign(128, CHUNK * SECT_Q);
 	g_bufs[1] = (uint8_t *)memalign(128, CHUNK * SECT_Q);
 	g_buf_len[0] = g_buf_len[1] = 0;
+	for (int t = 0; t < g_ntracks; t++) md5_init(&g_md5[t]);
 	g_reader_done = 0; g_write_failed = 0;
 	uint32_t data_end = (g_ntracks > 1) ? g_tracks[1].lba : g_leadout;  // LibCrypt lives in track 1
 
@@ -723,6 +748,12 @@ static void rip_thread(void *arg)
 	u64 rv;
 	sysThreadJoin(wtid, &rv);
 	fclose(g_out);
+	for (int t = 0; t < g_ntracks; t++) {
+		uint8_t d[16];
+		md5_final(&g_md5[t], d);
+		md5_hex(d, g_track_md5[t]);
+		logf("track %d md5 %s", g_tracks[t].num, g_track_md5[t]);
+	}
 	free(g_bufs[0]);
 	free(g_bufs[1]);
 	time_t secs = time(NULL) - t0;
@@ -1284,6 +1315,15 @@ static int rip_disc_inner(int fresh, int autorip)
 	char binname[256];
 	snprintf(binname, sizeof(binname), "%s.bin", slash + 1);
 	write_cue(binname);
+	{
+		char mpath[300];
+		snprintf(mpath, sizeof(mpath), "%s.md5", g_base);
+		FILE *mf = fopen(mpath, "w");
+		if (mf) {
+			for (int t = 0; t < g_ntracks; t++) fprintf(mf, "%s  track %02d\n", g_track_md5[t], g_tracks[t].num);
+			fclose(mf);
+		}
+	}
 
 	// Only discs on the known LibCrypt list get an SBI and a LibCrypt line in the dialog.
 	// Other PAL discs are still checked, but a hit is only logged as a hint.

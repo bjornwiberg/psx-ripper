@@ -96,13 +96,15 @@ int ui_text_width(UiFont fi, const char *s)
 static void draw_glyph(const Font *f, const Glyph *g, int x, int y, uint32_t rgb)
 {
 	const uint8_t *a = f->data + g->off;
+	int stride = (g->w + 1) / 2;   // 4-bit alpha, two pixels per byte
 	for (int j = 0; j < g->h; j++) {
 		int py = y + g->yoff + j;
 		if (py < 0 || py >= (int)display_height) continue;
 		uint32_t *p = fb_row(py);
 		for (int i = 0; i < g->w; i++) {
 			int px = x + g->xoff + i;
-			uint32_t al = a[j * g->w + i];
+			uint8_t nib = a[j * stride + i / 2];
+			uint32_t al = ((i & 1) ? (nib & 15) : (nib >> 4)) * 17;
 			if (!al || px < 0 || px >= (int)display_width) continue;
 			uint32_t d = p[px];
 			uint32_t r = (((rgb >> 16) & 255) * al + ((d >> 16) & 255) * (255 - al)) / 255;
