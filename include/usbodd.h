@@ -18,6 +18,7 @@ int usbodd_last_got(int drive);   // data bytes the last usbodd_cmd moved
 int usbodd_identify(int drive);       // INQUIRY into usbodd_name
 const char *usbodd_name(int drive);  // "Apple SuperDrive", "" before usbodd_identify
 int usbodd_location(int drive, unsigned char *loc8);   // usbGetDeviceLocation bytes
+int usbodd_port(int drive);   // USB port as the PS3 numbers them, -1 unknown
 int usbodd_unlock(int drive);
 int usbodd_ready(int drive, int timeout_ms);
 int usbodd_eject(int drive);

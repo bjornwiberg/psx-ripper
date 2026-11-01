@@ -398,3 +398,10 @@ int usbodd_location(int i, unsigned char *loc8)
 	memcpy(loc8, g_drv[i].loc, 8);
 	return 0;
 }
+
+// Root port as the PS3 numbers its USB ports (location counts from 1), -1 when unknown.
+int usbodd_port(int i)
+{
+	if (!drive(i) || !g_drv[i].loc[0]) return -1;
+	return g_drv[i].loc[0] - 1;
+}
