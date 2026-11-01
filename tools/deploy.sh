@@ -9,6 +9,9 @@ st=$(curl -s --max-time 8 "http://$PS3:8090/status.json")
 case "$st" in *'"state":"ripping"'*|*'"busy":true'*) echo "the app is using the drive (rip, repair, identify or lv1 patch on), not installing"; exit 2;; esac
 old=$(curl -s --max-time 8 "ftp://$PS3/dev_hdd0/game/PSXR00001/USRDIR/" | grep EBOOT | awk '{print $6,$7,$8}')
 curl -s --max-time 300 -T psxripper.pkg "ftp://$PS3/dev_hdd0/packages/psxripper.pkg" || { echo "upload failed"; exit 1; }
+# again right before closing the app: a rip may have started during the upload
+st=$(curl -s --max-time 8 "http://$PS3:8090/status.json")
+case "$st" in *'"state":"ripping"'*|*'"busy":true'*) echo "a rip started during the upload, not installing (package left in /dev_hdd0/packages)"; exit 2;; esac
 curl -s --max-time 10 "http://$PS3/xmb.ps3\$exit" >/dev/null
 ok=0; for i in $(seq 1 30); do sleep 2; r=$(curl -s --max-time 5 "http://$PS3/xmb.ps3\$screenshot?fast"); [ -n "$r" ] && ! echo "$r" | grep -q "Not in XMB" && { ok=1; break; }; done
 [ $ok = 1 ] || { echo "not back in XMB"; exit 1; }
