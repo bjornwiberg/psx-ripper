@@ -399,6 +399,8 @@ int rd_download(volatile uint32_t *done, volatile uint32_t *total, volatile int 
 		unlink(RD_ZIP);
 		return *abort ? -7 : (st < 0 ? st : -3);
 	}
+	*done = 0;                // reset before announcing the new phase, so the bar starts at 0
+	__sync_synchronize();
 	*phase = 1;
 	int r = build_index(done, total, abort);
 	unlink(RD_ZIP);

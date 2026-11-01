@@ -1187,6 +1187,25 @@ static void flip_frame()
 	present();
 }
 
+// Redump's dat version ("2026-06-15 11-55-46") in the console's date and time format.
+static void fmt_rd_version(const char *ver, char *out, size_t n, int with_time)
+{
+	int y, mo, d, h, mi, sec;
+	if (sscanf(ver, "%d-%d-%d %d-%d-%d", &y, &mo, &d, &h, &mi, &sec) < 3) { snprintf(out, n, "%s", ver); return; }
+	s32 df = 0, tf = 1;   // 0 = YYYYMMDD, 1 = DDMMYYYY, 2 = MMDDYYYY; 0 = 12 h, 1 = 24 h
+	sysUtilGetSystemParamInt(SYSUTIL_SYSTEMPARAM_ID_DATE_FORMAT, &df);
+	sysUtilGetSystemParamInt(SYSUTIL_SYSTEMPARAM_ID_TIME_FORMAT, &tf);
+	char date[16], tm[16] = "";
+	if (df == 1) snprintf(date, sizeof(date), "%02d/%02d/%04d", d, mo, y);
+	else if (df == 2) snprintf(date, sizeof(date), "%02d/%02d/%04d", mo, d, y);
+	else snprintf(date, sizeof(date), "%04d-%02d-%02d", y, mo, d);
+	if (with_time && sscanf(ver, "%*d-%*d-%*d %d-%d", &h, &mi) == 2) {
+		if (tf == 0) snprintf(tm, sizeof(tm), " %d:%02d %s", (h + 11) % 12 + 1, mi, h < 12 ? "AM" : "PM");
+		else snprintf(tm, sizeof(tm), " %02d:%02d", h, mi);
+	}
+	snprintf(out, n, "%s%s", date, tm);
+}
+
 // Downloads the Redump dat to the console and builds the local index (progress dialog, O cancels).
 static volatile uint32_t g_dl_done, g_dl_total;
 static volatile int g_dl_phase, g_dl_abort, g_dl_result, g_dl_finished;
@@ -1212,8 +1231,10 @@ static void redump_download_screen()
 	time_t last_msg = 0;
 	while (!g_dl_finished) {
 		if (dialog_action == 2 || exit_requested) g_dl_abort = 1;
+		// each phase runs the bar from 0 to 100 %: first the download (bytes), then the index
+		if (g_dl_phase != last_phase && last_phase >= 0) { msgDialogProgressBarReset(MSG_PROGRESSBAR_INDEX0); shown = 0; }
 		uint32_t tot = g_dl_total ? g_dl_total : 1;
-		uint32_t pct = (uint32_t)((uint64_t)g_dl_done * 50 / tot) + (g_dl_phase ? 50 : 0);   // half download, half index
+		uint32_t pct = g_dl_total ? (uint32_t)((uint64_t)g_dl_done * 100 / tot) : 0;
 		if (pct > 100) pct = 100;
 		if (pct > shown) { msgDialogProgressBarInc(MSG_PROGRESSBAR_INDEX0, pct - shown); shown = pct; }
 		if (g_dl_phase != last_phase || time(NULL) != last_msg) {
@@ -1231,7 +1252,12 @@ static void redump_download_screen()
 	logf("redump download result %d", g_dl_result);
 	if (g_dl_result == -7 || exit_requested) return;   // cancelled
 	char msg[256], ver[64] = "";
-	if (g_dl_result > 0) { rd_local_info(ver, sizeof(ver)); snprintf(msg, sizeof(msg), T(STR_RD_DL_DONE), g_dl_result, ver); }
+	if (g_dl_result > 0) {
+		char raw[64] = "";
+		rd_local_info(raw, sizeof(raw));
+		fmt_rd_version(raw, ver, sizeof(ver), 1);
+		snprintf(msg, sizeof(msg), T(STR_RD_DL_DONE), g_dl_result, ver);
+	}
 	else snprintf(msg, sizeof(msg), T(STR_RD_DL_FAILED), g_dl_result);
 	tell(msg);
 }
@@ -1265,8 +1291,8 @@ static void settings_screen()
 		snprintf(vals[4], sizeof(vals[4]), "%s", autostart ? T(STR_ON) : T(STR_OFF));
 		snprintf(vals[5], sizeof(vals[5]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
 		if (rdcount > 0) {
-			char date[16];
-			snprintf(date, sizeof(date), "%.10s", rdver);   // "2026-06-15 11-55-46" -> date only
+			char date[24];
+			fmt_rd_version(rdver, date, sizeof(date), 0);
 			snprintf(vals[6], sizeof(vals[6]), T(STR_RD_COPY_VALUE), date, rdcount);
 		} else {
 			snprintf(vals[6], sizeof(vals[6]), "%s", T(STR_RD_MISSING));
