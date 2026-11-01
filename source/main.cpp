@@ -1434,25 +1434,27 @@ static void target_name(const char *dir, char *out, size_t n)
 	else snprintf(out, n, T(STR_TARGET_HDD), dir);
 }
 
-// Next available destination after the current one: hdd0, then each connected USB device.
-static void next_target()
+// Destination next to the current one in the list hard disk, USB 0, USB 1, ... (by port; a FAT32
+// drive is mounted by the PS3 as /dev_usbNNN, an exFAT drive is reached through FatFs).
+// dir = +1 forward, -1 back.
+static void next_target(int dir)
 {
-	char cands[17][32];
+	char cands[9][32];
 	int nc = 0;
 	snprintf(cands[nc++], 32, "/dev_hdd0/PSXISO");
-	for (int i = 0; i < 8; i++) {
-		char dev[16];
-		snprintf(dev, sizeof(dev), "/dev_usb%03d", i);
-		struct stat st;
-		if (stat(dev, &st) == 0) snprintf(cands[nc++], 32, "%s/PSXISO", dev);
-	}
-	// drives the PS3 does not mount (exFAT) are reached through FatFs
 	VfVolume vols[8];
 	int nv = vf_scan(vols, 8);
-	for (int i = 0; i < nv && i < 8; i++) snprintf(cands[nc++], 32, "%s/PSXISO", vols[i].root);
+	for (int port = 0; port < 8; port++) {
+		char dev[16];
+		snprintf(dev, sizeof(dev), "/dev_usb%03d", port);
+		struct stat st;
+		if (stat(dev, &st) == 0) { snprintf(cands[nc++], 32, "%s/PSXISO", dev); continue; }
+		for (int i = 0; i < nv && i < 8; i++)
+			if (vols[i].port == port) snprintf(cands[nc++], 32, "%s/PSXISO", vols[i].root);
+	}
 	int cur = 0;
 	for (int i = 0; i < nc; i++) if (!strcmp(cands[i], g_outdir)) cur = i;
-	snprintf(g_outdir, sizeof(g_outdir), "%s", cands[(cur + 1) % nc]);
+	snprintf(g_outdir, sizeof(g_outdir), "%s", cands[(cur + (dir < 0 ? nc - 1 : 1)) % nc]);
 }
 
 // ---------------------------------------------------------------- disc identification for the home screen
@@ -1954,6 +1956,12 @@ static void settings_screen()
 		}
 		snprintf(vals[9], sizeof(vals[9]), "%s", check == CHECK_OFF ? T(STR_OFF) : check == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
 		snprintf(vals[10], sizeof(vals[10]), T(STR_WH_STEP_VALUE), whstep);
+		{   // mark the default values
+			int def[11] = {!strcmp(outdir, "/dev_hdd0/PSXISO"), retries == 4, speed == 0, eject == 1, autostart == 0, redump == RD_OFF, 0,
+			               remote == 0, webhook_on == 0, check == CHECK_BITPERFECT, whstep == 5};
+			for (int r = 0; r < 11; r++)
+				if (def[r]) snprintf(vals[r] + strlen(vals[r]), sizeof(vals[r]) - strlen(vals[r]), " %s", T(STR_DEFAULT_MARK));
+		}
 		const char *labels[11] = {T(STR_L_TARGET), T(STR_L_RETRIES), T(STR_L_SPEED), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_REDUMP), T(STR_L_RDCOPY),
 		                          T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_CHECK), T(STR_L_WH_STEP)};
 		if (row < first) first = row;
@@ -1968,9 +1976,9 @@ static void settings_screen()
 			snprintf(v, sizeof(v), r == row && r != 6 ? "‹ %s ›" : "%s", vals[r]);   // row 6 is an action
 			ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 		}
-		const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "circle"};
-		const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
-		hint_bar(b, l, 3);
+		const char *b[] = {"updown", row == 6 ? "cross" : "leftright", "triangle", "circle"};
+		const char *l[] = {T(STR_HINT_SELECT), row == 6 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+		hint_bar(b, l, 4);
 		}
 		flip_frame();
 		int p = pad_pressed();
@@ -1986,18 +1994,32 @@ static void settings_screen()
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
 		if (row == 6) d = 0;
-		if (d) {
+		int reset = 0;
+		if (p & B_TRIANGLE) {
+			reset = own_dialog(T(STR_RESET_Q), 1) == 1;
+			pad_pressed();
+			g_redraw = 2;
+			if (reset) {   // defaults; the webhook address and the Redump copy are kept
+				snprintf(outdir, sizeof(outdir), "/dev_hdd0/PSXISO");
+				retries = 4; speed = 0; eject = 1; autostart = 0; redump = RD_OFF;
+				if (remote) remote_set(0);
+				remote = 0; webhook_on = 0; check = CHECK_BITPERFECT; whstep = 5;
+			}
+		}
+		if (d && !reset) {
 			if (row == 0) {
 				char save_dir2[64]; snprintf(save_dir2, sizeof(save_dir2), "%s", g_outdir);
 				snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
-				next_target();                                    // only forward through the list
+				next_target(d);
 				snprintf(outdir, sizeof(outdir), "%s", g_outdir);
 				snprintf(g_outdir, sizeof(g_outdir), "%s", save_dir2);
 			} else if (row == 1) {
 				int k = 0; while (k < 6 && steps[k] != retries) k++;
 				retries = steps[(k + (d > 0 ? 1 : 5)) % 6];
 			} else if (row == 2) {
-				speed = (speed + (d > 0 ? 1 : 3)) % 4;
+				// right = faster: 2x, 4x, 8x, max (index 3 ... 0)
+				if (d > 0 && speed > 0) speed--;
+				if (d < 0 && speed < 3) speed++;
 			} else if (row == 3) {
 				eject = !eject;
 			} else if (row == 4) {
@@ -2017,6 +2039,8 @@ static void settings_screen()
 				int k = 0; while (k < 7 && wh_steps[k] != whstep) k++;
 				whstep = wh_steps[(k + (d > 0 ? 1 : 6)) % 7];
 			}
+		}
+		if (d || reset) {
 			// every change is applied and saved immediately
 			snprintf(g_outdir, sizeof(g_outdir), "%s", outdir);
 			g_retries = retries; g_speed = speed; g_eject = eject; g_autostart = autostart; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on; g_check = check; g_webhook_step = whstep;

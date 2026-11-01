@@ -96,7 +96,7 @@ static const char *en[STR_COUNT] = {
 	"Test sent: HTTP %d",
 	"Saved.",
 	"Back to the screen",
-	"USB %d (exFAT, %u GB free)",
+	"USB %d · exFAT (/PSXISO, %u GB free)",
 	"Fixed sectors: %u, confirmed: %u",
 	"Done!",
 	"Unreadable sectors: %u",
@@ -160,6 +160,9 @@ static const char *en[STR_COUNT] = {
 	"The app was started (with the disc in the drive, if any)",
 	"App started",
 	"Webhook · %d events",
+	"(default)",
+	"Defaults",
+	"Reset all settings to their defaults?\n\nThe webhook address and the local Redump copy are kept.",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -252,7 +255,7 @@ static const char *sv[STR_COUNT] = {
 	"Test skickat: HTTP %d",
 	"Sparat.",
 	"Tillbaka till skärmen",
-	"USB %d (exFAT, %u GB ledigt)",
+	"USB %d · exFAT (/PSXISO, %u GB ledigt)",
 	"Lagade sektorer: %u, bekräftade: %u",
 	"Klart!",
 	"Oläsbara sektorer: %u",
@@ -316,6 +319,9 @@ static const char *sv[STR_COUNT] = {
 	"Appen startades (med skivan som sitter i, om någon)",
 	"Appstart",
 	"Webhook · %d händelser",
+	"(standard)",
+	"Standard",
+	"Vill du återställa alla inställningar till standard?\n\nWebhook-adressen och den lokala Redump-kopian behålls.",
 };
 
 static const char **table = en;
