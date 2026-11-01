@@ -1025,7 +1025,7 @@ static int verify_pass()
 					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; g_changed++; }
 					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
 				} else if (ok) {
-					rip_event(0xA8B0C8, STR_EV_CONFIRMED, lba);
+					rip_event(0xA8B0C8, STR_EV_FIRST_OK, lba);   // the first read was right
 				}
 				if (!ok) note_hard(lba, 1);
 				if (g_unstable <= 32) logf("verify: sector %u read differently, %s", lba, ok ? (fnv64(sec, RAW_SIZE) != g_uv_hash[k + j] ? "confirmed new data" : "first read confirmed") : "NOT confirmed");
@@ -1070,7 +1070,7 @@ static int second_pass()
 					logf("second pass: sector %u confirmed with different data, image updated", lba);
 					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
 				} else {
-					rip_event(0xA8B0C8, STR_EV_CONFIRMED, lba);
+					rip_event(0x7CE0A0, STR_EV_CONFIRMED, lba);   // the fix from the first pass holds
 				}
 			} else {
 				logf("second pass: sector %u could not be confirmed", lba);
@@ -1795,7 +1795,8 @@ static void eta_line(Eta *e, uint32_t pos, uint32_t total, char *out, size_t n)
 	if (e->rate > 1 && t - e->t0 > 6000) {
 		fmt_dur(left, sizeof(left), (long)((total - pos) / e->rate));
 		unsigned kbs = (unsigned)(e->rate * RAW_SIZE / 1024);
-		snprintf(out, n, T(STR_TIME_ETA), el, left, kbs / 1024, (kbs % 1024) * 10 / 1024);
+		if (g_phase) snprintf(out, n, T(STR_TIME_LEFT), el, left);   // later passes: no meaningful speed
+		else snprintf(out, n, T(STR_TIME_ETA), el, left, kbs / 1024, (kbs % 1024) * 10 / 1024);
 	} else {
 		snprintf(out, n, T(STR_TIME), el);
 	}

@@ -128,7 +128,7 @@ static const char *en[STR_COUNT] = {
 	"Sector %u still wrong (%s), retried at the end",
 	"Sector %u could not be read, retried at the end",
 	"Sector %u read differently – corrected",
-	"Sector %u confirmed",
+	"Sector %u: the fix was confirmed",
 	"Sector %u could be read at low speed",
 	"Send for these events",
 	"Webhook → %s · %s",
@@ -151,6 +151,8 @@ static const char *en[STR_COUNT] = {
 	"Ejected",
 	"Webhook progress",
 	"%d %%",
+	"Sector %u read differently – the first read was right",
+	"Time %s · about %s left",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -275,7 +277,7 @@ static const char *sv[STR_COUNT] = {
 	"Sektor %u fortfarande fel (%s), provas igen i slutet",
 	"Sektor %u gick inte att läsa, provas igen i slutet",
 	"Sektor %u lästes olika – rättad",
-	"Sektor %u bekräftad",
+	"Sektor %u: lagningen bekräftad",
 	"Sektor %u kunde läsas vid långsam läsning",
 	"Skicka vid de här händelserna",
 	"Webhook → %s · %s",
@@ -298,6 +300,8 @@ static const char *sv[STR_COUNT] = {
 	"Utmatad",
 	"Webhook-framsteg",
 	"%d %%",
+	"Sektor %u lästes olika – första läsningen var rätt",
+	"Tid %s · kvar ca %s",
 };
 
 static const char **table = en;
