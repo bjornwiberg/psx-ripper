@@ -17,7 +17,7 @@
 #define SYSUTIL_EVENT_SLOT0 0
 #define PS3_LANG_ENGLISH_US 1
 #define PS3_LANG_ENGLISH_UK 18
-#define PS3_LANG_SWEDISH 14
+#define PS3_LANG_SWEDISH 13
 typedef void (*sysutilCallback)(u64 status, u64 param, void *usrdata);
 int sysUtilRegisterCallback(int slot, sysutilCallback cb, void *usrdata);
 int sysUtilCheckCallback();

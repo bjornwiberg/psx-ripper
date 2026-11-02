@@ -174,6 +174,7 @@ int main()
 	g_cards[1].present = 0;
 	frame("long-name", 0);
 	frame("empty-usb", 1);
+	g_cards[1].usb_dead = 1; frame("usb-not-answering", 1); g_cards[1].usb_dead = 0;
 	reset_all();
 	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577); ripped(0, 1, 0);
 	frame("single-drive", 0);

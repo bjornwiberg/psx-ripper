@@ -93,6 +93,7 @@ static const int speed_x[4] = {0, 8, 4, 2};
 enum { DISC_NONE, DISC_READING, DISC_READY, DISC_ERROR };
 #define NCARDS (1 + USBODD_DRIVES)
 struct Card {
+	volatile int usb_dead;   // USB: the drive has stopped answering (several commands in a row failed)
 	volatile int present, inserted;   // a disc in the drive / just put in, not handled yet
 	volatile int state;               // DISC_*
 	int tried;                        // identification ran since the disc went in
@@ -3617,13 +3618,14 @@ static void usb_presence_thread(void *arg)
 {
 	int was[USBODD_DRIVES];   // disc in USB drive n: -1 unknown, 0 no, 1 yes
 	uint64_t since[USBODD_DRIVES];   // when the drive connected (or the app started)
-	for (int i = 0; i < USBODD_DRIVES; i++) { was[i] = -1; since[i] = 0; }
+	int fails[USBODD_DRIVES];        // commands in a row that got no answer at all
+	for (int i = 0; i < USBODD_DRIVES; i++) { was[i] = -1; since[i] = 0; fails[i] = 0; }
 	while (!exit_requested) {
 		usleep(2000 * 1000);
 		for (int i = 0; i < USBODD_DRIVES; i++) {
 			Card &k = g_cards[1 + i];
 			if (!usbodd_attached(i)) {
-				since[i] = 0;
+				since[i] = 0; fails[i] = 0; k.usb_dead = 0;
 				if (was[i] != -1 || k.present) { k.present = 0; k.inserted = 0; was[i] = -1; g_redraw = 2; }
 				continue;
 			}
@@ -3643,14 +3645,18 @@ static void usb_presence_thread(void *arg)
 			}
 			const uint8_t tur[6] = {0};
 			int r = usbodd_cmd(i, tur, 6, NULL, 0, 0);
+			fails[i] = r == -1 ? fails[i] + 1 : 0;   // -1: no answer (the driver already reset the pipes)
+			int dead = fails[i] >= 3;
+			if (dead != k.usb_dead) { k.usb_dead = dead; g_redraw = 2; logf("usb drive %d: %s", i, dead ? "does not answer" : "answers again"); }
 			// a disc that is still spinning up (not ready, unit attention) counts as present
 			int now = r == 0 || (r != -1 && !((r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A));
 			if (!now && was[i] != 0) usbodd_unlock(i);   // without it the slot does not take a disc
-			// a disc found in the first half minute was already in it (the drive pulls it in after the
-			// unlock and spins it up): part of the start, not an insert
+			// a disc found in the first seconds was already in it (the drive pulls it in after the
+			// unlock and spins it up): part of the start, not an insert. Later it was put in, and starts
+			// a rip when the drive's settings say so.
 			if (was[i] == 0 && now) {
 				k.present = 1;
-				if (now_ms() - since[i] > 30000) { k.inserted = 1; logf("usb drive %d: disc inserted", i); }
+				if (now_ms() - since[i] > 12000) { k.inserted = 1; logf("usb drive %d: disc inserted", i); }
 			}
 			if (was[i] == 1 && !now) { k.present = 0; k.inserted = 0; logf("usb drive %d: disc removed", i); }
 			if (was[i] == -1) k.present = now;
@@ -3755,6 +3761,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		} else if (k.state == DISC_READING) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_READING)); }
 		else if (k.state == DISC_READY) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_READY)); scol[i] = 0xC8D0E0; }
 		else if (k.state == DISC_ERROR) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_NOTPSX)); scol[i] = 0xFF8A80; }
+		else if (list[i] && k.usb_dead) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_NORESP)); scol[i] = 0xF0C060; }
 		else snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_EMPTY));
 		w[i] = pad + isz + igap + ui_text_width(UI_SMALL, name[i]) + gap + ui_text_width(UI_SMALL, stt[i]) + pad;
 	}
@@ -3818,7 +3825,7 @@ static int draw_page_body(int c, int y)
 		ui_text_fit(UI_BODY, L, y, 0xFFFFFF, title, room);
 		ui_icon(icon, L + w + igap, y + (lb - bsz) / 2, bsz, icol);
 	} else {
-		const char *msg = st == DISC_READING ? T(c ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : T(STR_HOME_INSERT);
+		const char *msg = st == DISC_READING ? T(c ? STR_SRC_SPINUP : STR_HOME_READING) : st == DISC_ERROR ? T(STR_HOME_NOTPSX) : c && k.usb_dead ? T(STR_USB_NORESP) : T(STR_HOME_INSERT);
 		ui_text_fit(UI_BODY, L, y, 0xFFFFFF, msg, lw);
 	}
 	y += lb + ls / 2;
@@ -3934,6 +3941,9 @@ static int draw_page_body(int c, int y)
 	} else if (st == DISC_READY) {
 		ui_text_fit(UI_BODY, L, y, 0x8FA8D8, T(STR_NOT_RIPPED_HERE), R - L);
 		y += lb + ls / 3;
+	} else if (c && k.usb_dead) {   // what to do about a drive that has stopped answering
+		ui_text_fit(UI_SMALL, L, y, 0xF0C060, T(STR_USB_NORESP_TIP), R - L);
+		y += ls + ls / 3;
 	}
 	if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // the last rip on this drive
 		char last[420];   // which disc it was too: after an eject the page shows another disc, or none
@@ -3998,7 +4008,9 @@ static void home_draw(const int *list, int nc, int sel)
 		ui_text(UI_SMALL, ui_w() / 8, gy + (ui_line(UI_BODY) - ui_line(UI_SMALL)) / 2, 0x6870A0, wl);
 	}
 	{
-		int w1 = ui_hint_width("start", T(STR_HINT_SETTINGS)), w2 = f.job ? 0 : ui_hint_width("circle", T(STR_HINT_EXIT)), gap = ui_w() / 40;
+		int anyjob = 0;
+		for (int i = 0; i < nc; i++) anyjob |= g_cards[list[i]].job;
+		int w1 = ui_hint_width("start", T(STR_HINT_SETTINGS)), w2 = anyjob ? 0 : ui_hint_width("circle", T(STR_HINT_EXIT)), gap = ui_w() / 40;
 		int x = ui_w() * 7 / 8 - w1 - (w2 ? gap + w2 : 0);
 		x += ui_hint(x, gy, "start", T(STR_HINT_SETTINGS)) + gap;
 		if (w2) ui_hint(x, gy, "circle", T(STR_HINT_EXIT));   // O on a ripping card cancels its rip instead
@@ -4032,6 +4044,10 @@ static void home_draw(const int *list, int nc, int sel)
 		const char *l[] = {T(f.prev_rip ? STR_HINT_NEWRIP : STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
 		hint_bar_pg(b, l, 3, evs);
 	} else if (st == DISC_ERROR) {
+		const char *b[] = {"triangle", "select"};
+		const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
+		hint_bar_pg(b, l, 2, evs);
+	} else if (sel > 0) {   // a USB drive without a disc it knows: it may still hold one
 		const char *b[] = {"triangle", "select"};
 		const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
 		hint_bar_pg(b, l, 2, evs);
@@ -4186,7 +4202,9 @@ static int home_screen()
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) {
+		if ((p & B_TRIANGLE) && !f.job && (st == DISC_READY || st == DISC_ERROR || sel > 0)) {   // a USB drive: also when it has not seen a disc
+			while (g_ident_busy && g_ident_card == sel) usleep(10000);
+			select_card(sel);
 			eject_disc();   // the last rip's line stays: with auto-eject it is the only trace of how it went
 			g_redraw = 2;
 		}
@@ -4203,12 +4221,7 @@ static int home_screen()
 			for (int i = 0; i < NCARDS; i++) g_cards[i].recheck = 1;   // destinations may have been reset
 			g_redraw = 2;
 		}
-		if (p & B_CIRCLE) {
-			if (!jobs) return 0;
-			if (own_dialog(T(STR_EXIT_RIPS_Q), 1) == 1) return 0;   // the rips are cancelled on the way out
-			pad_pressed();
-			g_redraw = 2;
-		}
+		if ((p & B_CIRCLE) && !jobs) return 0;   // exit only when nothing rips (a ripping tab's O cancels its rip)
 	}
 	return 0;
 }

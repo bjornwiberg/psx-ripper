@@ -265,6 +265,9 @@ static const char *en[STR_COUNT] = {
 	"Cancel check",
 	"Cancelled",
 	"Scroll",
+	"The drive does not answer",
+	"Try Eject, or unplug the drive's USB cable and plug it in again.",
+	"No answer",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -526,6 +529,9 @@ static const char *sv[STR_COUNT] = {
 	"Avbryt kontroll",
 	"Avbruten",
 	"Bläddra",
+	"Läsaren svarar inte",
+	"Prova Mata ut, eller dra ur läsarens USB-sladd och sätt i den igen.",
+	"Svarar inte",
 };
 
 static const char **table = en;
