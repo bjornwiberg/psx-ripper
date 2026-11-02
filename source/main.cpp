@@ -456,20 +456,7 @@ static void logf(const char *fmt, ...)
 }
 
 // ---------------------------------------------------------------- dialogs
-static volatile int dialog_action = 0;
-
 extern "C" {
-static void dialog_handler(msgButton button, void *usrData)
-{
-	switch (button) {
-	case MSG_DIALOG_BTN_OK: dialog_action = 1; break;   // also YES
-	case MSG_DIALOG_BTN_NO:
-	case MSG_DIALOG_BTN_ESCAPE: dialog_action = 2; break;
-	case MSG_DIALOG_BTN_NONE: dialog_action = -1; break;
-	default: break;
-	}
-}
-
 static volatile int exit_requested = 0;
 static volatile int g_osk_event = 0;   // last on-screen keyboard event (SYSUTIL_OSK_*)
 // The system's own layers (PS button menu, dialogs) draw over our picture: while one is up and
@@ -2182,48 +2169,6 @@ static void fit_middle(UiFont font, const char *in, char *out, size_t n, int max
 	}
 }
 
-// "Destination: Hard disk · PSXISO/Croc 2 (Europe) [SLES_020.88].bin · 339 GB free" (no file: just the folder)
-static void dest_line(const char *dir, const char *fname, char *out, size_t n, int maxw = 0, const char *wrap = "%s", UiFont font = UI_SMALL)
-{
-	int port;
-	uint64_t mb = 0;
-	char label[48];
-	const char *folder = strchr(dir + 1, '/');   // after the drive: "/dev_hdd0/PSXISO" -> "PSXISO"
-	if (sscanf(dir, "exfat%1d:", &port) == 1) {
-		vf_free_mb(dir, &mb);
-		snprintf(label, sizeof(label), T(STR_DEST_EXFAT), port);
-		folder = strchr(dir, '/');
-	} else {
-		char dev[16];
-		snprintf(dev, sizeof(dev), "%.12s", dir);
-		char *sl = strchr(dev + 1, '/');
-		if (sl) *sl = 0;
-		if (disk_free(dev, &mb)) mb = 0;
-		if (sscanf(dir, "/dev_usb%3d", &port) == 1) snprintf(label, sizeof(label), T(STR_DEST_USB), port);
-		else snprintf(label, sizeof(label), "%s", T(STR_DEST_HDD));
-	}
-	char path[300], line[420];
-	folder = folder ? folder + 1 : "";
-	if (fname && fname[0]) snprintf(path, sizeof(path), "%s/%s.bin", folder, fname);
-	else snprintf(path, sizeof(path), "%s", folder);
-	snprintf(line, sizeof(line), T(STR_DEST_LINE), label, path, (unsigned)(mb / 1024));
-	snprintf(out, n, wrap, line);
-	// too wide: the file name gives way ("Croc 2 (Euro….bin"), the drive, folder and free space stay
-	if (maxw && fname && fname[0] && ui_text_width(font, out) > maxw) {
-		char f[200];
-		snprintf(f, sizeof(f), "%s", fname);
-		int l = (int)strlen(f);
-		while (l > 1) {
-			do l--; while (l > 0 && ((unsigned char)f[l] & 0xC0) == 0x80);   // back one UTF-8 character
-			f[l] = 0;
-			snprintf(path, sizeof(path), "%s/%s….bin", folder, f);
-			snprintf(line, sizeof(line), T(STR_DEST_LINE), label, path, (unsigned)(mb / 1024));
-			snprintf(out, n, wrap, line);
-			if (ui_text_width(font, out) <= maxw) break;
-		}
-	}
-}
-
 static void next_target(char *outdir, int dir)
 {
 	char cands[9][32];
@@ -2840,8 +2785,11 @@ static void progress_draw(const char *title, const char *detail, uint32_t pct, c
 
 static void fmt_dur(char *out, size_t n, long secs)
 {
-	if (secs >= 3600) snprintf(out, n, "%ld:%02ld:%02ld", secs / 3600, (secs / 60) % 60, secs % 60);
-	else snprintf(out, n, "%ld:%02ld", secs / 60, secs % 60);
+	if (secs < 0) secs = 0;
+	if (secs > 99 * 3600 + 3599) secs = 99 * 3600 + 3599;   // "99:59:59" at most: it always fits
+	int h = (int)(secs / 3600), m = (int)(secs / 60 % 60), sc = (int)(secs % 60);
+	if (h) snprintf(out, n, "%d:%02d:%02d", h, m, sc);
+	else snprintf(out, n, "%d:%02d", m, sc);
 }
 
 // "Time 2:14 · about 1:35 left · 2.6 MB/s": speed over the last ~20 s (the drive is faster on the
@@ -4799,7 +4747,7 @@ static int rip_disc_inner(int fresh, int autorip)
 	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
 	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);
 	{
-		char d[16];
+		char d[24];
 		fmt_dur(d, sizeof(d), (long)(time(NULL) - g_rip_t0));
 		res_add(0xA8B0C8, T(STR_TOTAL_TIME), d);
 	}
@@ -4815,7 +4763,7 @@ static int rip_disc_inner(int fresh, int autorip)
 			snprintf(k.rd_name, sizeof(k.rd_name), "%s", g_rd_result_name);
 		}
 		else if (g_rd_result == 0) { snprintf(k.rd_done, sizeof(k.rd_done), "%s", T(STR_RD_NOMATCH)); k.rd_done_col = 0xFF8A80; k.rd_state = 0; }
-		char d[16];
+		char d[24];
 		fmt_dur(d, sizeof(d), (long)(time(NULL) - g_rip_t0));
 		snprintf(k.res, sizeof(k.res), T(STR_CARD_DONE), d);
 		if (g_readerrs) snprintf(k.res + strlen(k.res), sizeof(k.res) - strlen(k.res), T(STR_CARD_UNREADABLE), g_readerrs);
