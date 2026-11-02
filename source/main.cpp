@@ -3772,7 +3772,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		// discs to put aside and try again later shows without opening each tab
 		// 1 medal (matches), 2 warning (does not, or sectors left to repair), 3 question (not checked)
 		warn[i] = 0;
-		if (k.job) { OnCard o(c); if (g_readerrs) warn[i] = 2; }   // ripping: at least one sector it could not read
+		if (k.job) { OnCard o(c); warn[i] = g_readerrs ? 2 : k.rd_state == 1 ? 1 : 3; }   // ripping: ?, the warning from the first sector it could not read
 		else {
 			if (k.state == DISC_READY && k.prev_rip) warn[i] = k.repair_n > 0 || k.rd_state == 0 ? 2 : k.rd_state == 1 ? 1 : 3;
 			else if (k.res[0] && !k.res_failed && (k.state == DISC_READY || k.state == DISC_NONE) && k.res_rd >= -1)
