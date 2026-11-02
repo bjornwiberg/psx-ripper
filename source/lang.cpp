@@ -82,7 +82,7 @@ static const char *en[STR_COUNT] = {
 	"Re-reading sector %u – try %d of %d",
 	"%sUnreadable so far: %u · fixed: %u",
 	"Cancelling… waiting for the drive to finish",
-	"Re-reading uncertain sectors slowly (%u of %u): ",
+	"Re-reading uncertain sectors slowly",
 	"Remote view",
 	"Webhooks",
 	"On · %s:%d",
@@ -115,7 +115,7 @@ static const char *en[STR_COUNT] = {
 	"Time %s",
 	"Time %s · about %s left · %u.%u MB/s",
 	"Time: %s",
-	"Double-checking sectors without a checksum (%u of %u) ",
+	"Double-checking sectors without a checksum",
 	"Sectors without a checksum: %u double-checked, %u read differently (corrected)",
 	"Yes",
 	"No",
@@ -271,6 +271,8 @@ static const char *en[STR_COUNT] = {
 	"Matches Redump",
 	"Does not match Redump",
 	"Not checked against Redump",
+	"Sector %u of %u",
+	"%u sectors (video and sound) have no checksum: they are read once more and compared%s",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -349,7 +351,7 @@ static const char *sv[STR_COUNT] = {
 	"Läser om sektor %u – försök %d av %d",
 	"%sOläsbara hittills: %u · lagade: %u",
 	"Avbryter … väntar på att läsaren blir klar",
-	"Läser om osäkra sektorer långsamt (%u av %u): ",
+	"Läser om osäkra sektorer långsamt",
 	"Fjärrvisning",
 	"Webhooks",
 	"På · %s:%d",
@@ -382,7 +384,7 @@ static const char *sv[STR_COUNT] = {
 	"Tid %s",
 	"Tid %s · kvar ca %s · %u,%u MB/s",
 	"Tid: %s",
-	"Dubbelkollar sektorer som saknar kontrollsumma (%u av %u) ",
+	"Dubbelkollar sektorer utan kontrollsumma",
 	"Sektorer utan kontrollsumma: %u dubbelkollade, %u lästes olika (rättade)",
 	"Ja",
 	"Nej",
@@ -538,6 +540,8 @@ static const char *sv[STR_COUNT] = {
 	"Stämmer med Redump",
 	"Stämmer inte med Redump",
 	"Inte kontrollerad mot Redump",
+	"Sektor %u av %u",
+	"%u sektorer (video och ljud) saknar kontrollsumma: de läses en gång till och jämförs%s",
 };
 
 static const char **table = en;

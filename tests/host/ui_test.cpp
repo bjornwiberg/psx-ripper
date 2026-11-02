@@ -111,6 +111,7 @@ static void ripping(int c, uint32_t done, uint32_t total, int phase, int events,
 	if (phase == 1 || phase == 2) { g_pass2_total = 279; g_pass2_done = 3; }
 	if (rereads) { g_rr_lba = 237637; g_rr_try = 1; g_rr_max = 15; }
 	g_readerrs = events; g_recovered = 2;
+	if (phase == 1) rip_event(0xA8B0C8, STR_EV_VERIFY_START, 41237);
 	for (int i = 0; i < events; i++) rip_event(i % 3 ? 0xF0C060 : 0x7CE0A0, i % 3 ? STR_EV_UNREADABLE : STR_EV_RECOVERED, 235847 + i, "");
 }
 static void frame(const char *name, int sel)
@@ -166,6 +167,10 @@ int main()
 	g_cards[0].pg_scroll = 100000; frame("ripping-scrolled-bottom", 0);
 	g_cards[0].pg_scroll = 0;
 	frame("ripping-plain", 1);
+	reset_all(); usb(0, 0);
+	disc(0, "Mega Man X4", "Mega Man X4 (USA)", "SLUS_005.61", 564); ripping(0, 251793, 251793, 1, 0, 0);
+	g_pass2_total = 41237; g_pass2_done = 12000;
+	frame("ripping-verify-pass", 0);
 
 	// a very long name, a drive with no disc, one drive only
 	reset_all(); usb(0, 0);

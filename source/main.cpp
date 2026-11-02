@@ -1576,6 +1576,7 @@ static int verify_pass()
 	if (!g_nuv || g_abort || g_write_failed) return 0;
 	g_phase = 1;
 	g_pass2_total = g_nuv; g_pass2_done = 0;
+	rip_event(0xA8B0C8, STR_EV_VERIFY_START, g_nuv);   // why this step: the drive cannot vouch for these sectors
 	uint64_t t0 = now_ms();
 	int patched = 0, reads = g_retries * 3 + 3;
 	uint8_t (&sec)[RAW_SIZE] = CX.vp_sec;
@@ -3762,7 +3763,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		if (k.job) {
 			OnCard o(c);
 			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
-			if (k.repairing && g_pass2_total) snprintf(stt[i], sizeof(stt[0]), "%u %%", (unsigned)((uint64_t)g_pass2_done * 100 / g_pass2_total));
+			if (g_pass2_total && (k.repairing || g_phase == 1 || g_phase == 2)) snprintf(stt[i], sizeof(stt[0]), "%u %%", (unsigned)((uint64_t)g_pass2_done * 100 / g_pass2_total));
 			else snprintf(stt[i], sizeof(stt[0]), "%u %%", g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
 			scol[i] = 0xC8E05A;
 		} else if (k.res[0] && (k.state == DISC_READY || k.state == DISC_NONE)) {
@@ -3810,7 +3811,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 			OnCard o(list[i]);
 			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
 			int bw = g_total ? (int)((uint64_t)w[i] * (pos > g_total ? g_total : pos) / g_total) : 0;
-			if (g_cards[list[i]].repairing) bw = g_pass2_total ? (int)((uint64_t)w[i] * g_pass2_done / g_pass2_total) : 0;
+			if (g_pass2_total && (g_cards[list[i]].repairing || g_phase == 1 || g_phase == 2)) bw = (int)((uint64_t)w[i] * g_pass2_done / g_pass2_total);
 			int bh = ui_line(UI_SMALL) / 5;   // subtle: about 6 px at 1080p
 			ui_rect(x, y + th - bh, w[i], bh, 0x40FFFFFF);
 			ui_rect(x, y + th - bh, bw, bh, 0xFFC8E05A);
@@ -3882,11 +3883,12 @@ static int draw_page_body(int c, int y)
 		OnCard o(c);
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done, tot = g_total ? g_total : 1;
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / tot);
-		if (k.repairing) pct = g_pass2_total ? (uint32_t)((uint64_t)g_pass2_done * 100 / g_pass2_total) : 0;   // the re-reads
+		int inpass = g_pass2_total && (k.repairing || g_phase == 1 || g_phase == 2);   // the verify pass, the re-reads, a repair: their own progress
+		if (inpass) pct = (uint32_t)((uint64_t)g_pass2_done * 100 / g_pass2_total);
 		if (pct > 100) pct = 100;
 		int bh = ls * 2 / 3;
 		ui_rect(L, y, R - L, bh, 0x50FFFFFF);
-		ui_rect(L, y, (int)((uint64_t)(R - L) * pct / 100), bh, 0xFFC8E05A);
+		ui_rect(L, y, (int)((uint64_t)(R - L) * (pct > 100 ? 100 : pct) / 100), bh, 0xFFC8E05A);
 		y += bh + ls / 2;
 		Eta e = {k.eta_t0, k.eta_tw, k.eta_pw, k.eta_rate};
 		if (!k.eta_t0 || g_phase != k.eta_phase) { uint64_t t0 = k.eta_t0; eta_start(&e); if (t0) e.t0 = t0; k.eta_phase = g_phase; }
@@ -3904,17 +3906,21 @@ static int draw_page_body(int c, int y)
 		else if (g_skip && (g_phase == 1 || g_phase == 2)) snprintf(ph, sizeof(ph), "%s", T(STR_SKIPPING));
 		else if (g_phase == 4) snprintf(ph, sizeof(ph), T(STR_CHECKING), pos, g_total);
 		else if (g_phase == 3) snprintf(ph, sizeof(ph), "%s", T(STR_FINISHING));
-		else if (g_pass2_total) snprintf(ph, sizeof(ph), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
+		else if (g_pass2_total) snprintf(ph, sizeof(ph), "%s", T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2));   // the count goes on the line below
 		else snprintf(ph, sizeof(ph), T(STR_PROGRESS), pos, g_total);
 		for (size_t e = strlen(ph); e > 0 && (ph[e - 1] == ' ' || ph[e - 1] == ':'); e--) ph[e - 1] = 0;   // "(4 of 279):" alone
 		ui_text_fit(UI_BODY, L, y, 0xFFFFFF, ph, R - L - pcw - ui_w() / 40);
 		y += lb;
-		if (!g_abort && g_rr_max) {
-			char rr[160];
-			snprintf(rr, sizeof(rr), T(STR_REREAD), g_rr_lba, g_rr_try, g_rr_max);
-			const char *r0 = rr;
-			while (*r0 == ' ' || *r0 == '\xc2' || *r0 == '\xb7') r0++;   // the re-read text starts with " · " when it follows another
-			ui_text_fit(UI_SMALL, L, y, 0xF0C060, r0, R - L);   // details in the small type
+		{   // details in the small type: which sector of the pass, and the slow re-read going on
+			char det[220] = "", rr[160];
+			if (inpass && g_phase != 4) snprintf(det, sizeof(det), T(STR_PASS_COUNT), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
+			if (!g_abort && g_rr_max) {
+				snprintf(rr, sizeof(rr), T(STR_REREAD), g_rr_lba, g_rr_try, g_rr_max);
+				const char *r0 = rr;
+				if (!det[0]) while (*r0 == ' ' || *r0 == '\xc2' || *r0 == '\xb7') r0++;   // the re-read text starts with " · " when it follows another
+				snprintf(det + strlen(det), sizeof(det) - strlen(det), "%s%s", det[0] && r0 == rr && rr[0] != ' ' ? "  ·  " : "", r0);
+			}
+			if (det[0]) ui_text_fit(UI_SMALL, L, y, g_rr_max ? 0xF0C060 : 0xC8D0E0, det, R - L);
 		}
 		y += ls + ls / 3;
 		if (g_phase != 4) {   // the check reads the file, not the disc: no read counts then
