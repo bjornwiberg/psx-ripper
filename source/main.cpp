@@ -527,7 +527,13 @@ static void maybe_screenshot()
 static void draw_backdrop()
 {
 	ui_background();
-	ui_text(UI_TITLE, ui_w() / 2, ui_h() / 10, 0xFFFFFF, "PSX Ripper", UI_CENTER);
+	{   // the title with the version after it, smaller and grey, both centred together
+		const char *ver = "  (v" APP_VERSION ")";
+		int wt = ui_text_width(UI_TITLE, "PSX Ripper"), wv = ui_text_width(UI_BODY, ver);
+		int x = ui_w() / 2 - (wt + wv) / 2, y = ui_h() / 10;
+		ui_text(UI_TITLE, x, y, 0xFFFFFF, "PSX Ripper");
+		ui_text(UI_BODY, x + wt, y + (ui_line(UI_TITLE) - ui_line(UI_BODY)) * 3 / 4, 0x8890A8, ver);   // on the title's baseline
+	}
 }
 
 // Frames still to (re)draw: content is drawn into both buffers once, then only flipped.
@@ -3349,9 +3355,9 @@ static void settings_rows(const char *subtitle, const char *const *labels, char 
 		snprintf(v, sizeof(v), r == row && r != action_row ? "‹ %s ›" : "%s", vals[r]);
 		ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 	}
-	char foot[240], cp[200];   // the version, and the one file all settings live in (it can be edited over FTP)
+	char foot[240], cp[200];   // the one file all settings live in (it can be edited over FTP)
 	snprintf(cp, sizeof(cp), T(STR_WH_CFG_PATH), CFG_PATH);
-	snprintf(foot, sizeof(foot), "PSX Ripper %s  ·  %s", APP_VERSION, cp);
+	snprintf(foot, sizeof(foot), "%s", cp);   // (the version is in the title)
 	footer_note(foot);
 }
 
