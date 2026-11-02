@@ -42,6 +42,14 @@ does not have; a self-test makes sure the checks find planted problems.
 When you change a screen, add or update a scenario and look at the frames. CI runs the same
 tests on every pull request and keeps the frames as an artifact.
 
+### Remote view without a console
+
+`make -C tests/host remote` runs the app's screens together with the real web server
+(`source/remote.cpp`) on this computer and prints the address, e.g. `http://192.168.1.20:8090`.
+Open it in a browser or on a phone on the same network: the stream, `/status.json` and the pad
+work as on the console (the pad moves through the app's screens). Two drives have discs; nothing
+reads discs or rips. `make -C tests/host remote LANG_ARG=en` shows the English texts.
+
 ## Code style
 
 - Code, comments and log messages in English; the UI texts are in `source/lang.cpp` (English and

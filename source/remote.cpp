@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <sys/thread.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 #include <net/netctl.h>
 
@@ -97,6 +98,10 @@ static void client_thread(void *arg)
 		JpgBuf jb = {NULL, 0, 0};
 		uint8_t *rgb = (uint8_t *)malloc(ui_w() / 2 * (ui_h() / 2) * 3);
 		if (rgb && !strncmp(req, "GET /stream", 11)) {
+			// a phone that sleeps or puts the tab away keeps the connection open without reading;
+			// give up on a stuck send so the thread and socket are freed (the page reconnects)
+			struct timeval tv = {10, 0};
+			setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 			if (!send_str(s, "HTTP/1.0 200 OK\r\nCache-Control: no-cache\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n")) {
 				while (g_on) {
 					int len = encode_frame(&jb, rgb);
@@ -172,7 +177,7 @@ static void client_thread(void *arg)
 			".c{color:#7cc4ff}.o{color:#ff8a80}.tr{color:#7ce0a0}.sq{color:#e8a0e0}\n"
 			"p{max-width:760px;margin:8px auto 16px;padding:0 16px;color:var(--d);font-size:13px}a{color:#9ad0a8}\n"
 			"</style>\n"
-			"<img src='/stream' alt=''>\n"
+			"<img id=v src='/stream' alt=''>\n"
 			"<div class=pad>\n"
 			"<div class=row><div class=grp><button data-b=l2>L2</button><button data-b=l1>L1</button></div><div class=grp><button data-b=r1>R1</button><button data-b=r2>R2</button></div></div>\n"
 			"<div class=dp><span></span><button data-b=up>&#9650;</button><span></span><button data-b=left>&#9664;</button><span></span><button data-b=right>&#9654;</button><span></span><button data-b=down>&#9660;</button><span></span></div>\n"
@@ -185,6 +190,14 @@ static void client_thread(void *arg)
 			" <a href='/status.json'>status.json</a></p>\n"
 			"<script>\n"
 			"function press(b){var e=document.querySelector('[data-b='+b+']');if(e){e.classList.add('on');setTimeout(function(){e.classList.remove('on')},120)}fetch('/pad',{method:'POST',body:b}).catch(function(){})}\n"
+			// the stream dies when the tab sleeps (phone locked, other app); close it while hidden and
+			// open a fresh one when the page is visible again, and retry if it breaks
+			"var v=document.getElementById('v'),rt;\n"
+			"function live(){clearTimeout(rt);v.src='/stream?'+Date.now()}\n"
+			"function stop(){clearTimeout(rt);v.removeAttribute('src')}\n"
+			"v.addEventListener('error',function(){if(!document.hidden){clearTimeout(rt);rt=setTimeout(live,2000)}});\n"
+			"document.addEventListener('visibilitychange',function(){document.hidden?stop():live()});\n"
+			"addEventListener('pageshow',function(e){if(e.persisted)live()});\n"
 			"document.querySelectorAll('[data-b]').forEach(function(e){e.addEventListener('click',function(){press(e.dataset.b)})});\n"
 			"var K={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',Enter:'cross',Escape:'circle',Backspace:'circle',q:'l1',e:'r1','1':'l2','3':'r2',t:'triangle',s:'square'};\n"
 			"document.addEventListener('keydown',function(ev){var b=K[ev.key]||K[ev.key.toLowerCase()];if(b&&!ev.metaKey&&!ev.ctrlKey){ev.preventDefault();press(b)}});\n"
