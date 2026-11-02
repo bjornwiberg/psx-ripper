@@ -696,12 +696,68 @@ static void hexdump(char *out, size_t n, const uint8_t *d, int len)
 
 static volatile int g_debug_on = 0;
 static int g_state_busy();
+static uint8_t bcd(int v);
+static uint32_t edc(const uint8_t *p, int n);
+static void edc_init();
 static int debug_cmd(const char *q, char *out, int n)
 {
 	char v[80], v2[600], opbuf[16];
 	if (!g_debug_on) { snprintf(out, n, "debug mode off (create /dev_hdd0/tmp/psxrip.debug)\n"); return 0; }
-	if (g_state_busy()) { snprintf(out, n, "busy: the app is using the drive\n"); return 0; }
 	const char *op = qget(q, "op", opbuf, sizeof(opbuf));   // own buffer: v is reused below
+	if (op && !strcmp(op, "hdrscan")) {   // a finished image: is every sector where its header says, and intact?
+		// hdrscan&path=/dev_hdd0/PSXISO/x.bin (%xx decoded)&n=<sectors of the data track>; reads the file only
+		char path[300];
+		qget(q, "path", v2, sizeof(v2));
+		size_t o = 0;
+		for (const char *c = v2; *c && o < sizeof(path) - 1; c++) {
+			if (*c == '%' && c[1] && c[2]) { char h[3] = {c[1], c[2], 0}; path[o++] = (char)strtol(h, NULL, 16); c += 2; }
+			else path[o++] = *c == '+' ? ' ' : *c;
+		}
+		path[o] = 0;
+		uint32_t lim = qget(q, "n", v, sizeof(v)) ? strtoul(v, NULL, 0) : 0xFFFFFFFF;
+		FILE *f = fopen(path, "rb");
+		if (!f) { snprintf(out, n, "cannot open %s\n", path); return 0; }
+		edc_init();   // the table is otherwise made when a rip starts
+		static uint8_t sec[RAW_SIZE];
+		static const uint8_t sync[12] = {0, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 0};
+		uint32_t i = 0, nsync = 0, naddr = 0, nedc = 0, nsub = 0, nzero_edc = 0, nmode[4] = {0, 0, 0, 0}, shown = 0;
+		snprintf(out, n, "hdrscan %s\n", path);
+		for (; i < lim && fread(sec, 1, RAW_SIZE, f) == RAW_SIZE; i++) {
+			const char *bad = 0;
+			char why[96] = "";
+			if (memcmp(sec, sync, 12)) { nsync++; bad = "sync"; }
+			else {
+				uint32_t a = i + 150;
+				if (sec[12] != bcd(a / 4500) || sec[13] != bcd((a / 75) % 60) || sec[14] != bcd(a % 75)) {
+					naddr++; bad = "address";
+					auto ub = [](uint8_t b) { return (b >> 4) * 10 + (b & 15); };
+					snprintf(why, sizeof(why), " header says lba %d", ub(sec[12]) * 4500 + ub(sec[13]) * 75 + ub(sec[14]) - 150);
+				}
+				nmode[sec[15] & 3]++;
+				if (sec[15] == 2 && memcmp(sec + 16, sec + 20, 4)) { nsub++; if (!bad) bad = "subheader copies differ"; }
+				uint32_t calc = 0, stored = 0; const uint8_t *st = 0;
+				if (sec[15] == 1) { calc = edc(sec, 2064); st = sec + 2064; }
+				else if (sec[15] == 2 && (sec[18] & 0x20)) { calc = edc(sec + 16, 2332); st = sec + 2348; }
+				else if (sec[15] == 2) { calc = edc(sec + 16, 2056); st = sec + 2072; }
+				if (st) {
+					stored = st[0] | st[1] << 8 | st[2] << 16 | (uint32_t)st[3] << 24;
+					if (sec[15] == 2 && (sec[18] & 0x20) && !stored) nzero_edc++;
+					else if (stored != calc) { nedc++; if (!bad) bad = "EDC"; }
+				}
+			}
+			if (bad && shown < 16) {
+				shown++;
+				size_t k = strlen(out);
+				snprintf(out + k, n - k, "  lba %u: %s%s  [%02x %02x %02x %02x | %02x %02x %02x %02x]\n", i, bad, why, sec[12], sec[13], sec[14], sec[15], sec[16], sec[17], sec[18], sec[19]);
+			}
+		}
+		fclose(f);
+		size_t k = strlen(out);
+		snprintf(out + k, n - k, "%u sectors: sync %u, address %u, EDC %u, subheader %u; mode0 %u mode1 %u mode2 %u; form 2 without EDC %u\n",
+		         i, nsync, naddr, nedc, nsub, nmode[0], nmode[1], nmode[2], nzero_edc);
+		return 0;
+	}
+	if (g_state_busy()) { snprintf(out, n, "busy: the app is using the drive\n"); return 0; }
 	if (!op) { snprintf(out, n, "ops: list | usb | usbscsi&cdb=hex&len=&dir=in|out[&drive=n] | scsi&id=&sc=616|604&proto=0|1|3&dir=0|1&cdb=hex&len= | devcmd&id=&cmd=&in=hex&len= | read&id=&lba=\n"); return 0; }
 	if (!strcmp(op, "usb")) { usbodd_status(out, n); return 0; }
 	int dv = qget(q, "drive", v, sizeof(v)) ? atoi(v) : g_usb;   // which SuperDrive
@@ -3352,10 +3408,10 @@ static void settings_rows(const char *subtitle, const char *const *labels, char 
 	for (int r = first; r < nrows && r < first + VIS; r++) {
 		int y = top + (r - first) * lh;
 		if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
-		ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
+		int lw = ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
 		char v[128];
 		snprintf(v, sizeof(v), r == row && !((actions >> r) & 1) ? "‹ %s ›" : "%s", vals[r]);
-		ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
+		ui_text_fit(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, right - left - lw - ui_w() / 40, UI_RIGHT);   // never over the label
 	}
 	char foot[240], cp[200];   // the one file all settings live in (it can be edited over FTP)
 	snprintf(cp, sizeof(cp), T(STR_WH_CFG_PATH), CFG_PATH);
@@ -3409,6 +3465,62 @@ static void about_screen()
 
 // Settings (START): the standard for the drives (speed, re-reads, check, eject, rip at once; a
 // drive can have its own values, SELECT on its card), Redump, the Redump copy, remote view, webhooks.
+// One frame of the settings (START): the rows with their values and the buttons of the focused
+// row. (The UI tests on the host draw it.)
+static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, int webhook_on, int rdcount, const char *rdver, time_t rdwhen)
+{
+	const int NROWS = 11;
+	draw_backdrop();
+	char vals[11][96];
+	fn_label(g_name_pat, vals[5], sizeof(vals[5]));
+	fmt_speed(sd.speed, vals[0], sizeof(vals[0]));
+	fmt_int(sd.retries, vals[1], sizeof(vals[1]));
+	fmt_check(sd.check, vals[2], sizeof(vals[2]));
+	fmt_onoff(sd.eject, vals[3], sizeof(vals[3]));
+	fmt_onoff(sd.autostart, vals[4], sizeof(vals[4]));
+	snprintf(vals[6], sizeof(vals[0]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
+	if (rdcount > 0) {
+		// Redump's version (date) and when this copy was downloaded (date and time)
+		char date[16], ver[24], when[32];
+		snprintf(date, sizeof(date), "%.10s", rdver);
+		fmt_rd_version(date, ver, sizeof(ver));
+		fmt_local(rdwhen, when, sizeof(when));
+		snprintf(vals[7], sizeof(vals[7]), T(STR_RD_COPY_VALUE), ver, when);
+	} else {
+		snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_RD_MISSING));
+	}
+	char ip[20];
+	remote_ip(ip, sizeof(ip));
+	if (remote) snprintf(vals[8], sizeof(vals[8]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
+	else snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
+	if (!webhook_on) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_OFF));
+	else if (!g_webhook[0]) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_WEBHOOK_NOURL));
+	else {
+		char host[96];
+		webhook_host(g_webhook, host, sizeof(host));
+		int ne = 0;
+		for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
+		snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
+	}
+	snprintf(vals[10], sizeof(vals[10]), "v%s", APP_VERSION);
+	const char *labels[11] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
+	                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_ABOUT)};
+	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 10);   // the Redump download and About are actions
+	if (row == 10) {   // About: X opens it
+		const char *b[] = {"updown", "l2r2", "cross", "circle"};
+		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_OPEN), T(STR_HINT_BACK)};
+		hint_bar(b, l, 4);
+	} else if (row == 9 || row == 5) {   // webhooks and the file name: X opens their own view
+		const char *b[] = {"updown", "l2r2", "leftright", "cross", "triangle", "circle"};
+		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_CHANGE), T(row == 5 ? STR_HINT_EDIT : STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+		hint_bar(b, l, 6);
+	} else {
+		const char *b[] = {"updown", "l2r2", row == 7 ? "cross" : "leftright", "triangle", "circle"};
+		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), row == 7 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+		hint_bar(b, l, 5);
+	}
+}
+
 static void settings_screen()
 {
 	int redump = g_redump, remote = g_remote, webhook_on = g_webhook_on, row = 0;
@@ -3424,55 +3536,7 @@ static void settings_screen()
 		if (g_redraw > 0) {
 			g_redraw = 0;
 			g_drawn = 2;
-			draw_backdrop();
-			char vals[11][96];
-			fn_label(g_name_pat, vals[5], sizeof(vals[5]));
-			fmt_speed(sd.speed, vals[0], sizeof(vals[0]));
-			fmt_int(sd.retries, vals[1], sizeof(vals[1]));
-			fmt_check(sd.check, vals[2], sizeof(vals[2]));
-			fmt_onoff(sd.eject, vals[3], sizeof(vals[3]));
-			fmt_onoff(sd.autostart, vals[4], sizeof(vals[4]));
-			snprintf(vals[6], sizeof(vals[0]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
-			if (rdcount > 0) {
-				// Redump's version (date) and when this copy was downloaded (date and time)
-				char date[16], ver[24], when[32];
-				snprintf(date, sizeof(date), "%.10s", rdver);
-				fmt_rd_version(date, ver, sizeof(ver));
-				fmt_local(rdwhen, when, sizeof(when));
-				snprintf(vals[7], sizeof(vals[7]), T(STR_RD_COPY_VALUE), ver, when);
-			} else {
-				snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_RD_MISSING));
-			}
-			char ip[20];
-			remote_ip(ip, sizeof(ip));
-			if (remote) snprintf(vals[8], sizeof(vals[8]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
-			else snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
-			if (!webhook_on) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_OFF));
-			else if (!g_webhook[0]) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_WEBHOOK_NOURL));
-			else {
-				char host[96];
-				webhook_host(g_webhook, host, sizeof(host));
-				int ne = 0;
-				for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
-				snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
-			}
-			snprintf(vals[10], sizeof(vals[10]), "v%s", APP_VERSION);
-			const char *labels[11] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
-			                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_ABOUT)};
-			settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 10);   // the Redump download and About are actions
-			if (row == 10) {   // About: X opens it
-				const char *b[] = {"updown", "l2r2", "cross", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_OPEN), T(STR_HINT_BACK)};
-				hint_bar(b, l, 4);
-			} else if (row == 9 || row == 5) {   // webhooks and the file name: X opens their own view
-				const char *b[] = {"updown", "l2r2", "leftright", "cross", "triangle", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_CHANGE), T(row == 5 ? STR_HINT_EDIT : STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
-				hint_bar(b, l, 6);
-			} else {
-				const char *b[] = {"updown", "l2r2", row == 7 ? "cross" : "leftright", "triangle", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), row == 7 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
-				hint_bar(b, l, 5);
-			}
+			settings_draw(row, sd, redump, remote, webhook_on, rdcount, rdver, rdwhen);
 		}
 		flip_frame();
 		int p = pad_pressed();
