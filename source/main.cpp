@@ -3770,7 +3770,8 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		// discs to put aside and try again later shows without opening each tab
 		// 1 medal (matches), 2 warning (does not, or sectors left to repair), 3 question (not checked)
 		warn[i] = 0;
-		if (!k.job) {
+		if (k.job) { OnCard o(c); if (g_readerrs) warn[i] = 2; }   // ripping: at least one sector it could not read
+		else {
 			if (k.state == DISC_READY && k.prev_rip) warn[i] = k.repair_n > 0 || k.rd_state == 0 ? 2 : k.rd_state == 1 ? 1 : 3;
 			else if (k.res[0] && !k.res_failed && (k.state == DISC_READY || k.state == DISC_NONE) && k.res_rd >= -1)
 				warn[i] = k.res_bad || k.res_rd == 0 ? 2 : k.res_rd == 1 ? 1 : 3;
@@ -3831,8 +3832,10 @@ static int draw_page_body(int c, int y)
 	int lw = R - L - rw;
 	if (known) {
 		const char *title = k.rd_name[0] ? k.rd_name : k.title;
-		const char *icon = k.rd_state == 1 ? "medal" : k.rd_state == 0 ? "warn" : "question";
-		uint32_t icol = k.rd_state == 1 ? 0xE8C870 : k.rd_state == 0 ? 0xFF8A80 : 0x8890A8;
+		int rs = k.rd_state;
+		if (k.job) { OnCard o(c); if (g_readerrs) rs = 0; }   // ripping: a sector it could not read turns the question into a warning
+		const char *icon = rs == 1 ? "medal" : rs == 0 ? "warn" : "question";
+		uint32_t icol = rs == 1 ? 0xE8C870 : rs == 0 ? 0xFF8A80 : 0x8890A8;
 		int bsz = lb * 3 / 4, igap = ls / 3, room = lw - bsz - igap;
 		int w = ui_text_width(UI_BODY, title);
 		if (w > room) w = room;
