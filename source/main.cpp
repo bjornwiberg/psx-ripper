@@ -110,6 +110,7 @@ struct Card {
 	int repairing;                    // that job is a repair: progress is the re-read sectors
 	char res[200];                    // last rip: one line, coloured res_col
 	uint32_t res_col;
+	char res_disc[160];               // which disc the last rip was ("Motorhead (SLUS_007.17)")
 	int res_failed;                   // it was cancelled or failed: an earlier rip there is untouched
 	char rd_done[160];                // Redump result as text (verified / no match), for the log and webhooks
 	uint32_t rd_done_col;
@@ -3918,8 +3919,8 @@ static void draw_page(int c, int y)
 		y += lb + ls / 3;
 	}
 	if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // the last rip on this drive
-		char last[260];
-		snprintf(last, sizeof(last), T(STR_LAST_RIP), k.res);
+		char last[420];   // which disc it was too: after an eject the page shows another disc, or none
+		snprintf(last, sizeof(last), T(STR_LAST_RIP), k.res_disc, k.res);
 		ui_text_fit(UI_SMALL, L, y, k.res_col, last, R - L);
 		y += ls + ls / 3;
 	}
@@ -4141,8 +4142,7 @@ static int home_screen()
 			continue;
 		}
 		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) {
-			eject_disc();
-			f.res[0] = 0; f.rd_done[0] = 0;   // the last rip's line goes with the disc
+			eject_disc();   // the last rip's line stays: with auto-eject it is the only trace of how it went
 			g_redraw = 2;
 		}
 		if (p & B_SELECT) {   // this drive's settings
@@ -4711,6 +4711,7 @@ static void rip_job_thread(void *arg)
 	int fresh = (int)((long)arg & 0xFF);
 	Card &k = g_cards[t_card];
 	k.res[0] = 0;
+	snprintf(k.res_disc, sizeof(k.res_disc), "%s (%s)", k.rd_name[0] ? k.rd_name : k.title, k.serial);
 	k.rd_done[0] = 0;
 	k.eta_t0 = 0;
 	if (fresh) usleep(2000 * 1000);   // give the drive a moment to spin up
@@ -4815,6 +4816,7 @@ static void repair_job_start(int c)
 	k.job = 1;
 	k.repairing = 1;
 	k.res[0] = 0;
+	snprintf(k.res_disc, sizeof(k.res_disc), "%s (%s)", k.rd_name[0] ? k.rd_name : k.title, k.serial);
 	k.eta_t0 = 0;
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy (status, the poll thread, deploy)
