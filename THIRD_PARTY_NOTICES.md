@@ -16,4 +16,5 @@ Not included: Redump data (downloaded by the console at runtime, from [redump.or
 `.sbi` files (created from the user's own disc), and any Sony code, firmware or artwork.
 
 The app's own icons (disc, drive, USB, medal, warning and the button symbols) are drawn in code
-in `source/ui.cpp`.
+in `source/ui.cpp`; the XMB icon and background (`pkgfiles/ICON0.PNG`, `pkgfiles/PIC1.PNG`) are
+rendered by `tools/make_icon.py` and `tools/make_background.py`.

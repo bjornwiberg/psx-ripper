@@ -22,6 +22,8 @@ DATA		:=
 INCLUDES	:=	include fatfs
 
 ICON0		:=	$(CURDIR)/pkgfiles/ICON0.PNG
+# ICON0.PNG and PIC1.PNG (the XMB background) go into the package
+PKGFILES	:=	$(CURDIR)/pkgfiles
 APPID		:=	PSXR00001
 CONTENTID	:=	UP0001-$(APPID)_00-0000000000000000
 
