@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <unistd.h>
 #include "ppu-types.h"
 #include "io/pad.h"
 #include "sys/thread.h"
@@ -13,6 +14,9 @@
 #include "sysutil/osk.h"
 #include "sysutil/disc.h"
 #include "net/net.h"
+#ifdef HOST_REMOTE
+#include "net/netctl.h"
+#endif
 #include "rsxutil.h"
 #include "usbodd.h"
 #include "vfs.h"
@@ -34,7 +38,11 @@ int flip_timeouts = 0;
 gcmContextData *context = 0;
 void flip_sync() {}
 void flip() {}
+#ifdef HOST_REMOTE
+void waitflip() { usleep(16 * 1000); }   // about 60 frames per second, as on the console
+#else
 void waitflip() {}
+#endif
 void init_screen(void *, u32) {}
 
 // the pad: the buttons of the next frame
@@ -53,10 +61,28 @@ int ioPadGetData(u32 port, padData *d)
 	return 0;
 }
 
-// threads and locks: the screens are drawn on one thread; nothing runs in the background
+// threads and locks: the screens are drawn on one thread; nothing runs in the background.
+// The remote view simulator (HOST_REMOTE) runs the real web server: its threads are real.
+#ifdef HOST_REMOTE
+#include <pthread.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+int sysThreadCreate(sys_ppu_thread_t *id, void (*entry)(void *), void *arg, int, u64, u64, char *name)
+{
+	*id = 0;
+	if (!name || strncmp(name, "psxremote", 9)) return -1;   // rips, identify, USB polling: not here
+	pthread_t t;
+	if (pthread_create(&t, NULL, (void *(*)(void *))entry, arg)) return -1;
+	pthread_detach(t);
+	return 0;
+}
+void sysThreadExit(u64) { pthread_exit(NULL); }   // only the server's threads call it here
+#else
 int sysThreadCreate(sys_ppu_thread_t *id, void (*)(void *), void *, int, u64, u64, char *) { *id = 0; return -1; }
-int sysThreadJoin(sys_ppu_thread_t, u64 *) { return 0; }
 void sysThreadExit(u64) {}
+#endif
+int sysThreadJoin(sys_ppu_thread_t, u64 *) { return 0; }
 int sysMutexCreate(sys_mutex_t *m, const sys_mutex_attr_t *) { *m = 1; return 0; }
 int sysMutexLock(sys_mutex_t, u64) { return 0; }
 int sysMutexUnlock(sys_mutex_t) { return 0; }
@@ -114,9 +140,26 @@ int rd_local_by_size(uint64_t, int, char (*)[RD_NAME], int) { return -1; }
 int rd_local_verify(const uint8_t (*)[16], int, char *, size_t) { return -1; }
 int rd_online(const char *, RdDisc *, int) { return -1; }
 int rd_download(volatile uint32_t *, volatile uint32_t *, volatile int *, volatile int *) { return -1; }
+#ifdef HOST_REMOTE
+int netCtlInit() { return 0; }
+int netCtlGetInfo(int, union net_ctl_info *info)   // this computer's first LAN address
+{
+	struct ifaddrs *ifs, *i;
+	snprintf(info->ip_address, sizeof(info->ip_address), "127.0.0.1");
+	if (getifaddrs(&ifs)) return 0;
+	for (i = ifs; i; i = i->ifa_next)
+		if (i->ifa_addr && i->ifa_addr->sa_family == AF_INET) {
+			const char *a = inet_ntoa(((struct sockaddr_in *)i->ifa_addr)->sin_addr);
+			if (strncmp(a, "127.", 4)) { snprintf(info->ip_address, sizeof(info->ip_address), "%s", a); break; }
+		}
+	freeifaddrs(ifs);
+	return 0;
+}
+#else
 void remote_init(const RemoteHooks *) {}
 void remote_set(int) {}
 int remote_ip(char *out, int n) { snprintf(out, n, "192.168.1.50"); return 0; }
+#endif
 void json_str(char *out, size_t n, const char *s) { size_t o = strlen(out); snprintf(out + o, n - o, "\"%s\"", s); }
 int webhook_event_index(const char *) { return -1; }
 void webhook_host(const char *url, char *out, size_t n) { snprintf(out, n, "%s", url); }
