@@ -282,6 +282,8 @@ static const char *en[STR_COUNT] = {
 	"Built with",
 	"PSL1GHT (PS3 SDK) · zlib · FatFs by ChaN (FAT32 and exFAT)\nstb_image_write (remote view) · DejaVu fonts · GameDB-PSX (game titles)\nOwn driver for the Apple USB SuperDrive (USB Mass Storage, Bulk-Only Transport)\nThanks to IRISMAN and webMAN MOD (aldostools) and sacd-ripper for how the PS3 drive is driven",
 	"Open",
+	"en",
+	"The buttons press the console's pad. Keyboard: arrows, Enter = &#10005;, Esc/Backspace = &#9675;, Q/E = L1/R1, 1/3 = L2/R2, T = &#9651;, S = &#9633;.",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -560,6 +562,8 @@ static const char *sv[STR_COUNT] = {
 	"Byggd med",
 	"PSL1GHT (PS3-SDK) · zlib · FatFs av ChaN (FAT32 och exFAT)\nstb_image_write (fjärrvisning) · DejaVu-typsnitt · GameDB-PSX (speltitlar)\nEgen drivrutin för Apple USB SuperDrive (USB Mass Storage, Bulk-Only Transport)\nTack till IRISMAN och webMAN MOD (aldostools) och sacd-ripper för hur PS3:ans läsare styrs",
 	"Öppna",
+	"sv",
+	"Knapparna trycker på konsolens handkontroll. Tangentbord: pilar, Enter = &#10005;, Esc/Backspace = &#9675;, Q/E = L1/R1, 1/3 = L2/R2, T = &#9651;, S = &#9633;.",
 };
 
 static const char **table = en;
