@@ -39,8 +39,9 @@ def black_disc(img, cx, cy, r):
     layer.alpha_composite(light)
     dd = ImageDraw.Draw(layer)
     # the hub is black too: a darker edge shows where it is, and the hole
-    dd.ellipse([cx - r * 0.36, cy - r * 0.36, cx + r * 0.36, cy + r * 0.36], fill=(14, 14, 20, 255), outline=(4, 4, 6, 255), width=2 * S)
-    dd.ellipse([cx - r * 0.13, cy - r * 0.13, cx + r * 0.13, cy + r * 0.13], outline=(4, 4, 6, 255), width=2 * S)
+    edge = max(2, int(r * 0.036))   # as thick as in the icon, at any size
+    dd.ellipse([cx - r * 0.36, cy - r * 0.36, cx + r * 0.36, cy + r * 0.36], fill=(14, 14, 20, 255), outline=(4, 4, 6, 255), width=edge)
+    dd.ellipse([cx - r * 0.13, cy - r * 0.13, cx + r * 0.13, cy + r * 0.13], outline=(4, 4, 6, 255), width=edge)
     dd.ellipse([cx - r * 0.13, cy - r * 0.13, cx + r * 0.13, cy + r * 0.13], fill=(0, 0, 0, 0))
     img.paste(layer, (0, 0), layer)
 
