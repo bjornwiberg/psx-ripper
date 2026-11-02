@@ -3684,19 +3684,17 @@ static void card_set_outdir(int c, const char *dir)
 static void usb_presence_thread(void *arg)
 {
 	int was[USBODD_DRIVES];   // disc in USB drive n: -1 unknown, 0 no, 1 yes
-	uint64_t since[USBODD_DRIVES];   // when the drive connected (or the app started)
 	int fails[USBODD_DRIVES];        // commands in a row that got no answer at all
-	for (int i = 0; i < USBODD_DRIVES; i++) { was[i] = -1; since[i] = 0; fails[i] = 0; }
+	for (int i = 0; i < USBODD_DRIVES; i++) { was[i] = -1; fails[i] = 0; }
 	while (!exit_requested) {
 		usleep(2000 * 1000);
 		for (int i = 0; i < USBODD_DRIVES; i++) {
 			Card &k = g_cards[1 + i];
 			if (!usbodd_attached(i)) {
-				since[i] = 0; fails[i] = 0; k.usb_dead = 0;
+				fails[i] = 0; k.usb_dead = 0;
 				if (was[i] != -1 || k.present) { k.present = 0; k.inserted = 0; was[i] = -1; g_redraw = 2; }
 				continue;
 			}
-			if (!since[i]) since[i] = now_ms();
 			if (card_busy(1 + i)) { was[i] = -1; continue; }   // in use: its own commands tell
 			if (!usbodd_name(i)[0]) {   // just connected: model, port and the destination chosen for that port
 				usbodd_identify(i);
@@ -3715,18 +3713,20 @@ static void usb_presence_thread(void *arg)
 			fails[i] = r == -1 ? fails[i] + 1 : 0;   // -1: no answer (the driver already reset the pipes)
 			int dead = fails[i] >= 3;
 			if (dead != k.usb_dead) { k.usb_dead = dead; g_redraw = 2; logf("usb drive %d: %s", i, dead ? "does not answer" : "answers again"); }
-			// a disc that is still spinning up (not ready, unit attention) counts as present
-			int now = r == 0 || (r != -1 && !((r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A));
+			// no answer, or unit attention (the drive was reset or the medium changed and it says so
+			// once): ask again next time, it tells nothing about the disc
+			int sk = r == -1 ? -1 : (r >> 16 & 0x0F);
+			if (r == -1 || sk == 0x06) continue;
+			// a disc that is still spinning up (not ready, becoming ready) counts as present
+			int now = !(sk == 0x02 && (r >> 8 & 0xFF) == 0x3A);
 			if (!now && was[i] != 0) usbodd_unlock(i);   // without it the slot does not take a disc
-			// a disc found in the first seconds was already in it (the drive pulls it in after the
-			// unlock and spins it up): part of the start, not an insert. Later it was put in, and starts
-			// a rip when the drive's settings say so.
-			if (was[i] == 0 && now) {
-				k.present = 1;
-				if (now_ms() - since[i] > 12000) { k.inserted = 1; logf("usb drive %d: disc inserted", i); }
-			}
+			// the first answer after the drive connected (or a job on it ended) tells whether a disc
+			// was already in it: part of the start, not an insert. The SuperDrive only takes a disc
+			// when it is unlocked, which the app does, so any disc that appears after an empty answer
+			// was put in, and starts a rip when the drive's settings say so.
+			if (was[i] == 0 && now) { k.present = 1; k.inserted = 1; logf("usb drive %d: disc inserted", i); }
 			if (was[i] == 1 && !now) { k.present = 0; k.inserted = 0; logf("usb drive %d: disc removed", i); }
-			if (was[i] == -1) k.present = now;
+			if (was[i] == -1) { k.present = now; logf("usb drive %d: %s", i, now ? "a disc is in it" : "empty"); }
 			if (was[i] != now) g_redraw = 2;
 			was[i] = now;
 		}
