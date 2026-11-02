@@ -268,6 +268,9 @@ struct Ctx {
 	volatile int g_skip;           // square: leave the re-reads, keep what the rip has (repair later)
 	volatile uint32_t g_readerrs;
 	Md5 g_md5[MAX_TRACKS + 1];
+	struct { uint32_t lba; int t; Md5 m; } g_snap[512];   // MD5 midstates while writing, one per buffer
+	int g_nsnap;
+	uint32_t g_patch_min;          // first sector written again after the first pass (UINT32_MAX: none)
 	char g_track_md5[MAX_TRACKS + 1][33];
 	uint8_t g_track_md5bin[MAX_TRACKS + 1][16];
 	volatile uint32_t g_tstart[MAX_TRACKS + 1];
@@ -380,6 +383,9 @@ static void ctx_init(int c)
 #define g_result (CX.g_result)
 #define g_readerrs (CX.g_readerrs)
 #define g_md5 (CX.g_md5)
+#define g_snap (CX.g_snap)
+#define g_nsnap (CX.g_nsnap)
+#define g_patch_min (CX.g_patch_min)
 #define g_track_md5 (CX.g_track_md5)
 #define g_track_md5bin (CX.g_track_md5bin)
 #define g_tstart (CX.g_tstart)
@@ -1504,6 +1510,11 @@ static void writer_thread(void *arg)
 		if (vf_write(g_out, g_bufs[k], (size_t)RAW_SIZE * n) != (size_t)RAW_SIZE * n) g_write_failed = 1;
 		// feed each sector range to the MD5 of the track it belongs to
 		uint32_t first = g_buf_end[k] - n;
+		{   // midstate before this buffer: a later patch re-reads only from here, not the whole image
+			int t0 = g_ntracks - 1;
+			while (t0 > 0 && first < g_tstart[t0]) t0--;
+			if (g_nsnap < 512) { g_snap[g_nsnap].lba = first; g_snap[g_nsnap].t = t0; g_snap[g_nsnap].m = g_md5[t0]; g_nsnap++; }
+		}
 		for (uint32_t i = 0; i < n;) {
 			uint32_t lba = first + i;
 			int t = g_ntracks - 1;
@@ -1572,7 +1583,7 @@ static int verify_pass()
 				int ok = confirm_read(lba, 0, reads, sec);
 				g_rr_max = 0;
 				if (ok && fnv64(sec, RAW_SIZE) != g_uv_hash[k + j]) {
-					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; g_changed++; }
+					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; g_changed++; if (lba < g_patch_min) g_patch_min = lba; }
 					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
 				} else if (ok) {
 					rip_event(0xA8B0C8, STR_EV_FIRST_OK, lba);   // the first read was right
@@ -1616,7 +1627,7 @@ static int second_pass()
 				g_suspect_ok[k - g_nhard] = 1;
 				if (memcmp(sec, g_suspect_data + (k - g_nhard) * RAW_SIZE, RAW_SIZE)) {
 					g_changed++;
-					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) patched++;
+					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; if (lba < g_patch_min) g_patch_min = lba; }
 					logf("second pass: sector %u confirmed with different data, image updated", lba);
 					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
 				} else {
@@ -1627,6 +1638,7 @@ static int second_pass()
 			}
 		} else if (ok && vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) {
 			patched++;
+			if (lba < g_patch_min) g_patch_min = lba;
 			g_hard[k] |= HARD_RESOLVED;
 			if (edc_bad) g_badsect--; else g_readerrs--;
 			g_recovered++;
@@ -1650,6 +1662,16 @@ static void md5_from_file(const char *path)
 	uint32_t lba = 0;
 	int t = 0;
 	md5_init(&g_md5[0]);
+	// a rip that streamed its MD5s: start at the last midstate before the first patched sector; the
+	// tracks before it keep their streamed MD5 (nothing in them changed)
+	int si = -1;
+	for (int i = 0; i < g_nsnap; i++) if (g_snap[i].lba <= g_patch_min) si = i;
+	if (si >= 0 && g_patch_min != 0xFFFFFFFFu && vf_seek(f, (uint64_t)g_snap[si].lba * RAW_SIZE) == 0) {
+		lba = g_snap[si].lba; t = g_snap[si].t;
+		for (int k = 0; k < t; k++) md5_final(&g_md5[k], g_track_md5bin[k]);   // whole, unchanged
+		g_md5[t] = g_snap[si].m;
+		logf("md5 from sector %u (first patched %u), not from the start", lba, g_patch_min);
+	} else if (lba == 0) vf_seek(f, 0);
 	while (b && lba < g_leadout) {
 		uint32_t n = g_leadout - lba < 256 ? g_leadout - lba : 256;
 		if (vf_read(f, b, (size_t)RAW_SIZE * n) != (size_t)RAW_SIZE * n) break;
@@ -1683,6 +1705,7 @@ static void rip_thread(void *arg)
 	g_bufs[1] = (uint8_t *)memalign(128, CHUNK * SECT_Q);
 	g_buf_len[0] = g_buf_len[1] = 0;
 	for (int t = 0; t < g_ntracks; t++) md5_init(&g_md5[t]);
+	g_nsnap = 0; g_patch_min = 0xFFFFFFFFu;
 	tstart_init();
 	edc_init();
 	ecc_init();
@@ -4117,7 +4140,11 @@ static int home_screen()
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) { eject_disc(); g_redraw = 2; }
+		if ((p & B_TRIANGLE) && (st == DISC_READY || st == DISC_ERROR)) {
+			eject_disc();
+			f.res[0] = 0; f.rd_done[0] = 0;   // the last rip's line goes with the disc
+			g_redraw = 2;
+		}
 		if (p & B_SELECT) {   // this drive's settings
 			drive_settings_screen(sel);
 			pad_pressed();
@@ -4848,6 +4875,7 @@ static int repair_disc_inner()
 	}
 
 	// rebuild the state the second pass works on
+	g_nsnap = 0; g_patch_min = 0xFFFFFFFFu;   // no midstates: the MD5s are recomputed from the start
 	edc_init(); ecc_init();
 	g_nhard = 0; g_nsuspect = 0; g_confirmed = 0; g_changed = 0; g_readerrs = 0; g_badsect = 0; g_recovered = 0;
 	g_pass2_total = 0; g_pass2_done = 0; g_abort = 0; g_finished = 0; g_rd_result = -3; g_rd_result_name[0] = 0;
