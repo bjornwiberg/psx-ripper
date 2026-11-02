@@ -29,6 +29,16 @@ through scratches (the drive's own retries are set low, a damaged area gets one 
 sector); afterwards a second pass retries the failed sectors at 2x with the drive's normal
 retries and patches them into the image. O during the second pass keeps the image as it is.
 
+## Several drives at once
+
+Each drive (the internal one and up to two SuperDrives) has its own context: every variable a rip
+needs lives in a `struct Ctx` per drive, and a thread working for a drive sets a thread-local
+index, so the old global names are macros for the current thread's drive. A rip, a repair and a
+check are each a job thread on that drive's tab; the UI thread reads a drive's progress by
+switching to its context for a moment (`OnCard`). FatFs (exFAT), the Redump lookups and the rip
+index have locks. The SuperDrive driver keeps pipes, buffers and a lock per drive and ignores
+late completions from an earlier command.
+
 ## USB SuperDrive
 
 An Apple USB SuperDrive (05AC:1500) can be used instead of the PS3's drive: *Settings → Drive*.

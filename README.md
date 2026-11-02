@@ -76,8 +76,8 @@ A full CD takes about four minutes on the internal drive. Each rip writes `<name
 `.md5` (MD5 per track) and `.log` (the rip log, which *Repair* uses). The app's own log is
 `/dev_hdd0/tmp/psxrip.log`.
 
-More: [configuration, remote view and webhooks](docs/configuration.md) ·
-[how it works](docs/how-it-works.md) · [parallel ripping](docs/PARALLEL.md)
+More: **[user guide](docs/user-guide.md)** · [FAQ](docs/faq.md) ·
+[configuration, remote view and webhooks](docs/configuration.md) · [how it works](docs/how-it-works.md)
 
 ## Building
 
