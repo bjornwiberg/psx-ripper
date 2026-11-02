@@ -9,8 +9,8 @@ body:
     id: version
     attributes:
       label: PSX Ripper version
-      description: Shown at the bottom of the app's settings
-      placeholder: 0.1.0
+      description: Shown after the title, e.g. (v1.0.0)
+      placeholder: 1.0.0
     validations:
       required: true
   - type: input

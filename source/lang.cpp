@@ -273,6 +273,12 @@ static const char *en[STR_COUNT] = {
 	"Not checked against Redump",
 	"Sector %u of %u",
 	"%u sectors (video and sound) have no checksum: they are read once more and compared%s",
+	"About PSX Ripper",
+	"Rips your own PlayStation 1 discs to bit-perfect .bin/.cue images, from the PS3's drive and up to two Apple USB SuperDrives at once, and checks them against Redump.",
+	"Made by %s · %s",
+	"Source code, help and releases: %s",
+	"Free software under the GNU General Public License v3.",
+	"Not affiliated with Sony Interactive Entertainment. Only rip discs you own.",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -542,6 +548,12 @@ static const char *sv[STR_COUNT] = {
 	"Inte kontrollerad mot Redump",
 	"Sektor %u av %u",
 	"%u sektorer (video och ljud) saknar kontrollsumma: de läses en gång till och jämförs%s",
+	"Om PSX Ripper",
+	"Rippar dina egna PlayStation 1-skivor till bitperfekta .bin/.cue-avbilder, från PS3:ans läsare och upp till två Apple USB SuperDrive samtidigt, och kontrollerar dem mot Redump.",
+	"Gjord av %s · %s",
+	"Källkod, hjälp och nya versioner: %s",
+	"Fri programvara under GNU General Public License v3.",
+	"Inte ansluten till Sony Interactive Entertainment. Rippa bara skivor du äger.",
 };
 
 static const char **table = en;

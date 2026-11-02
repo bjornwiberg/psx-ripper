@@ -5,7 +5,7 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
-## 0.1.0 (2026-11-02)
+## 1.0.0 (2026-11-02)
 
 First public release.
 

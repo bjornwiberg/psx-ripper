@@ -59,13 +59,13 @@ request title becomes the commit on `main`, so it must follow
 
 | Title | Release |
 |---|---|
-| `fix: ...` | patch (0.1.0 → 0.1.1) |
-| `feat: ...` | minor (0.1.0 → 0.2.0) |
-| `feat!: ...` or a `BREAKING CHANGE:` footer | major (after 1.0.0) |
+| `fix: ...` | patch (1.0.0 → 1.0.1) |
+| `feat: ...` | minor (1.0.0 → 1.1.0) |
+| `feat!: ...` or a `BREAKING CHANGE:` footer | major (1.0.0 → 2.0.0) |
 | `docs:`, `test:`, `refactor:`, `perf:`, `build:`, `ci:`, `chore:` | no release on their own (`perf` and `docs` appear in the changelog) |
 
 Write the title for users: it ends up in the changelog. A check on every pull request rejects
-titles that do not follow the format. Before 1.0.0, breaking changes bump the minor version.
+titles that do not follow the format.
 
 ## Releases
 
@@ -76,4 +76,5 @@ Releases are automatic ([release-please](https://github.com/googleapis/release-p
 2. Merging that pull request tags `vx.y.z`, creates the GitHub release with the changelog, and
    attaches `psxripper-x.y.z.pkg` and its SHA-256, built by CI from the tag.
 
-The version shows in the app's settings and in the package (`APP_VER` = major.minor).
+The version shows in the app's title, its log, `/status.json` and the package
+(`APP_VER` in PARAM.SFO is `MM.mm`, the major and minor version; the PS3 has no field for the patch).

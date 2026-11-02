@@ -28,7 +28,8 @@
 #include "rsxutil.h"
 #include "storage.h"
 #include "lang.h"
-#include "version.h"   // APP_VERSION, from version.txt (written into the build directory by the Makefile)
+#include "version.h"
+#include "about.h"   // APP_VERSION, from version.txt (written into the build directory by the Makefile)
 #include "ui.h"
 #include "md5.h"
 #include "redump.h"
@@ -3362,12 +3363,53 @@ static void settings_rows(const char *subtitle, const char *const *labels, char 
 	footer_note(foot);
 }
 
+// About (the last row of the settings): what the app is, who made it, where the source is.
+static int draw_wrapped(UiFont f, const char *text, int y, uint32_t col);
+static void about_draw()
+{
+	draw_backdrop();
+	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
+	int y = ui_h() / 10 + ui_line(UI_TITLE) + lb / 2;
+	ui_text(UI_BODY, ui_w() / 2, y, 0xA8B0C8, T(STR_L_ABOUT), UI_CENTER);
+	y += lb * 2;
+	y = draw_wrapped(UI_BODY, T(STR_ABOUT_DESC), y, 0xE8ECF8) + lb;
+	char line[200];
+	snprintf(line, sizeof(line), T(STR_ABOUT_BY), APP_AUTHOR, APP_EMAIL);
+	ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, line, UI_CENTER);
+	y += lb + ls / 2;
+	snprintf(line, sizeof(line), T(STR_ABOUT_SOURCE), APP_URL);
+	ui_text(UI_BODY, ui_w() / 2, y, 0x9AD0A8, line, UI_CENTER);
+	y += lb * 2;
+	ui_text(UI_SMALL, ui_w() / 2, y, 0x8890A8, T(STR_ABOUT_LICENSE), UI_CENTER);
+	y += ls + ls / 3;
+	ui_text(UI_SMALL, ui_w() / 2, y, 0x8890A8, T(STR_ABOUT_SONY), UI_CENTER);
+	const char *b[] = {"circle"};
+	const char *l[] = {T(STR_HINT_BACK)};
+	hint_bar(b, l, 1);
+}
+
+static void about_screen()
+{
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			about_draw();
+			g_drawn = 2;
+		}
+		flip_frame();
+		int p = pad_pressed();
+		if (p & (B_CIRCLE | B_CROSS)) return;
+	}
+}
+
 // Settings (START): the standard for the drives (speed, re-reads, check, eject, rip at once; a
 // drive can have its own values, SELECT on its card), Redump, the Redump copy, remote view, webhooks.
 static void settings_screen()
 {
 	int redump = g_redump, remote = g_remote, webhook_on = g_webhook_on, row = 0;
-	const int NROWS = 10;
+	const int NROWS = 11;   // the last row opens About
 	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	DriveCfg sd = g_std;
 	char rdver[64] = "";
@@ -3380,7 +3422,7 @@ static void settings_screen()
 			g_redraw = 0;
 			g_drawn = 2;
 			draw_backdrop();
-			char vals[10][96];
+			char vals[11][96];
 			fn_label(g_name_pat, vals[5], sizeof(vals[5]));
 			fmt_speed(sd.speed, vals[0], sizeof(vals[0]));
 			fmt_int(sd.retries, vals[1], sizeof(vals[1]));
@@ -3411,10 +3453,15 @@ static void settings_screen()
 				for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
 				snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
 			}
-			const char *labels[10] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
-			                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK)};
+			snprintf(vals[10], sizeof(vals[10]), "v%s", APP_VERSION);
+			const char *labels[11] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
+			                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_ABOUT)};
 			settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 7);   // row 7 is an action
-			if (row == 9 || row == 5) {   // webhooks and the file name: X opens their own view
+			if (row == 10) {   // About: X opens it
+				const char *b[] = {"updown", "l2r2", "cross", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_SHOW), T(STR_HINT_BACK)};
+				hint_bar(b, l, 4);
+			} else if (row == 9 || row == 5) {   // webhooks and the file name: X opens their own view
 				const char *b[] = {"updown", "l2r2", "leftright", "cross", "triangle", "circle"};
 				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_CHANGE), T(row == 5 ? STR_HINT_EDIT : STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 				hint_bar(b, l, 6);
@@ -3437,6 +3484,12 @@ static void settings_screen()
 			g_redraw = 2;
 			continue;
 		}
+		if ((p & B_CROSS) && row == 10) {
+			about_screen();
+			pad_pressed();
+			g_redraw = 2;
+			continue;
+		}
 		if ((p & B_CROSS) && row == 9) {
 			webhook_settings_screen();
 			pad_pressed();
@@ -3451,7 +3504,7 @@ static void settings_screen()
 			continue;
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (row == 7) d = 0;
+		if (row == 7 || row == 10) d = 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) {
 			reset = own_dialog(T(STR_RESET_Q), 1) == 1;

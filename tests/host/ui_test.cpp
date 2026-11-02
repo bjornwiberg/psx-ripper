@@ -205,6 +205,9 @@ int main()
 	frame("ejected-nomatch", 1);
 	frame("ejected-unchecked", 2);
 
+	{   // About, in Swedish here and in English below
+		g_boxes.clear(); about_draw(); save("about"); size_t b0 = g_fail; check("about"); printf("%s about\n", g_fail == (int)b0 ? "ok  " : "FAIL");
+	}
 	// English
 	host_lang = PS3_LANG_ENGLISH_US; lang_init();
 	reset_all(); usb(0, 0); usb(1, 1);
@@ -213,6 +216,7 @@ int main()
 	frame("english-idle", 0);
 	frame("english-ripping", 1);
 
+	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;
 }
