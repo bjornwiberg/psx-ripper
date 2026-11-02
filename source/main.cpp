@@ -530,9 +530,9 @@ static void draw_backdrop()
 	ui_background();
 	{   // the title with the version after it, smaller and grey, both centred together
 		const char *ver = "  (v" APP_VERSION ")";
-		int wt = ui_text_width(UI_TITLE, "PSX Ripper"), wv = ui_text_width(UI_BODY, ver);
+		int wt = ui_text_width(UI_TITLE, "PSX RiPPER"), wv = ui_text_width(UI_BODY, ver);
 		int x = ui_w() / 2 - (wt + wv) / 2, y = ui_h() / 10;
-		ui_text(UI_TITLE, x, y, 0xFFFFFF, "PSX Ripper");
+		ui_text(UI_TITLE, x, y, 0xFFFFFF, "PSX RiPPER");
 		ui_text(UI_BODY, x + wt, y + (ui_line(UI_TITLE) - ui_line(UI_BODY)) * 3 / 4, 0x8890A8, ver);   // on the title's baseline
 	}
 }
@@ -4436,7 +4436,7 @@ static int status_json(char *js, int n)
 {
 	int list[NCARDS], nc = card_list(list), anyjob = 0;
 	for (int i = 0; i < nc; i++) anyjob |= g_cards[list[i]].job;
-	snprintf(js, n, "{\"app\":\"PSX Ripper\",\"version\":\"%s\",\"busy\":%s,\"state\":\"%s\",\"drives\":[",
+	snprintf(js, n, "{\"app\":\"PSX RiPPER\",\"version\":\"%s\",\"busy\":%s,\"state\":\"%s\",\"drives\":[",
 	         APP_VERSION, g_state_busy() ? "true" : "false", anyjob ? "ripping" : "idle");
 	auto put = [&](const char *fmt, ...) {
 		size_t o = strlen(js);
@@ -4499,7 +4499,7 @@ static void set_webhook(const char *url)
 static void event_json(char *js, size_t n, const char *event)
 {
 	uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
-	snprintf(js, n, "{\"event\":\"%s\",\"app\":\"PSX Ripper\",\"percent\":%u,", event,
+	snprintf(js, n, "{\"event\":\"%s\",\"app\":\"PSX RiPPER\",\"percent\":%u,", event,
 	         g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
 	json_fields(js, n);
 	size_t o = strlen(js);

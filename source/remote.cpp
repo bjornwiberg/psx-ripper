@@ -149,7 +149,7 @@ static void client_thread(void *arg)
 	} else {   // the page: the screen, and under it a pad whose buttons press the console's
 		send_str(s, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\n\r\n");
 		send_str(s,
-			"<!doctype html><html lang=sv><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>PSX Ripper</title>\n"
+			"<!doctype html><html lang=sv><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>PSX RiPPER</title>\n"
 			"<style>\n"
 			":root{--bg:#111;--k:#262b3a;--kb:#3a4160;--t:#dfe3f0;--d:#8890a8;--b:min(52px,10vw)}\n"
 			"*{box-sizing:border-box}\n"

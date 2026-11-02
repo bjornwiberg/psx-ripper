@@ -3,7 +3,7 @@
 This project follows the [Contributor Covenant, version 2.1](https://www.contributor-covenant.org/version/2/1/code_of_conduct/).
 
 In short: be respectful and welcoming, assume good intent, give and accept constructive
-feedback, and focus on what is best for the people using and building PSX Ripper. Harassment,
+feedback, and focus on what is best for the people using and building PSX RiPPER. Harassment,
 insults and personal or political attacks are not acceptable, in issues, pull requests or
 anywhere else the project is represented.
 

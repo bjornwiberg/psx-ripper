@@ -2,7 +2,7 @@
 
 On 4.2x+ firmwares a homebrew process is not allowed to read raw sectors from the BD drive
 until the drive has been re-authenticated, and the lv1 storage manager refuses that by
-default. PSX Ripper does the same as IRISMAN's PS1 copy:
+default. PSX RiPPER does the same as IRISMAN's PS1 copy:
 
 1. Applies IRISMAN's lv1 storage-manager patch (4 instructions at `0x16fa60`, `0x16fa84`,
    `0x16fafc`, `0x16fb04`) via PS3MAPI. The current values are checked first; if they don't
@@ -52,7 +52,7 @@ the ripper's Q calibration accounts for that.
 LibCrypt protection data lives in the disc's subchannel. A disc that is not an original
 (for example a CD-R burned from an image) usually lacks it. The ripper then reports that no
 protection data was found, and the game may not start. The `.sbi` is only ever created from
-the disc in your drive; PSX Ripper does not ship or download `.sbi` files.
+the disc in your drive; PSX RiPPER does not ship or download `.sbi` files.
 
 Verify your rips against [Redump](http://redump.org) (webMAN can compute MD5 with
 `/md5.ps3<path>`).

@@ -1,6 +1,6 @@
 # Third-party notices
 
-PSX Ripper is licensed under the GPL-3.0 (see [LICENSE](LICENSE)). It includes or uses the
+PSX RiPPER is licensed under the GPL-3.0 (see [LICENSE](LICENSE)). It includes or uses the
 following third-party work.
 
 | Component | Where | License |

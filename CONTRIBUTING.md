@@ -1,4 +1,4 @@
-# Contributing to PSX Ripper
+# Contributing to PSX RiPPER
 
 Thanks for helping. Bug reports, tested discs, translations and code are all welcome.
 

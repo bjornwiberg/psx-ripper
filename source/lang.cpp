@@ -7,7 +7,7 @@
 #define PS3_LANG_ENGLISH_UK 18
 
 static const char *en[STR_COUNT] = {
-	"PSX Ripper\n\nInsert a PS1 disc - it is detected automatically.\nIs the disc already in the drive? Select Yes.\nSelect No for settings or to exit.\n\nSaving to: %s",
+	"PSX RiPPER\n\nInsert a PS1 disc - it is detected automatically.\nIs the disc already in the drive? Select Yes.\nSelect No for settings or to exit.\n\nSaving to: %s",
 	"Could not open the disc drive (0x%x).",
 	"Could not read the disc's table of contents (0x%x).\nIs this a PS1 disc?\n\nLog: %s",
 	"The drive refused raw reading (READ CD 0x%x).\n\nLog: %s",
@@ -37,7 +37,7 @@ static const char *en[STR_COUNT] = {
 	"Max",
 	"On",
 	"Off",
-	"PSX Ripper\n\nYes = Settings\nNo = Exit",
+	"PSX RiPPER\n\nYes = Settings\nNo = Exit",
 	"Done. Remove the disc and insert the next one and it will be ripped automatically.\n○ goes back to the start screen.",
 	"Insert a PS1 disc",
 	"Saving to: %s",
@@ -273,7 +273,7 @@ static const char *en[STR_COUNT] = {
 	"Not checked against Redump",
 	"Sector %u of %u",
 	"%u sectors (video and sound) have no checksum: they are read once more and compared%s",
-	"About PSX Ripper",
+	"About PSX RiPPER",
 	"Rips your own PlayStation 1 discs to bit-perfect .bin/.cue images, from the PS3's drive and up to two Apple USB SuperDrives at once, and checks them against Redump.",
 	"Made by %s · %s",
 	"Source code, help and releases: %s",
@@ -285,7 +285,7 @@ static const char *en[STR_COUNT] = {
 };
 
 static const char *sv[STR_COUNT] = {
-	"PSX Ripper\n\nSätt i en PS1-skiva – den upptäcks automatiskt.\nSitter skivan redan i? Välj Ja.\nVälj Nej för inställningar eller avsluta.\n\nSparas till: %s",
+	"PSX RiPPER\n\nSätt i en PS1-skiva – den upptäcks automatiskt.\nSitter skivan redan i? Välj Ja.\nVälj Nej för inställningar eller avsluta.\n\nSparas till: %s",
 	"Kunde inte öppna skivläsaren (0x%x).",
 	"Kunde inte läsa skivans innehållsförteckning (0x%x).\nÄr det en PS1-skiva?\n\nLogg: %s",
 	"Skivläsaren vägrar rå läsning (READ CD 0x%x).\n\nLogg: %s",
@@ -315,7 +315,7 @@ static const char *sv[STR_COUNT] = {
 	"Max",
 	"På",
 	"Av",
-	"PSX Ripper\n\nJa = Inställningar\nNej = Avsluta",
+	"PSX RiPPER\n\nJa = Inställningar\nNej = Avsluta",
 	"Klart. Ta ut skivan och sätt i nästa så rippas den automatiskt.\n○ går tillbaka till startskärmen.",
 	"Sätt i en PS1-skiva",
 	"Sparas till: %s",
@@ -551,7 +551,7 @@ static const char *sv[STR_COUNT] = {
 	"Inte kontrollerad mot Redump",
 	"Sektor %u av %u",
 	"%u sektorer (video och ljud) saknar kontrollsumma: de läses en gång till och jämförs%s",
-	"Om PSX Ripper",
+	"Om PSX RiPPER",
 	"Rippar dina egna PlayStation 1-skivor till bitperfekta .bin/.cue-avbilder, från PS3:ans läsare och upp till två Apple USB SuperDrive samtidigt, och kontrollerar dem mot Redump.",
 	"Gjord av %s · %s",
 	"Källkod, hjälp och nya versioner: %s",

@@ -13,7 +13,7 @@
 		HG
 	</value>
 	<value name="LICENSE" type="string">
-		PSX Ripper is free software under the GNU General Public License v3. Built with PSL1GHT, an open-source PS3 SDK. Not associated with Sony Interactive Entertainment.
+		PSX RiPPER is free software under the GNU General Public License v3. Built with PSL1GHT, an open-source PS3 SDK. Not associated with Sony Interactive Entertainment.
 	</value>
 	<value name="PARENTAL_LEVEL" type="integer">
 		0
@@ -28,7 +28,7 @@
 		279
 	</value>
 	<value name="TITLE" type="string">
-		PSX Ripper
+		PSX RiPPER
 	</value>
 	<value name="TITLE_ID" type="string">
 		PSXR00001

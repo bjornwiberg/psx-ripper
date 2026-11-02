@@ -32,7 +32,7 @@ CONTENTID	:=	UP0001-$(APPID)_00-0000000000000000
 VERSION		:=	$(shell cat $(dir $(firstword $(MAKEFILE_LIST)))version.txt 2>/dev/null || echo 0.0.0)
 APP_VER		:=	$(shell echo $(VERSION) | awk -F. '{printf "%02d.%02d", $$1, $$2}')
 # the name in the XMB, with the version as other homebrew shows it
-TITLE		:=	PSX Ripper v$(VERSION)
+TITLE		:=	PSX RiPPER v$(VERSION)
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------

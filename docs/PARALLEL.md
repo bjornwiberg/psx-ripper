@@ -68,7 +68,7 @@ With one active drive the screens stay as they are now. With two or three the ho
 progress screen become one screen with a card per drive:
 
 ```
- PSX Ripper                                             Hårddisk (/PSXISO, 812 GB ledigt)
+ PSX RiPPER                                             Hårddisk (/PSXISO, 812 GB ledigt)
 
  ┌ PS3-läsaren ───────────────────────────────────────────────────────────────────────┐
  │ Alundra · SLES_011.35                                                   Rippar 42 % │

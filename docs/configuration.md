@@ -46,7 +46,7 @@ Webhook event bits: 0 `disc_identified`, 1 `rip_started`, 2 `rip_progress`, 3 `r
 Example payload:
 
 ```json
-{"event":"rip_finished","app":"PSX Ripper","title":"Alundra","serial":"SLES_011.35",
+{"event":"rip_finished","app":"PSX RiPPER","title":"Alundra","serial":"SLES_011.35",
  "sectors_done":257659,"sectors_total":257659,"unreadable":0,"fixed":1,"bad":0,
  "redump":"verified","redump_name":"Alundra (Europe)","seconds":221,
  "path":"/dev_hdd0/PSXISO/Alundra [SLES_011.35].bin"}
@@ -59,7 +59,7 @@ One object for the app and a `drives` array with every drive (the internal one f
 USB drives by port). `busy` is true while any drive is in use or the lv1 patch is on.
 
 ```json
-{"app":"PSX Ripper","version":"1.0.0","busy":true,"state":"ripping","drives":[
+{"app":"PSX RiPPER","version":"1.0.0","busy":true,"state":"ripping","drives":[
  {"drive":"internal","model":"PS3 Blu-ray drive","state":"ripping",
   "title":"Mega Man X4","serial":"SLUS_005.61","size_mb":564,"redump_name":"Mega Man X4 (USA)",
   "redump":"unchecked","already_ripped":false,"known_errors":0,
@@ -82,7 +82,7 @@ USB drives by port). `busy` is true while any drive is in use or the lv1 patch i
 
 ## Verification against Redump
 
-PSX Ripper can compare a rip with the [Redump](http://redump.org/) database. No Redump data
+PSX RiPPER can compare a rip with the [Redump](http://redump.org/) database. No Redump data
 is included in the app; it is fetched at runtime. Setting *Check against Redump*:
 
 - **Off**: no network access.

@@ -48,7 +48,7 @@ try:
     font = ImageFont.truetype("/System/Library/Fonts/Avenir Next.ttc", 26 * S, index=2)
 except OSError:
     font = ImageFont.load_default()
-text = "PSX Ripper"
+text = "PSX RiPPER"
 tw = d.textlength(text, font=font)
 d.text(((W * S - tw) / 2, 140 * S), text, font=font, fill=(255, 255, 255))
 

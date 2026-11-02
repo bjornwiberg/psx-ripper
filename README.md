@@ -1,4 +1,4 @@
-# PSX Ripper
+# PSX RiPPER
 
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
@@ -8,7 +8,7 @@ ready to play with webMAN MOD / Cobra. It reads from the PS3's own Blu-ray drive
 two Apple USB SuperDrives, all three at the same time, and checks every rip against
 [Redump](http://redump.org/).
 
-> PSX Ripper is not affiliated with or endorsed by Sony Interactive Entertainment. "PlayStation"
+> PSX RiPPER is not affiliated with or endorsed by Sony Interactive Entertainment. "PlayStation"
 > is a trademark of Sony Interactive Entertainment. Only rip discs you own.
 
 ## Features
@@ -46,7 +46,7 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
 1. Download `psxripper-<version>.pkg` from the [latest release](../../releases/latest).
 2. Copy it to the PS3 (USB stick, FTP, or webMAN *Install PKG*) and install it with
    *Package Manager → Install Package Files*.
-3. Start **PSX Ripper** from the Game column.
+3. Start **PSX RiPPER** from the Game column.
 
 ## Usage
 
