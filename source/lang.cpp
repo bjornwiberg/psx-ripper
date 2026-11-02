@@ -268,6 +268,9 @@ static const char *en[STR_COUNT] = {
 	"The drive does not answer",
 	"Try Eject, or unplug the drive's USB cable and plug it in again.",
 	"No answer",
+	"Matches Redump",
+	"Does not match Redump",
+	"Not checked against Redump",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -532,6 +535,9 @@ static const char *sv[STR_COUNT] = {
 	"Läsaren svarar inte",
 	"Prova Mata ut, eller dra ur läsarens USB-sladd och sätt i den igen.",
 	"Svarar inte",
+	"Stämmer med Redump",
+	"Stämmer inte med Redump",
+	"Inte kontrollerad mot Redump",
 };
 
 static const char **table = en;

@@ -111,6 +111,7 @@ struct Card {
 	int repairing;                    // that job is a repair: progress is the re-read sectors
 	char res[200];                    // last rip: one line, coloured res_col
 	uint32_t res_col;
+	int res_rd;                      // the last rip against Redump: 1 matches, 0 does not, -1 not checked, -2 no line (off, failed)
 	char res_disc[160];               // which disc the last rip was ("Motorhead (SLUS_007.17)")
 	int res_failed;                   // it was cancelled or failed: an earlier rip there is untouched
 	char rd_done[160];                // Redump result as text (verified / no match), for the log and webhooks
@@ -3950,6 +3951,15 @@ static int draw_page_body(int c, int y)
 		snprintf(last, sizeof(last), T(STR_LAST_RIP), k.res_disc, k.res);
 		ui_text_fit(UI_SMALL, L, y, k.res_col, last, R - L);
 		y += ls + ls / 3;
+		if (k.res_rd >= -1) {   // and how it compared with Redump, with the tab's icon
+			const char *icon = k.res_rd == 1 ? "medal" : k.res_rd == 0 ? "warn" : "question";
+			uint32_t col = k.res_rd == 1 ? 0x7CE0A0 : k.res_rd == 0 ? 0xFF8A80 : 0x8890A8;
+			uint32_t icol = k.res_rd == 1 ? 0xE8C870 : col;
+			int isz = ls * 3 / 4, igap = ls / 3;
+			ui_icon(icon, L, y + (ls - isz) / 2, isz, icol);
+			ui_text_fit(UI_SMALL, L + isz + igap, y, col, T(k.res_rd == 1 ? STR_LAST_RD_OK : k.res_rd == 0 ? STR_LAST_RD_NO : STR_LAST_RD_NONE), R - L - isz - igap);
+			y += ls + ls / 3;
+		}
 	}
 	if (st == DISC_READY && k.space_short && !k.prev_rip) {
 		char sl[200];
@@ -4441,7 +4451,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		if (g_headless) tell(msg);
 		Card &k = g_cards[cur_card()];
 		snprintf(k.res, sizeof(k.res), "%s", msg);
-		k.res_col = 0xFF8A80;
+		k.res_col = 0xFF8A80; k.res_rd = -2;
 		k.res_failed = 1;
 		return 0;
 	}
@@ -4629,6 +4639,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		if (g_recovered) snprintf(k.res + strlen(k.res), sizeof(k.res) - strlen(k.res), T(STR_CARD_FIXED), g_recovered);
 		k.res_col = g_readerrs || g_badsect ? 0xF0C060 : 0x7CE0A0;
 		k.res_failed = 0;
+		k.res_rd = g_rd_result == 1 ? 1 : g_rd_result == 0 ? 0 : g_redump == RD_OFF ? -2 : -1;
 	}
 	g_state = ST_HOME;
 	fire_event("rip_finished");
@@ -4761,7 +4772,7 @@ static void check_job_start(int c)
 	if (k.job || !k.exist[0]) return;
 	job_reset(c);
 	k.job = 1;
-	k.res[0] = 0;
+	k.res[0] = 0; k.res_rd = -2;
 	k.eta_t0 = 0;
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy (status, deploy); the drive is not used
@@ -4776,7 +4787,7 @@ static void rip_job_thread(void *arg)
 	t_card = (int)((long)arg >> 8);
 	int fresh = (int)((long)arg & 0xFF);
 	Card &k = g_cards[t_card];
-	k.res[0] = 0;
+	k.res[0] = 0; k.res_rd = -2;
 	snprintf(k.res_disc, sizeof(k.res_disc), "%s (%s)", k.rd_name[0] ? k.rd_name : k.title, k.serial);
 	k.rd_done[0] = 0;
 	k.eta_t0 = 0;
@@ -4895,7 +4906,7 @@ static void repair_job_start(int c)
 	job_reset(c);
 	k.job = 1;
 	k.repairing = 1;
-	k.res[0] = 0;
+	k.res[0] = 0; k.res_rd = -2;
 	snprintf(k.res_disc, sizeof(k.res_disc), "%s (%s)", k.rd_name[0] ? k.rd_name : k.title, k.serial);
 	k.eta_t0 = 0;
 	OnCard o(c);
@@ -4928,7 +4939,7 @@ static int repair_disc_inner()
 		sys_storage_close(g_fd);
 		if (g_use == SRC_BD) lv1_storage_unpatch();
 		Card &k = g_cards[cur_card()];
-		snprintf(k.res, sizeof(k.res), "%s", T(STR_CREATE_FAILED)); k.res_col = 0xFF8A80; k.res_failed = 1;
+		snprintf(k.res, sizeof(k.res), "%s", T(STR_CREATE_FAILED)); k.res_col = 0xFF8A80; k.res_rd = -2; k.res_failed = 1;
 		return 0;
 	}
 	if (!riplog_open_count()) {
@@ -5031,6 +5042,7 @@ static int repair_disc_inner()
 		snprintf(k.res, sizeof(k.res), T(STR_REPAIRED), g_recovered + g_changed, g_pass2_total);
 		k.res_col = g_readerrs || g_badsect ? 0xF0C060 : 0x7CE0A0;
 		k.res_failed = 0;
+		k.res_rd = g_rd_result == 1 ? 1 : g_rd_result == 0 ? 0 : g_redump == RD_OFF ? -2 : -1;
 	}
 	g_state = ST_HOME;
 	fire_event("repair_finished");

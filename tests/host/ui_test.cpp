@@ -178,6 +178,19 @@ int main()
 	reset_all();
 	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577); ripped(0, 1, 0);
 	frame("single-drive", 0);
+	// ejected after a rip: the last rip's line and how it compared with Redump
+	reset_all(); usb(0, 0); usb(1, 1);
+	for (int c = 0; c < 3; c++) {
+		Card &k = g_cards[c];
+		k.present = 1; k.state = DISC_NONE;
+		snprintf(k.res_disc, sizeof(k.res_disc), "%s", c == 0 ? "Alundra (Europe) (SLES_011.35)" : c == 1 ? "Motorhead (SLUS_007.17)" : "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv) (SLES_020.88)");
+		snprintf(k.res, sizeof(k.res), "%s", c == 1 ? "klar på 1:12:40 · 239 oläsbara · 39 lagade" : "klar på 14:02");
+		k.res_col = c == 1 ? 0xF0C060 : 0x7CE0A0;
+		k.res_rd = c == 0 ? 1 : c == 1 ? 0 : -1;
+	}
+	frame("ejected-verified", 0);
+	frame("ejected-nomatch", 1);
+	frame("ejected-unchecked", 2);
 
 	// English
 	host_lang = PS3_LANG_ENGLISH_US; lang_init();
