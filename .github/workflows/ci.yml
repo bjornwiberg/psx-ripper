@@ -1,10 +1,12 @@
-# Every pull request and every push to main: the UI tests on the host and the PS3 build.
+# Every pull request: the UI tests on the host and the PS3 build. main only takes pull requests
+# that passed them against the latest main, so a push to main is not tested again. The release
+# pull request from release-please only changes the version and the changelog: its jobs are
+# skipped (a skipped job counts as passed for the branch protection), and the release build
+# itself runs in release.yml.
 name: CI
 
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -17,6 +19,7 @@ concurrency:
 jobs:
   ui-tests:
     name: UI tests (host)
+    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -32,6 +35,7 @@ jobs:
 
   build:
     name: PS3 package
+    if: ${{ !startsWith(github.head_ref, 'release-please--') }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
