@@ -88,8 +88,9 @@ The tab says *Done* and keeps a line about the last rip, even after the disc is 
 > 🏅 Matches Redump
 
 A rip that **matches Redump** is bit-perfect: every track's MD5 equals the reference. One that
-**does not match** either has unreadable sectors (see below), or the disc is a different
-version than Redump knows. **Not checked** means Redump was off or knows no such disc.
+**does not match** has unreadable sectors (see below), or the disc is a burned copy or a version
+Redump does not list; see the [FAQ](faq.md#why-does-my-rip-not-match-redump). **Not checked**
+means Redump was off or knows no such disc.
 
 ## Damaged discs and Repair
 

@@ -19,10 +19,22 @@ it rips.
 
 ### Why does my rip not match Redump?
 
-Usually because sectors could not be read: the tab shows the warning and *Known errors*. Clean
-the disc and use **Repair**, or try another drive. If there are no known errors, the disc may be
-a version Redump does not list (a different region, revision or print), or the disc was burned
-(a CD-R copy), which is never identical to the original.
+There are three common reasons:
+
+1. **Sectors could not be read.** The tab shows the warning and *Known errors*. Clean the disc
+   and use **Repair**, or try another drive.
+2. **The disc is a copy.** A burned disc (CD-R) is never identical to the original, even when
+   every sector on it reads perfectly: it was written from an image made with some other tool,
+   and burning often adds or removes the two-second pregap. Such a rip has no unreadable sectors
+   but a different MD5, and often a size that differs from Redump's by exactly 150 sectors
+   (2 seconds) or by a few sectors. You can tell a copy by its underside: original PS1 discs are
+   black, burned discs are blue, green, purple or silver.
+3. **The disc is a version Redump does not list**, for example another print or revision of
+   the same game.
+
+A rip that does not match can still play perfectly. PSX RiPPER checks every data sector while it
+reads (sync, address, EDC and ECC), so a rip without known errors is a correct copy of the disc
+in the drive; it is only not the same as the disc Redump has.
 
 ### What does "Double-checking sectors without a checksum" mean, and why does it take so long?
 
