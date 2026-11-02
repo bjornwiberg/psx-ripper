@@ -3379,7 +3379,10 @@ static void about_draw()
 	y += lb + ls / 2;
 	snprintf(line, sizeof(line), T(STR_ABOUT_SOURCE), APP_URL);
 	ui_text(UI_BODY, ui_w() / 2, y, 0x9AD0A8, line, UI_CENTER);
-	y += lb * 2;
+	y += lb * 3 / 2;
+	ui_text(UI_BODY, ui_w() / 2, y, 0xA8B0C8, T(STR_ABOUT_BUILT), UI_CENTER);   // the libraries and our own driver
+	y += lb + ls / 3;
+	y = draw_wrapped(UI_SMALL, T(STR_ABOUT_LIBS), y, 0xC8D0E0) + ls / 2;
 	ui_text(UI_SMALL, ui_w() / 2, y, 0x8890A8, T(STR_ABOUT_LICENSE), UI_CENTER);
 	y += ls + ls / 3;
 	ui_text(UI_SMALL, ui_w() / 2, y, 0x8890A8, T(STR_ABOUT_SONY), UI_CENTER);
