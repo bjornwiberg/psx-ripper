@@ -3832,14 +3832,14 @@ static void draw_page(int c, int y)
 		y += bh + ls / 2;
 		Eta e = {k.eta_t0, k.eta_tw, k.eta_pw, k.eta_rate};
 		if (!k.eta_t0 || g_phase != k.eta_phase) { uint64_t t0 = k.eta_t0; eta_start(&e); if (t0) e.t0 = t0; k.eta_phase = g_phase; }
-		char tl[96], pc[16];
+		char tl[96], pc[140];
 		if (g_pass2_total && g_phase) eta_line(&e, g_pass2_done, g_pass2_total, tl, sizeof(tl));
 		else eta_line(&e, pos, g_total, tl, sizeof(tl));
 		k.eta_t0 = e.t0; k.eta_tw = e.tw; k.eta_pw = e.pw; k.eta_rate = e.rate;
-		snprintf(pc, sizeof(pc), "%u %%", pct);
-		ui_text(UI_BODY, L, y, 0xFFFFFF, pc);
-		ui_text(UI_BODY, R, y, 0xC8D0E0, tl, UI_RIGHT);
-		y += lb + ls / 2;
+		// percentage and time on the right of the phase line (the tab shows the percentage too)
+		snprintf(pc, sizeof(pc), "%u %%  ·  %s", pct, tl);
+		int pcw = ui_text_width(UI_BODY, pc);
+		ui_text(UI_BODY, R, y, 0xC8D0E0, pc, UI_RIGHT);
 		// what it does: the phase, a re-read, the counts
 		char ph[160];
 		if (g_abort) snprintf(ph, sizeof(ph), "%s", T(STR_CANCELLING));
@@ -3848,27 +3848,28 @@ static void draw_page(int c, int y)
 		else if (g_phase == 3) snprintf(ph, sizeof(ph), "%s", T(STR_FINISHING));
 		else if (g_pass2_total) snprintf(ph, sizeof(ph), T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2), g_pass2_done < g_pass2_total ? g_pass2_done + 1 : g_pass2_total, g_pass2_total);
 		else snprintf(ph, sizeof(ph), T(STR_PROGRESS), pos, g_total);
-		ui_text_fit(UI_BODY, L, y, 0xC8D0E0, ph, R - L);
+		for (size_t e = strlen(ph); e > 0 && (ph[e - 1] == ' ' || ph[e - 1] == ':'); e--) ph[e - 1] = 0;   // "(4 of 279):" alone
+		ui_text_fit(UI_BODY, L, y, 0xFFFFFF, ph, R - L - pcw - ui_w() / 40);
 		y += lb;
 		if (!g_abort && g_rr_max) {
 			char rr[160];
 			snprintf(rr, sizeof(rr), T(STR_REREAD), g_rr_lba, g_rr_try, g_rr_max);
 			const char *r0 = rr;
 			while (*r0 == ' ' || *r0 == '\xc2' || *r0 == '\xb7') r0++;   // the re-read text starts with " · " when it follows another
-			ui_text_fit(UI_BODY, L, y, 0xF0C060, r0, R - L);
+			ui_text_fit(UI_SMALL, L, y, 0xF0C060, r0, R - L);   // details in the small type
 		}
-		y += lb;
+		y += ls + ls / 3;
 		if (g_phase != 4) {   // the check reads the file, not the disc: no read counts then
 			char cnt[160] = "";
 			snprintf(cnt, sizeof(cnt), T(STR_READ_STATS), "", g_readerrs, g_recovered);
-			ui_text_fit(UI_BODY, L, y, g_readerrs ? 0xF0C060 : 0xC8D0E0, cnt, R - L);
+			ui_text_fit(UI_SMALL, L, y, g_readerrs ? 0xF0C060 : 0xC8D0E0, cnt, R - L);
 		}
-		y += lb + ls;
+		y += ls * 3 / 2;
 		// the events, newest at the bottom, as many as fit above the general row; L2/R2 scroll,
 		// arrows at the right edge say there is more
 		if (g_nev > 0) {
 			y += section_head(L, R, y, T(STR_EVENTS));
-			int rh = ls + ls / 4, bottom = hint_y() - lb * 2, rows = (bottom - y) / rh;
+			int rh = ls + ls / 4, bottom = hint_y() - lb * 3 / 2 - ls / 4, rows = (bottom - y) / rh;   // down to the general row
 			if (rows < 1) rows = 1;
 			int n = g_nev, maxs = n > rows ? n - rows : 0;
 			if (k.ev_scroll > maxs) k.ev_scroll = maxs;
@@ -3910,7 +3911,7 @@ static void draw_page(int c, int y)
 			ui_text_fit(UI_SMALL, L, y, 0x8890A8, tip, R - L);
 			y += ls + ls / 3;
 		}
-		if (k.rd_state < 0) {   // what the check does
+		if (k.rd_state < 0 && !k.repair_n) {   // what the check does (with known errors square repairs instead)
 			ui_text_fit(UI_SMALL, L, y, 0x8890A8, T(STR_CHECK_TIP), R - L);
 			y += ls + ls / 3;
 		}
@@ -3940,6 +3941,72 @@ static void rip_job_start(int c, int fresh);
 static void check_job_start(int c);
 static void repair_job_start(int c);
 
+
+// One frame of the home screen: tabs, the selected drive's page, the general row and the buttons
+// of the selected drive. (The UI tests on the host draw it for their scenarios.)
+static void home_draw(const int *list, int nc, int sel)
+{
+	Card &f = g_cards[sel];
+	int st = f.state;
+	draw_backdrop();
+	int py = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY);
+	if (nc > 1) py += draw_tabs(list, nc, sel, py);   // one drive: no tabs, just its page
+	else py += ui_line(UI_BODY);
+	draw_page(sel, py);
+	// above the bottom row, the general things: webhooks on the left, settings and exit on the right
+	int gy = hint_y() - ui_line(UI_BODY) * 3 / 2;
+	if (g_webhook_on && g_webhook[0]) {   // just a hint that webhooks are on; details in the settings
+		int ne = 0;
+		for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
+		char wl[64];
+		snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
+		ui_text(UI_SMALL, ui_w() / 8, gy + (ui_line(UI_BODY) - ui_line(UI_SMALL)) / 2, 0x6870A0, wl);
+	}
+	{
+		int w1 = ui_hint_width("start", T(STR_HINT_SETTINGS)), w2 = f.job ? 0 : ui_hint_width("circle", T(STR_HINT_EXIT)), gap = ui_w() / 40;
+		int x = ui_w() * 7 / 8 - w1 - (w2 ? gap + w2 : 0);
+		x += ui_hint(x, gy, "start", T(STR_HINT_SETTINGS)) + gap;
+		if (w2) ui_hint(x, gy, "circle", T(STR_HINT_EXIT));   // O on a ripping card cancels its rip instead
+	}
+	// the bottom row: what the buttons do on the focused card
+	int rereads = 0;   // the rip is in its re-reads: square leaves them
+	if (f.job) { OnCard o(sel); rereads = (g_phase == 1 || g_phase == 2) && !g_skip && !g_abort; }
+	int evs;   // events to scroll with L2/R2
+	{ OnCard o(sel); evs = f.job && g_nev > 3; }
+	if (f.job && rereads) {
+		const char *b[] = {"square", "l2r2", "circle"};
+		const char *l[] = {T(STR_HINT_SKIP), T(STR_HINT_EVENTS), T(STR_HINT_CANCEL_RIP)};
+		const char *b2[] = {"square", "circle"};
+		const char *l2[] = {T(STR_HINT_SKIP), T(STR_HINT_CANCEL_RIP)};
+		if (evs) hint_bar(b, l, 3); else hint_bar(b2, l2, 2);
+	} else if (f.job) {
+		int checking;
+		{ OnCard o(sel); checking = g_phase == 4; }
+		const char *b[] = {"l2r2", "circle"};
+		const char *l[] = {T(STR_HINT_EVENTS), T(checking ? STR_HINT_CANCEL_CHECK : STR_HINT_CANCEL_RIP)};
+		if (evs) hint_bar(b, l, 2); else hint_bar(b + 1, l + 1, 1);
+	} else if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
+		const char *b[] = {"cross", "square", "triangle", "select"};
+		const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
+		hint_bar(b, l, 4);
+	} else if (st == DISC_READY && f.prev_rip && f.rd_state < 0) {   // ripped here, not checked: square checks the file
+		const char *b[] = {"cross", "square", "triangle", "select"};
+		const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_CHECK), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
+		hint_bar(b, l, 4);
+	} else if (st == DISC_READY) {
+		const char *b[] = {"cross", "triangle", "select"};
+		const char *l[] = {T(f.prev_rip ? STR_HINT_NEWRIP : STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
+		hint_bar(b, l, 3);
+	} else if (st == DISC_ERROR) {
+		const char *b[] = {"triangle", "select"};
+		const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
+		hint_bar(b, l, 2);
+	} else {
+		const char *b[] = {"select"};
+		const char *l[] = {T(STR_HINT_DRIVE)};
+		hint_bar(b, l, 1);
+	}
+}
 
 // Home screen: a card per drive. Up/down picks a card; left/right its destination; X, square and
 // triangle act on it. Returns 1 = rip the disc in g_card's drive, 2 = rip a freshly inserted disc,
@@ -4011,64 +4078,7 @@ static int home_screen()
 		if (g_redraw > 0) {
 			g_redraw = 0;
 			g_drawn = 2;
-			draw_backdrop();
-			int py = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY);
-			if (nc > 1) py += draw_tabs(list, nc, sel, py);   // one drive: no tabs, just its page
-			else py += ui_line(UI_BODY);
-			draw_page(sel, py);
-			// above the bottom row, the general things: webhooks on the left, settings and exit on the right
-			int gy = hint_y() - ui_line(UI_BODY) * 3 / 2;
-			if (g_webhook_on && g_webhook[0]) {   // just a hint that webhooks are on; details in the settings
-				int ne = 0;
-				for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
-				char wl[64];
-				snprintf(wl, sizeof(wl), T(STR_HOME_WEBHOOK_N), ne);
-				ui_text(UI_SMALL, ui_w() / 8, gy + (ui_line(UI_BODY) - ui_line(UI_SMALL)) / 2, 0x6870A0, wl);
-			}
-			{
-				int w1 = ui_hint_width("start", T(STR_HINT_SETTINGS)), w2 = f.job ? 0 : ui_hint_width("circle", T(STR_HINT_EXIT)), gap = ui_w() / 40;
-				int x = ui_w() * 7 / 8 - w1 - (w2 ? gap + w2 : 0);
-				x += ui_hint(x, gy, "start", T(STR_HINT_SETTINGS)) + gap;
-				if (w2) ui_hint(x, gy, "circle", T(STR_HINT_EXIT));   // O on a ripping card cancels its rip instead
-			}
-			// the bottom row: what the buttons do on the focused card
-			int rereads = 0;   // the rip is in its re-reads: square leaves them
-			if (f.job) { OnCard o(sel); rereads = (g_phase == 1 || g_phase == 2) && !g_skip && !g_abort; }
-			int evs;   // events to scroll with L2/R2
-			{ OnCard o(sel); evs = f.job && g_nev > 3; }
-			if (f.job && rereads) {
-				const char *b[] = {"square", "l2r2", "circle"};
-				const char *l[] = {T(STR_HINT_SKIP), T(STR_HINT_EVENTS), T(STR_HINT_CANCEL_RIP)};
-				const char *b2[] = {"square", "circle"};
-				const char *l2[] = {T(STR_HINT_SKIP), T(STR_HINT_CANCEL_RIP)};
-				if (evs) hint_bar(b, l, 3); else hint_bar(b2, l2, 2);
-			} else if (f.job) {
-				int checking;
-				{ OnCard o(sel); checking = g_phase == 4; }
-				const char *b[] = {"l2r2", "circle"};
-				const char *l[] = {T(STR_HINT_EVENTS), T(checking ? STR_HINT_CANCEL_CHECK : STR_HINT_CANCEL_RIP)};
-				if (evs) hint_bar(b, l, 2); else hint_bar(b + 1, l + 1, 1);
-			} else if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
-				const char *b[] = {"cross", "square", "triangle", "select"};
-				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
-				hint_bar(b, l, 4);
-			} else if (st == DISC_READY && f.prev_rip && f.rd_state < 0) {   // ripped here, not checked: square checks the file
-				const char *b[] = {"cross", "square", "triangle", "select"};
-				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_CHECK), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
-				hint_bar(b, l, 4);
-			} else if (st == DISC_READY) {
-				const char *b[] = {"cross", "triangle", "select"};
-				const char *l[] = {T(f.prev_rip ? STR_HINT_NEWRIP : STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
-				hint_bar(b, l, 3);
-			} else if (st == DISC_ERROR) {
-				const char *b[] = {"triangle", "select"};
-				const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
-				hint_bar(b, l, 2);
-			} else {
-				const char *b[] = {"select"};
-				const char *l[] = {T(STR_HINT_DRIVE)};
-				hint_bar(b, l, 1);
-			}
+			home_draw(list, nc, sel);
 		}
 		flip_frame();
 		int p = pad_pressed();

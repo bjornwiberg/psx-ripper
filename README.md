@@ -176,6 +176,15 @@ power, no Y-cable needed), reads with the same READ CD and sector checks as the 
 and ejects with START STOP UNIT (the drive has no button). Its Q subchannel trails by one sector;
 the ripper's Q calibration accounts for that.
 
+## UI tests
+
+The screens can be checked without a PS3: `make -C tests/host` builds the app's own `main.cpp`
+for the host against stubs (`tests/host/include`, `tests/host/stubs.cpp`), draws scenarios
+(several drives, rips with many events, long names, one drive, English) and writes each frame
+to `tests/host/out/*.png`. Every frame is checked for texts that overlap, text off the screen or
+outside the content area, and characters the font does not have. The run fails when a check
+fails; a self-test makes sure the checks find planted problems.
+
 ## Building
 
 The build runs in Docker with a prebuilt PSL1GHT toolchain:

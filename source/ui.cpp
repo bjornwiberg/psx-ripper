@@ -55,8 +55,11 @@ void ui_background()
 	}
 }
 
+UiTrace ui_trace = 0;   // UI tests on the host record what is drawn; unset on the PS3
+
 void ui_rect(int x, int y, int w, int h, uint32_t argb)
 {
+	if (ui_trace) ui_trace(UI_TRACE_RECT, x, y, w, h, 0, (int)(argb >> 24));
 	uint32_t a = argb >> 24;
 	for (int j = y < 0 ? 0 : y; j < y + h && j < (int)display_height; j++) {
 		uint32_t *p = fb_row(j);
@@ -214,6 +217,7 @@ static bool in_warn(float u, float v)
 }
 void ui_icon(const char *name, int x0, int y0, int size, uint32_t rgb)
 {
+	if (ui_trace) ui_trace(UI_TRACE_ICON, x0, y0, size, size, name, 0);
 	int kind = !strcmp(name, "usb") ? 1 : !strcmp(name, "medal") ? 2 : !strcmp(name, "warn") ? 3 : !strcmp(name, "question") ? 4 : !strcmp(name, "drive") ? 5 : !strcmp(name, "up") ? 6 : !strcmp(name, "down") ? 7 :
 	           !strcmp(name, "left") ? 8 : !strcmp(name, "right") ? 9 : 0;
 	for (int y = y0; y < y0 + size; y++) {
@@ -295,6 +299,16 @@ int ui_text(UiFont fi, int x, int y, uint32_t rgb, const char *s, UiAlign align)
 	int w = ui_text_width(fi, s);
 	if (align == UI_CENTER) x -= w / 2; else if (align == UI_RIGHT) x -= w;
 	const Font *f = fonts[fi];
+	if (ui_trace) {   // the text's box, and how many of its characters the font does not have
+		int missing = 0;
+		for (const char *q = s; *q; ) {
+			uint32_t cp = ui_next_cp(&q);
+			int found = 0;
+			for (int i = 0; i < f->count && !found; i++) found = f->glyphs[i].cp == cp;
+			if (!found) missing++;
+		}
+		ui_trace(UI_TRACE_TEXT, x, y, w, f->height, s, missing);
+	}
 	while (*s) {
 		uint32_t cp = ui_next_cp(&s);
 		const Glyph *g = find_glyph(f, cp);
