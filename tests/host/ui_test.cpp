@@ -167,6 +167,13 @@ int main()
 	g_cards[0].pg_scroll = 100000; frame("ripping-scrolled-bottom", 0);
 	g_cards[0].pg_scroll = 0;
 	frame("ripping-plain", 1);
+	{   // /status.json for the same drives: valid JSON (checked by python) with every drive
+		static char js[8192];
+		status_json(js, sizeof(js));
+		FILE *f = fopen("out/status.json", "w"); if (f) { fputs(js, f); fclose(f); }
+		if (system("python3 -c 'import json,sys; d=json.load(open(\"out/status.json\")); sys.exit(0 if len(d[\"drives\"])==3 else 1)'")) { printf("FAIL status.json\n"); g_fail++; }
+		else printf("ok   status.json\n");
+	}
 	reset_all(); usb(0, 0);
 	disc(0, "Mega Man X4", "Mega Man X4 (USA)", "SLUS_005.61", 564); ripping(0, 251793, 251793, 1, 0, 0);
 	g_pass2_total = 41237; g_pass2_done = 12000;

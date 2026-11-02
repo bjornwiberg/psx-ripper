@@ -4373,26 +4373,59 @@ static void json_fields(char *js, size_t n)
 
 static int g_state_busy() { return any_ripping() || g_ident_busy || g_repairing || lv1_patched; }
 
+// /status.json: the app, and every drive (internal first, then the USB drives by port) with its
+// disc, its job and its last rip. busy at the top: a drive is in use or the lv1 patch is on, never
+// stop or reinstall the app then (tools/deploy.sh reads it).
 static int status_json(char *js, int n)
 {
-	// the fields describe the first card that rips, else the one on the screen
-	int c = g_card;
-	for (int i = NCARDS - 1; i >= 0; i--) if (ctx_ripping(i)) c = i;
-	OnCard on(c);
-	uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
-	// busy: a drive is in use or the lv1 patch is on; never stop or reinstall the app then
-	int busy = g_state_busy();
-	snprintf(js, n, "{\"state\":\"%s\",\"busy\":%s,\"percent\":%u,", g_state == ST_RIPPING ? "ripping" : "idle", busy ? "true" : "false",
-	         g_state == ST_RIPPING && g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
-	if (g_state != ST_RIPPING) {   // idle: describe the disc on the home screen
+	int list[NCARDS], nc = card_list(list), anyjob = 0;
+	for (int i = 0; i < nc; i++) anyjob |= g_cards[list[i]].job;
+	snprintf(js, n, "{\"app\":\"PSX Ripper\",\"version\":\"%s\",\"busy\":%s,\"state\":\"%s\",\"drives\":[",
+	         APP_VERSION, g_state_busy() ? "true" : "false", anyjob ? "ripping" : "idle");
+	auto put = [&](const char *fmt, ...) {
 		size_t o = strlen(js);
-		snprintf(js + o, n - o, "\"disc\":");
-		json_str(js, n, g_disc_state == DISC_READY ? g_disc_title : "");
-		o = strlen(js); snprintf(js + o, n - o, ",");
+		va_list ap; va_start(ap, fmt); vsnprintf(js + o, n - o, fmt, ap); va_end(ap);
+	};
+	auto str = [&](const char *key, const char *v) { put(",\"%s\":", key); json_str(js, n, v); };
+	auto rd = [](int st) { return st == 1 ? "verified" : st == 0 ? "no_match" : "unchecked"; };
+	for (int i = 0; i < nc; i++) {
+		int c = list[i];
+		Card &k = g_cards[c];
+		const char *state = k.job ? (k.repairing ? "repairing" : "ripping") : k.state == DISC_READY ? "ready" : k.state == DISC_READING ? "reading" :
+		                    k.state == DISC_ERROR ? "not_psx" : c && k.usb_dead ? "no_answer" : "empty";
+		put("%s{\"id\":%d,\"drive\":\"%s\"", i ? "," : "", c, c ? "usb" : "internal");
+		if (c) put(",\"port\":%d", usbodd_port(c - 1));
+		str("model", c ? usbodd_name(c - 1) : "PS3 Blu-ray drive");
+		put(",\"state\":\"%s\"", state);
+		int known = k.job || k.state == DISC_READY;
+		if (known) {
+			str("title", k.title);
+			str("serial", k.serial);
+			put(",\"size_mb\":%u", k.mb);
+			str("redump_name", k.rd_name);
+			put(",\"redump\":\"%s\",\"already_ripped\":%s,\"known_errors\":%d", rd(k.rd_state), k.prev_rip ? "true" : "false", k.repair_n);
+			str("destination", k.dest[0] ? k.dest : HDD_DIR);
+			str("file", k.fname);
+		}
+		if (k.job) {   // what the job does now
+			OnCard o(c);
+			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
+			int inpass = g_pass2_total && (k.repairing || g_phase == 1 || g_phase == 2);
+			const char *phase = k.repairing ? "repairing" : g_phase == 1 ? "verifying" : g_phase == 2 ? "rereading" : g_phase == 3 ? "finishing" : g_phase == 4 ? "checking" : "reading";
+			unsigned pct = inpass ? (unsigned)((uint64_t)g_pass2_done * 100 / g_pass2_total) : g_total ? (unsigned)((uint64_t)(pos > g_total ? g_total : pos) * 100 / g_total) : 0;
+			put(",\"job\":{\"phase\":\"%s\",\"percent\":%u,\"sectors_done\":%u,\"sectors_total\":%u,\"pass_done\":%u,\"pass_total\":%u,\"unreadable\":%u,\"fixed\":%u,\"bad\":%u}",
+			    phase, pct, pos, g_total, g_pass2_done, g_pass2_total, g_readerrs, g_recovered, g_badsect);
+		}
+		if (k.res[0]) {   // the last rip, repair or check on this drive (stays after the eject)
+			put(",\"last\":{\"result\":\"%s\"", k.res_failed == 2 ? "cancelled" : k.res_failed ? "failed" : "done");
+			str("disc", k.res_disc);
+			str("summary", k.res);
+			if (k.res_rd >= -1) put(",\"redump\":\"%s\"", rd(k.res_rd));
+			put(",\"needs_repair\":%s}", k.res_bad ? "true" : "false");
+		}
+		put("}");
 	}
-	json_fields(js, n);
-	size_t o = strlen(js);
-	snprintf(js + o, n - o, "}");
+	put("]}");
 	return (int)strlen(js);
 }
 

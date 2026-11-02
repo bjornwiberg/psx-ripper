@@ -129,11 +129,16 @@ static void client_thread(void *arg)
 			free(out);
 		}
 	} else if (!strncmp(req, "GET /status.json", 16)) {
-		char js[1024] = "{}";
-		if (g_hooks.status_json) g_hooks.status_json(js, sizeof(js));
-		char hdr[128];
-		snprintf(hdr, sizeof(hdr), "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: %d\r\n\r\n", (int)strlen(js));
-		if (!send_str(s, hdr)) send_str(s, js);
+		const int JN = 8192;   // a few drives with their jobs; each client its own buffer
+		char *js = (char *)malloc(JN);
+		if (js) {
+			snprintf(js, JN, "{}");
+			if (g_hooks.status_json) g_hooks.status_json(js, JN);
+			char hdr[128];
+			snprintf(hdr, sizeof(hdr), "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: %d\r\n\r\n", (int)strlen(js));
+			if (!send_str(s, hdr)) send_str(s, js);
+			free(js);
+		}
 	} else if (!strncmp(req, "POST /pad", 9)) {   // a button of the web page's pad
 		char b[16];
 		size_t k = strcspn(body, " \r\n&");

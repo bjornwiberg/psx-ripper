@@ -34,8 +34,7 @@ Webhook event bits: 0 `disc_identified`, 1 `rip_started`, 2 `rip_progress`, 3 `r
 
 - **Remote view** (setting): a small web server on port 8090. `http://<ps3>:8090/` shows the
   app's screen as an MJPEG stream (about 2 frames per second), `/shot.jpg` a single frame and
-  `/status.json` the current state (title, serial, progress, unreadable/fixed sectors, Redump
-  result). System dialogs are drawn by the PS3 on top of the app and are not in the stream.
+  `/status.json` the state of every drive (see below). System dialogs are drawn by the PS3 on top of the app and are not in the stream.
   JPEG encoding uses [stb_image_write](https://github.com/nothings/stb) (public domain / MIT).
 - **Webhooks** (setting): the events above are sent as an HTTP POST with a JSON body, for
   example to a Home Assistant webhook (`http://homeassistant.local:8123/api/webhook/<id>`).
@@ -52,6 +51,34 @@ Example payload:
  "redump":"verified","redump_name":"Alundra (Europe)","seconds":221,
  "path":"/dev_hdd0/PSXISO/Alundra [SLES_011.35].bin"}
 ```
+
+
+### `/status.json`
+
+One object for the app and a `drives` array with every drive (the internal one first, then the
+USB drives by port). `busy` is true while any drive is in use or the lv1 patch is on.
+
+```json
+{"app":"PSX Ripper","version":"0.1.0","busy":true,"state":"ripping","drives":[
+ {"id":0,"drive":"internal","model":"PS3 Blu-ray drive","state":"ripping",
+  "title":"Mega Man X4","serial":"SLUS_005.61","size_mb":564,"redump_name":"Mega Man X4 (USA)",
+  "redump":"unchecked","already_ripped":false,"known_errors":0,
+  "destination":"/dev_hdd0/PSXISO","file":"Mega Man X4 [SLUS_005.61]",
+  "job":{"phase":"verifying","percent":29,"sectors_done":251793,"sectors_total":251793,
+         "pass_done":12000,"pass_total":41237,"unreadable":0,"fixed":1,"bad":0}},
+ {"id":1,"drive":"usb","port":0,"model":"Apple SuperDrive","state":"empty",
+  "last":{"result":"done","disc":"Alundra (Europe) (SLES_011.35)","summary":"klar på 14:02",
+          "redump":"verified","needs_repair":false}}]}
+```
+
+- `state`: `empty`, `reading` (identifying), `ready`, `not_psx`, `no_answer` (a USB drive that
+  stopped answering), `ripping`, `repairing`.
+- `redump` (the disc here, and the last rip): `verified`, `no_match`, `unchecked`.
+- `job` while a drive works: `phase` is `reading`, `verifying` (sectors without a checksum read
+  again), `rereading` (slow re-reads of unreadable sectors), `finishing`, `checking` (an earlier
+  rip against Redump) or `repairing`; `percent` is the phase's own progress.
+- `last`: the last rip, repair or check on that drive (`done`, `failed`, `cancelled`); it stays
+  after the disc is ejected. `summary` is the text the app shows, in its language.
 
 ## Verification against Redump
 
