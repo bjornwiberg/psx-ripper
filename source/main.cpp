@@ -3337,7 +3337,7 @@ static void filename_screen()
 }
 
 // A list of settings rows with the focused one highlighted (the settings screens share it).
-static void settings_rows(const char *subtitle, const char *const *labels, char (*vals)[96], int nrows, int row, int action_row)
+static void settings_rows(const char *subtitle, const char *const *labels, char (*vals)[96], int nrows, int row, unsigned actions)   // actions: bit n = row n is opened with X, no ‹ ›
 {
 	ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, subtitle, UI_CENTER);
 	// first row below the subtitle (drawn at h/10 + title + body/2)
@@ -3354,7 +3354,7 @@ static void settings_rows(const char *subtitle, const char *const *labels, char 
 		if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh * 3 / 4 + lh / 4, 0x703D6FD9);
 		ui_text(UI_BODY, left, y, 0xFFFFFF, labels[r]);
 		char v[128];
-		snprintf(v, sizeof(v), r == row && r != action_row ? "‹ %s ›" : "%s", vals[r]);
+		snprintf(v, sizeof(v), r == row && !((actions >> r) & 1) ? "‹ %s ›" : "%s", vals[r]);
 		ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 	}
 	char foot[240], cp[200];   // the one file all settings live in (it can be edited over FTP)
@@ -3459,7 +3459,7 @@ static void settings_screen()
 			snprintf(vals[10], sizeof(vals[10]), "v%s", APP_VERSION);
 			const char *labels[11] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
 			                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_ABOUT)};
-			settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 7);   // row 7 is an action
+			settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 10);   // the Redump download and About are actions
 			if (row == 10) {   // About: X opens it
 				const char *b[] = {"updown", "l2r2", "cross", "circle"};
 				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_SHOW), T(STR_HINT_BACK)};
@@ -3584,7 +3584,7 @@ static void drive_settings_screen(int c)
 			drive_val(vals[3], sizeof(vals[3]), k.eject, g_std.eject, fmt_onoff);
 			drive_val(vals[4], sizeof(vals[4]), k.autostart, g_std.autostart, fmt_onoff);
 			const char *labels[5] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART)};
-			settings_rows(name, labels, vals, NROWS, row, -1);
+			settings_rows(name, labels, vals, NROWS, row, 0);
 			const char *b[] = {"updown", "leftright", "triangle", "circle"};
 			const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_STANDARD), T(STR_HINT_BACK)};
 			hint_bar(b, l, 4);
