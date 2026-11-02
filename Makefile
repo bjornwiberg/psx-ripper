@@ -21,7 +21,6 @@ SOURCES		:=	source fatfs
 DATA		:=
 INCLUDES	:=	include fatfs
 
-TITLE		:=	PSX Ripper
 ICON0		:=	$(CURDIR)/pkgfiles/ICON0.PNG
 APPID		:=	PSXR00001
 CONTENTID	:=	UP0001-$(APPID)_00-0000000000000000
@@ -30,6 +29,8 @@ CONTENTID	:=	UP0001-$(APPID)_00-0000000000000000
 # "MM.mm", so APP_VER is the major and minor version; the app shows the full one.
 VERSION		:=	$(shell cat $(dir $(firstword $(MAKEFILE_LIST)))version.txt 2>/dev/null || echo 0.0.0)
 APP_VER		:=	$(shell echo $(VERSION) | awk -F. '{printf "%02d.%02d", $$1, $$2}')
+# the name in the XMB, with the version as other homebrew shows it
+TITLE		:=	PSX Ripper v$(VERSION)
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
@@ -114,6 +115,8 @@ version:
 
 #---------------------------------------------------------------------------------
 pkg: $(BUILD) $(OUTPUT).pkg
+# the package also changes with its name, version, metadata and the XMB pictures
+$(OUTPUT).pkg: $(CURDIR)/Makefile $(CURDIR)/version.txt $(CURDIR)/tools/sfo.xml.in $(wildcard $(CURDIR)/pkgfiles/*)
 
 #---------------------------------------------------------------------------------
 $(BUILD):
