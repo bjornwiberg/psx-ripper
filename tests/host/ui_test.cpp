@@ -148,6 +148,16 @@ int main()
 		else printf("ok   self-test (the checks find planted problems)\n");
 	}
 
+	{   // every text in both languages: a StrId without an entry in a table would be null
+		int missing = 0;
+		for (int lang : {PS3_LANG_SWEDISH, PS3_LANG_ENGLISH_US}) {
+			host_lang = lang; lang_init();
+			for (int i = 0; i < STR_COUNT; i++) if (!T((StrId)i)) { printf("FAIL text %d missing (%s)\n", i, lang == PS3_LANG_SWEDISH ? "sv" : "en"); missing++; }
+		}
+		host_lang = PS3_LANG_SWEDISH; lang_init();
+		if (missing) g_fail += missing; else printf("ok   every text in both languages\n");
+	}
+
 	// three drives, nothing ripping: the three kinds of earlier rip
 	reset_all(); usb(0, 0); usb(1, 1);
 	disc(0, "Motorhead", "", "SLUS_007.17", 647); ripped(0, 0, 277);

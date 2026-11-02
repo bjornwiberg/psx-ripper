@@ -3462,7 +3462,7 @@ static void settings_screen()
 			settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 10);   // the Redump download and About are actions
 			if (row == 10) {   // About: X opens it
 				const char *b[] = {"updown", "l2r2", "cross", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_SHOW), T(STR_HINT_BACK)};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_OPEN), T(STR_HINT_BACK)};
 				hint_bar(b, l, 4);
 			} else if (row == 9 || row == 5) {   // webhooks and the file name: X opens their own view
 				const char *b[] = {"updown", "l2r2", "leftright", "cross", "triangle", "circle"};
