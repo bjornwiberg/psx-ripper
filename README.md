@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/icon.png" alt="PSX RiPPER" width="320"></p>
+
 # PSX RiPPER
 
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
@@ -10,6 +12,11 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
 
 > PSX RiPPER is not affiliated with or endorsed by Sony Interactive Entertainment. "PlayStation"
 > is a trademark of Sony Interactive Entertainment. Only rip discs you own.
+
+<p align="center">
+  <img src="docs/images/tabs.png" alt="A tab per drive: a disc already ripped and verified against Redump" width="49%">
+  <img src="docs/images/ripping.png" alt="A rip in progress on a USB SuperDrive" width="49%">
+</p>
 
 ## Features
 

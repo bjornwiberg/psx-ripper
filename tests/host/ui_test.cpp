@@ -219,12 +219,19 @@ int main()
 		g_boxes.clear(); about_draw(); save("about"); size_t b0 = g_fail; check("about"); printf("%s about\n", g_fail == (int)b0 ? "ok  " : "FAIL");
 	}
 	// English
+	// for the README: one verified disc, one ripping, one with errors (English, drawn below)
 	host_lang = PS3_LANG_ENGLISH_US; lang_init();
 	reset_all(); usb(0, 0); usb(1, 1);
 	disc(0, "Motorhead", "", "SLUS_007.17", 647); ripped(0, 0, 277);
 	disc(1, "Final Fantasy IX (Disc 1)", "Final Fantasy IX (Europe) (Disc 1)", "SLES_029.65", 706); ripping(1, 100000, 314937, 0, 6, 0);
 	frame("english-idle", 0);
 	frame("english-ripping", 1);
+	reset_all(); usb(0, 0); usb(1, 1);
+	disc(0, "Final Fantasy IX (Disc 1)", "Final Fantasy IX (Europe) (Disc 1)", "SLES_029.65", 706); ripped(0, 1, 0);
+	disc(1, "Alundra", "Alundra (Europe)", "SLES_011.35", 577); ripping(1, 142000, 257659, 0, 0, 0);
+	disc(2, "Motorhead", "", "SLUS_007.17", 647); ripped(2, 0, 277);
+	frame("readme-tabs", 0);
+	frame("readme-ripping", 1);
 
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);

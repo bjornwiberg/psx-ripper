@@ -21,6 +21,12 @@
 #include "webhook.h"
 #include "host.h"
 
+// lv2: free space on a drive (syscall 840) is a hard disk with room; nothing else happens
+void host_lv2_3(int n, u64, u64 total, u64 avail)
+{
+	if (n == 840) { *(uint64_t *)(uintptr_t)total = 465ull << 30; *(uint64_t *)(uintptr_t)avail = 338ull << 30; }
+}
+
 // the screen
 u32 display_width = 1920, display_height = 1080, color_pitch = 1920 * 4, curr_fb = 0;
 u32 *color_buffer[2];
@@ -99,7 +105,7 @@ int vf_unlink(const char *) { return 0; }
 int vf_rename(const char *, const char *) { return 0; }
 int vf_mkdir(const char *) { return 0; }
 int vf_scan(VfVolume *, int) { return 0; }
-int vf_free_mb(const char *, uint64_t *mb) { *mb = 0; return -1; }
+int vf_free_mb(const char *, uint64_t *mb) { *mb = 338 * 1024; return 0; }   // a hard disk with room
 int vf_list(const char *, void (*)(const char *, void *), void *) { return 0; }
 
 // Redump, the remote view and webhooks: no network on the host

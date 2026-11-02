@@ -3,7 +3,8 @@
 #include "ppu-types.h"
 #define lv2syscall1(n, a) (void)0
 #define lv2syscall2(n, a, b) (void)0
-#define lv2syscall3(n, a, b, c) (void)0
+void host_lv2_3(int n, u64 a, u64 b, u64 c);   // the few calls the screens read (free space)
+#define lv2syscall3(n, a, b, c) host_lv2_3(n, (u64)(a), (u64)(b), (u64)(c))
 #define lv2syscall4(n, a, b, c, d) (void)0
 #define lv2syscall5(n, a, b, c, d, e) (void)0
 #define lv2syscall6(n, a, b, c, d, e, f) (void)0

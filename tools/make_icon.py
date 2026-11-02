@@ -1,57 +1,89 @@
 #!/usr/bin/env python3
-"""Renders pkgfiles/ICON0.PNG (320x176): a CD with an arrow into a hard disk.
+"""Renders pkgfiles/ICON0.PNG (320x176), the app's icon in the XMB: a black PS1 disc, an arrow,
+and the .bin and .cue files in the PSXISO folder, with the name under them. Own artwork; the
+text is DejaVu Sans Bold from fonts/.
 
 Usage: python3 tools/make_icon.py pkgfiles/ICON0.PNG
 """
-import math
+import os
 import sys
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
-W, H, S = 320, 176, 4          # draw at 4x and downsample for anti-aliasing
-img = Image.new("RGB", (W * S, H * S))
-d = ImageDraw.Draw(img)
+W, H, S = 320, 176, 4          # drawn at 4x and downsampled for anti-aliasing
+FB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fonts", "DejaVuSans-Bold.ttf")
 
-# background: vertical gradient, deep navy to near black
-for y in range(H * S):
-    t = y / (H * S)
-    d.line([(0, y), (W * S, y)], fill=(int(18 + 10 * (1 - t)), int(22 + 16 * (1 - t)), int(48 + 40 * (1 - t))))
 
-# CD with a rainbow sheen
-cx, cy, r = 92 * S, 80 * S, 58 * S
-disc = Image.new("RGBA", img.size, (0, 0, 0, 0))
-dd = ImageDraw.Draw(disc)
-for a in range(0, 360, 2):
-    hue = (a * 2) % 360
-    c = tuple(int(200 + 55 * math.cos(math.radians(hue + k))) for k in (0, 120, 240))
-    dd.pieslice([cx - r, cy - r, cx + r, cy + r], a, a + 2, fill=c + (255,))
-dd.ellipse([cx - r * 0.93, cy - r * 0.93, cx + r * 0.93, cy + r * 0.93], outline=(255, 255, 255, 70), width=S)
-dd.ellipse([cx - r * 0.36, cy - r * 0.36, cx + r * 0.36, cy + r * 0.36], fill=(225, 228, 235, 255))
-dd.ellipse([cx - r * 0.13, cy - r * 0.13, cx + r * 0.13, cy + r * 0.13], fill=(0, 0, 0, 0))
-img.paste(disc, (0, 0), disc)
+def background():
+    img = Image.new("RGB", (W * S, H * S))
+    d = ImageDraw.Draw(img)
+    for y in range(H * S):   # deep navy to near black, as the app's screens
+        t = y / (H * S)
+        d.line([(0, y), (W * S, y)], fill=(int(18 + 10 * (1 - t)), int(22 + 16 * (1 - t)), int(48 + 40 * (1 - t))))
+    return img, d
 
-# arrow
-ax0, ax1, ay = 162 * S, 206 * S, 80 * S
-d.rectangle([ax0, ay - 7 * S, ax1 - 14 * S, ay + 7 * S], fill=(255, 255, 255))
-d.polygon([(ax1 - 16 * S, ay - 18 * S), (ax1 + 6 * S, ay), (ax1 - 16 * S, ay + 18 * S)], fill=(255, 255, 255))
 
-# hard disk
-hx, hy, hw, hh = 218 * S, 48 * S, 82 * S, 64 * S
-d.rounded_rectangle([hx, hy, hx + hw, hy + hh], radius=8 * S, fill=(70, 78, 96), outline=(150, 160, 180), width=2 * S)
-d.ellipse([hx + 14 * S, hy + 10 * S, hx + 58 * S, hy + 54 * S], fill=(120, 130, 150), outline=(190, 198, 214), width=2 * S)
-d.ellipse([hx + 31 * S, hy + 27 * S, hx + 41 * S, hy + 37 * S], fill=(60, 66, 80))
-d.line([(hx + 36 * S, hy + 32 * S), (hx + 70 * S, hy + 48 * S)], fill=(230, 232, 238), width=3 * S)
-d.ellipse([hx + 68 * S, hy + hh - 14 * S, hx + 74 * S, hy + hh - 8 * S], fill=(80, 220, 120))
+def black_disc(img, cx, cy, r):
+    """The black data side of a PS1 disc: smooth black with a soft blue-violet reflection."""
+    layer = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    dd = ImageDraw.Draw(layer)
+    dd.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(12, 12, 18, 255))
+    light = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ld = ImageDraw.Draw(light)
+    ld.ellipse([cx - r * 0.95, cy - r * 1.05, cx + r * 0.15, cy - r * 0.05], fill=(110, 120, 190, 120))
+    ld.ellipse([cx + r * 0.05, cy + r * 0.10, cx + r * 0.90, cy + r * 0.90], fill=(150, 90, 170, 70))
+    light = light.filter(ImageFilter.GaussianBlur(r * 0.28))
+    mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(mask).ellipse([cx - r, cy - r, cx + r, cy + r], fill=255)
+    light.putalpha(Image.composite(light.split()[3], Image.new("L", img.size, 0), mask))   # only on the disc
+    layer.alpha_composite(light)
+    dd = ImageDraw.Draw(layer)
+    # the hub is black too: a darker edge shows where it is, and the hole
+    dd.ellipse([cx - r * 0.36, cy - r * 0.36, cx + r * 0.36, cy + r * 0.36], fill=(14, 14, 20, 255), outline=(4, 4, 6, 255), width=2 * S)
+    dd.ellipse([cx - r * 0.13, cy - r * 0.13, cx + r * 0.13, cy + r * 0.13], outline=(4, 4, 6, 255), width=2 * S)
+    dd.ellipse([cx - r * 0.13, cy - r * 0.13, cx + r * 0.13, cy + r * 0.13], fill=(0, 0, 0, 0))
+    img.paste(layer, (0, 0), layer)
 
-# title
-try:
-    font = ImageFont.truetype("/System/Library/Fonts/Avenir Next.ttc", 26 * S, index=2)
-except OSError:
-    font = ImageFont.load_default()
-text = "PSX RiPPER"
-tw = d.textlength(text, font=font)
-d.text(((W * S - tw) / 2, 140 * S), text, font=font, fill=(255, 255, 255))
 
-img = img.resize((W, H), Image.LANCZOS).filter(ImageFilter.UnsharpMask(1, 40, 2))
-img.save(sys.argv[1], optimize=True)
-print("wrote", sys.argv[1], img.size)
+def arrow(d, x0, x1, y):
+    d.rectangle([x0, y - 7 * S, x1 - 14 * S, y + 7 * S], fill=(255, 255, 255))
+    d.polygon([(x1 - 16 * S, y - 18 * S), (x1 + 6 * S, y), (x1 - 16 * S, y + 18 * S)], fill=(255, 255, 255))
+
+
+def file_page(d, x, y, w, h, label, col):
+    fold = 12 * S
+    d.polygon([(x, y), (x + w - fold, y), (x + w, y + fold), (x + w, y + h), (x, y + h)], fill=(236, 240, 248), outline=(150, 158, 178))
+    d.polygon([(x + w - fold, y), (x + w - fold, y + fold), (x + w, y + fold)], fill=(180, 188, 206))
+    d.rounded_rectangle([x + 7 * S, y + 9 * S, x + w - 16 * S, y + 13 * S], radius=2 * S, fill=(170, 178, 196))
+    f = ImageFont.truetype(FB, 12 * S)
+    tw = d.textlength(label, font=f)
+    d.rounded_rectangle([x + 5 * S, y + 22 * S, x + w - 5 * S, y + 38 * S], radius=3 * S, fill=col)
+    d.text((x + (w - tw) / 2, y + 22 * S), label, font=f, fill=(255, 255, 255))
+
+
+def folder(d, fx, fy, fw, fh):
+    d.rounded_rectangle([fx, fy + 6 * S, fx + 40 * S, fy + 24 * S], radius=5 * S, fill=(214, 160, 58))   # tab
+    d.rounded_rectangle([fx, fy + 16 * S, fx + fw, fy + fh], radius=7 * S, fill=(232, 178, 72))          # back
+    file_page(d, fx + 12 * S, fy, 40 * S, 56 * S, "BIN", (61, 111, 217))                                 # the rip's files
+    file_page(d, fx + 50 * S, fy + 6 * S, 40 * S, 56 * S, "CUE", (70, 150, 96))
+    d.rounded_rectangle([fx, fy + 44 * S, fx + fw, fy + fh], radius=7 * S, fill=(250, 208, 110))       # front
+    f = ImageFont.truetype(FB, 14 * S)
+    tw = d.textlength("PSXISO", font=f)
+    d.text((fx + (fw - tw) / 2, fy + 60 * S), "PSXISO", font=f, fill=(120, 80, 20))
+
+
+def render(path):
+    img, d = background()
+    black_disc(img, 88 * S, 74 * S, 56 * S)
+    arrow(d, 154 * S, 196 * S, 74 * S)
+    folder(d, 210 * S, 24 * S, 100 * S, 92 * S)
+    f = ImageFont.truetype(FB, 25 * S)
+    name = "PSX RiPPER"
+    d.text(((W * S - d.textlength(name, font=f)) / 2, 138 * S), name, font=f, fill=(255, 255, 255))
+    img = img.resize((W, H), Image.LANCZOS).filter(ImageFilter.UnsharpMask(1, 40, 2))
+    img.save(path, optimize=True)
+
+
+if __name__ == "__main__":
+    render(sys.argv[1])
+    print("wrote", sys.argv[1])
