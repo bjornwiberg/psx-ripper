@@ -5,6 +5,13 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.1](https://github.com/bjornwiberg/psx-ripper/compare/v1.0.0...v1.0.1) (2026-11-02)
+
+
+### Bug fixes
+
+* the remote view's page follows the console's language ([#1](https://github.com/bjornwiberg/psx-ripper/issues/1)) ([32ad843](https://github.com/bjornwiberg/psx-ripper/commit/32ad84379e9d8a37252d8a1df02ac70fde80805c))
+
 ## 1.0.0 (2026-11-02)
 
 First public release.
