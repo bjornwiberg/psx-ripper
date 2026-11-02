@@ -4112,14 +4112,19 @@ static int home_screen()
 		if (sig != last_sig) { last_sig = sig; g_redraw = 2; }
 		static uint64_t last_prog = 0;   // ripping cards: their progress twice a second
 		if (jobs && now_ms() - last_prog >= 500) { last_prog = now_ms(); g_redraw = 2; }
-		// automatic rip only for a disc not ripped to this destination yet: never overwrite one
+		// automatic start for a disc just put in: a rip when it is not ripped to this destination yet
+		// (never overwrite one), a repair when its earlier rip here has known errors (re-reads only
+		// those sectors, so it never makes the rip worse); else nothing, the tab says how it stands
 		if (!g_ident_busy)
 			for (int i = 0; i < nc; i++) {
 				Card &k = g_cards[list[i]];
-				if (!k.job && std_or(k.autostart, g_std.autostart) && k.state == DISC_READY && k.fresh && !k.prev_rip) {
-					k.fresh = 0;
-					select_card(list[i]);
-					rip_job_start(list[i], 1);
+				if (k.job || !std_or(k.autostart, g_std.autostart) || k.state != DISC_READY || !k.fresh) continue;
+				k.fresh = 0;
+				select_card(list[i]);
+				if (!k.prev_rip) { rip_job_start(list[i], 1); continue; }
+				if (k.repair_n) {
+					prev_rip_check();   // the log as it is now
+					if (g_prev_rip && g_repair_n) { logf("auto repair: %d sector(s)", g_repair_n); repair_job_start(list[i]); }
 				}
 			}
 		Card &f = g_cards[sel];
