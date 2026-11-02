@@ -4581,6 +4581,8 @@ static int rip_disc(int fresh, int autorip)
 }
 
 
+static void job_reset(int c);
+
 // Checks an earlier rip against Redump from its file, without the disc: MD5 per track (track
 // bounds from its .cue), compared like after a rip; the result goes into its rip log (made if it
 // has none). Runs as the card's job; the tab and the page show its progress.
@@ -4694,6 +4696,7 @@ static void check_job_start(int c)
 {
 	Card &k = g_cards[c];
 	if (k.job || !k.exist[0]) return;
+	job_reset(c);
 	k.job = 1;
 	k.res[0] = 0;
 	k.eta_t0 = 0;
@@ -4727,11 +4730,24 @@ static void rip_job_thread(void *arg)
 	sysThreadExit(0);
 }
 
+// A new job on card c starts from a clean page: no events, counts or progress from the last one.
+static void job_reset(int c)
+{
+	OnCard o(c);
+	g_nev = 0; g_ev_seq++;
+	g_done = 0; g_total = 0; g_readpos = 0; g_phase = 0;
+	g_pass2_total = 0; g_pass2_done = 0; g_rr_max = 0; g_rr_try = 0;
+	g_readerrs = 0; g_recovered = 0; g_badsect = 0;
+	g_cards[c].ev_scroll = 0;
+	g_cards[c].eta_t0 = 0;
+}
+
 static void rip_job_start(int c, int fresh)
 {
 	Card &k = g_cards[c];
 	if (k.job) return;
 	if (!g_parallel && any_ripping()) { own_dialog(T(STR_REPAIR_WAIT), 0); return; }   // one at a time then
+	job_reset(c);
 	k.job = 1;
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy from now on (status, the poll thread, deploy)
@@ -4813,6 +4829,7 @@ static void repair_job_start(int c)
 {
 	Card &k = g_cards[c];
 	if (k.job) return;
+	job_reset(c);
 	k.job = 1;
 	k.repairing = 1;
 	k.res[0] = 0;
