@@ -3964,7 +3964,7 @@ static int home_screen()
 			for (int i = 0; i < nc; i++) {
 				Card &k = g_cards[list[i]];
 				if (k.job) continue;   // ripping: the rip has the drive
-				if (k.inserted) { k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0; k.res[0] = 0; k.rd_done[0] = 0; k.rd_name[0] = 0; k.rd_state = -1; }
+				if (k.inserted) { k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0; k.rd_done[0] = 0; k.rd_name[0] = 0; k.rd_state = -1; }   // the last rip's line stays (it names its disc)
 				if (!k.present) { if (k.state != DISC_NONE) k.state = DISC_NONE; k.tried = 0; k.fresh = 0; continue; }
 				if (!k.tried) { k.tried = 1; select_card(list[i]); identify_start(k.fresh); break; }
 				if (k.recheck) { k.recheck = 0; if (k.state == DISC_READY) { select_card(list[i]); prev_rip_check(); } g_redraw = 2; }
