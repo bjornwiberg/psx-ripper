@@ -1,5 +1,5 @@
 // Remote view: a small web server on port 8090 with an MJPEG stream of the app's screen and a
-// status page in JSON. Switched on in the settings.
+// status page in JSON, and a pad in the web page whose buttons press the console's. Switched on in the settings.
 #ifndef PSXRIP_REMOTE_H
 #define PSXRIP_REMOTE_H
 
@@ -8,6 +8,7 @@
 struct RemoteHooks {
 	int (*status_json)(char *out, int n);         // current state as JSON
 	int (*debug)(const char *query, char *out, int n);   // /dbg?... (only with the debug flag file)
+	int (*press)(const char *button);                     // POST /pad "cross", "l2", ...: a button press; 0 = known
 };
 
 void remote_init(const RemoteHooks *hooks);

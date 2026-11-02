@@ -2599,6 +2599,19 @@ enum { B_CROSS = 1, B_CIRCLE = 2, B_TRIANGLE = 4, B_UP = 8, B_DOWN = 16, B_LEFT 
 
 // Buttons newly pressed since the last call, over all connected pads. Each pad keeps its own
 // last state: ioPadGetData only reports changes, so a quiet pad must not resurrect another pad's buttons.
+// Buttons pressed on the remote view's pad (its server thread), taken by the next pad_pressed().
+static volatile int g_remote_btn = 0;
+static int remote_press(const char *b)
+{
+	static const struct { const char *n; int bit; } map[] = {
+		{"cross", B_CROSS}, {"circle", B_CIRCLE}, {"triangle", B_TRIANGLE}, {"square", B_SQUARE},
+		{"up", B_UP}, {"down", B_DOWN}, {"left", B_LEFT}, {"right", B_RIGHT},
+		{"start", B_START}, {"select", B_SELECT}, {"l1", B_L1}, {"r1", B_R1}, {"l2", B_L2}, {"r2", B_R2}};
+	for (size_t i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+		if (!strcmp(b, map[i].n)) { __sync_fetch_and_or(&g_remote_btn, map[i].bit); logf("remote pad: %s", b); return 0; }
+	return -1;
+}
+
 static int pad_pressed()
 {
 	static int pad_state[7];
@@ -2630,7 +2643,7 @@ static int pad_pressed()
 			now |= pad_state[i];
 		}
 	}
-	int pressed = now & ~last;
+	int pressed = (now & ~last) | __sync_lock_test_and_set(&g_remote_btn, 0);   // and the web page's pad
 	// auto-repeat a single held arrow: first after ~0.4 s, then every ~0.1 s (called once per frame)
 	const int arrows = B_UP | B_DOWN | B_LEFT | B_RIGHT;
 	int a = now & arrows;
@@ -5171,7 +5184,7 @@ int main(int argc, char *argv[])
 		for (int i = 0; i < nv && i < 8; i++) logf("exFAT drive on USB port %d (%llu MB free)", v[i].port, (unsigned long long)v[i].free_mb);
 	}
 	{
-		static const RemoteHooks hooks = {status_json, debug_cmd};
+		static const RemoteHooks hooks = {status_json, debug_cmd, remote_press};
 		remote_init(&hooks);
 		if (g_remote) remote_set(1);
 	}

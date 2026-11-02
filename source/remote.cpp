@@ -1,4 +1,4 @@
-// Remote view (see remote.h): MJPEG stream of the UI canvas and /status.json. System dialogs are drawn by the PS3 on top of the app and are not included.
+// Remote view (see remote.h): MJPEG stream of the UI canvas, /status.json and a pad (POST /pad). System dialogs are drawn by the PS3 on top of the app and are not included.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -134,12 +134,48 @@ static void client_thread(void *arg)
 		char hdr[128];
 		snprintf(hdr, sizeof(hdr), "HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: %d\r\n\r\n", (int)strlen(js));
 		if (!send_str(s, hdr)) send_str(s, js);
-	} else {
+	} else if (!strncmp(req, "POST /pad", 9)) {   // a button of the web page's pad
+		char b[16];
+		size_t k = strcspn(body, " \r\n&");
+		if (k >= sizeof(b)) k = sizeof(b) - 1;
+		memcpy(b, body, k); b[k] = 0;
+		int bad = !g_hooks.press || g_hooks.press(b);
+		send_str(s, bad ? "HTTP/1.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n" : "HTTP/1.0 204 No Content\r\n\r\n");
+	} else {   // the page: the screen, and under it a pad whose buttons press the console's
+		send_str(s, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\n\r\n");
 		send_str(s,
-			"HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n"
-			"<!doctype html><meta name=viewport content='width=device-width'><title>PSX Ripper</title>"
-			"<body style='margin:0;background:#111;font-family:sans-serif'><img src='/stream' style='width:100%;display:block'>"
-			"<p style='padding:8px 16px'><a style='color:#9ad0a8' href='/status.json'>status.json</a></p></body>");
+			"<!doctype html><html lang=sv><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>PSX Ripper</title>\n"
+			"<style>\n"
+			":root{--bg:#111;--k:#262b3a;--kb:#3a4160;--t:#dfe3f0;--d:#8890a8}\n"
+			"body{margin:0;background:var(--bg);color:var(--t);font-family:system-ui,sans-serif}\n"
+			"img{width:100%;max-width:1280px;display:block;margin:0 auto}\n"
+			".pad{max-width:760px;margin:12px auto;padding:0 16px;display:grid;grid-template-columns:1fr auto 1fr;gap:12px;align-items:center;user-select:none;-webkit-user-select:none}\n"
+			".row{grid-column:1/4;display:flex;justify-content:space-between}\n"
+			".grp{display:flex;gap:8px}\n"
+			"button{background:var(--k);color:var(--t);border:1px solid var(--kb);border-radius:10px;font:inherit;font-size:18px;min-width:56px;height:44px;cursor:pointer;touch-action:manipulation}\n"
+			"button:active,button.on{background:var(--kb)}\n"
+			".dp{display:grid;grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,52px);gap:4px;justify-self:start}\n"
+			".fa{display:grid;grid-template-columns:repeat(3,52px);grid-template-rows:repeat(3,52px);gap:4px;justify-self:end}\n"
+			".dp button,.fa button{min-width:0;width:52px;height:52px;border-radius:26px;font-size:22px}\n"
+			".mid{display:flex;flex-direction:column;gap:8px;align-items:center}\n"
+			".mid button{font-size:13px;height:32px;border-radius:16px;min-width:84px}\n"
+			".c{color:#7cc4ff}.o{color:#ff8a80}.tr{color:#7ce0a0}.sq{color:#e8a0e0}\n"
+			"p{max-width:760px;margin:8px auto 16px;padding:0 16px;color:var(--d);font-size:13px}a{color:#9ad0a8}\n"
+			"</style>\n"
+			"<img src='/stream' alt=''>\n"
+			"<div class=pad>\n"
+			"<div class=row><div class=grp><button data-b=l2>L2</button><button data-b=l1>L1</button></div><div class=grp><button data-b=r1>R1</button><button data-b=r2>R2</button></div></div>\n"
+			"<div class=dp><span></span><button data-b=up>&#9650;</button><span></span><button data-b=left>&#9664;</button><span></span><button data-b=right>&#9654;</button><span></span><button data-b=down>&#9660;</button><span></span></div>\n"
+			"<div class=mid><button data-b=select>SELECT</button><button data-b=start>START</button></div>\n"
+			"<div class=fa><span></span><button class=tr data-b=triangle>&#9651;</button><span></span><button class=sq data-b=square>&#9633;</button><span></span><button class=o data-b=circle>&#9675;</button><span></span><button class=c data-b=cross>&#10005;</button><span></span></div>\n"
+			"</div>\n"
+			"<p>Knapparna trycker på konsolens handkontroll. Tangentbord: pilar, Enter = &#10005;, Esc/Backspace = &#9675;, Q/E = L1/R1, 1/3 = L2/R2, T = &#9651;, S = &#9633;. <a href='/status.json'>status.json</a></p>\n"
+			"<script>\n"
+			"function press(b){var e=document.querySelector('[data-b='+b+']');if(e){e.classList.add('on');setTimeout(function(){e.classList.remove('on')},120)}fetch('/pad',{method:'POST',body:b}).catch(function(){})}\n"
+			"document.querySelectorAll('[data-b]').forEach(function(e){e.addEventListener('click',function(){press(e.dataset.b)})});\n"
+			"var K={ArrowUp:'up',ArrowDown:'down',ArrowLeft:'left',ArrowRight:'right',Enter:'cross',Escape:'circle',Backspace:'circle',q:'l1',e:'r1','1':'l2','3':'r2',t:'triangle',s:'square'};\n"
+			"document.addEventListener('keydown',function(ev){var b=K[ev.key]||K[ev.key.toLowerCase()];if(b&&!ev.metaKey&&!ev.ctrlKey){ev.preventDefault();press(b)}});\n"
+			"</script></html>\n");
 	}
 	close(s);
 	sysThreadExit(0);
