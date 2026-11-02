@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please report security problems privately with GitHub's
-[private vulnerability reporting](../../security/advisories/new), not in a public issue.
+[private vulnerability reporting](https://github.com/bjornwiberg/psx-ripper/security/advisories/new), not in a public issue.
 Include what you found, how to reproduce it, and the version (shown after the title, e.g. v1.0.0).
 
 ## What to know before you use it

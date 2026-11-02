@@ -232,6 +232,14 @@ int main()
 	disc(2, "Motorhead", "", "SLUS_007.17", 647); ripped(2, 0, 277);
 	frame("readme-tabs", 0);
 	frame("readme-ripping", 1);
+	{   // the settings: the first row, and the About row at the end
+		DriveCfg sd = g_std; sd.autostart = 1;
+		const time_t when = 1793530800;   // 2026-11-01, when the local copy was downloaded
+		g_boxes.clear(); settings_draw(0, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings"); size_t b0 = g_fail; check("settings");
+		printf("%s settings\n", g_fail == (int)b0 ? "ok  " : "FAIL");
+		g_boxes.clear(); settings_draw(10, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings-about-row"); b0 = g_fail; check("settings-about-row");
+		printf("%s settings-about-row\n", g_fail == (int)b0 ? "ok  " : "FAIL");
+	}
 
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);

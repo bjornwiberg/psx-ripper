@@ -109,6 +109,6 @@ or restart the app afterwards.
 
 ### How do I report a bug?
 
-Open an [issue](../../../issues/new/choose) with the version (after the title), the firmware,
+Open an [issue](https://github.com/bjornwiberg/psx-ripper/issues/new/choose) with the version (after the title), the firmware,
 the drive, the disc, and the relevant part of `/dev_hdd0/tmp/psxrip.log` (remove webhook
 addresses and headers first). Please never attach disc images or `.sbi` files.

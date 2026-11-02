@@ -8,3 +8,4 @@ source/private_sbi.inc
 third_party/
 .ps3host
 psxripper-*.pkg
+announce/

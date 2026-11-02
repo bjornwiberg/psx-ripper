@@ -2,7 +2,7 @@
 
 # PSX RiPPER
 
-[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+[![CI](https://github.com/bjornwiberg/psx-ripper/actions/workflows/ci.yml/badge.svg)](https://github.com/bjornwiberg/psx-ripper/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
 A PS3 homebrew app that rips your own PlayStation 1 discs to bit-perfect `.bin`/`.cue` images,
@@ -16,6 +16,8 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
 <p align="center">
   <img src="docs/images/tabs.png" alt="A tab per drive: a disc already ripped and verified against Redump" width="49%">
   <img src="docs/images/ripping.png" alt="A rip in progress on a USB SuperDrive" width="49%">
+  <img src="docs/images/settings.png" alt="The settings" width="49%">
+  <img src="docs/images/about.png" alt="About PSX RiPPER" width="49%">
 </p>
 
 ## Features
@@ -50,7 +52,7 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
 
 ## Installation
 
-1. Download `psxripper-<version>.pkg` from the [latest release](../../releases/latest).
+1. Download `psxripper-<version>.pkg` from the [latest release](https://github.com/bjornwiberg/psx-ripper/releases/latest).
 2. Copy it to the PS3 (USB stick, FTP, or webMAN *Install PKG*) and install it with
    *Package Manager → Install Package Files*.
 3. Start **PSX RiPPER** from the Game column.
