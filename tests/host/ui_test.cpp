@@ -187,6 +187,7 @@ int main()
 		snprintf(k.res, sizeof(k.res), "%s", c == 1 ? "klar på 1:12:40 · 239 oläsbara · 39 lagade" : "klar på 14:02");
 		k.res_col = c == 1 ? 0xF0C060 : 0x7CE0A0;
 		k.res_rd = c == 0 ? 1 : c == 1 ? 0 : -1;
+		k.res_bad = c == 1;
 	}
 	frame("ejected-verified", 0);
 	frame("ejected-nomatch", 1);

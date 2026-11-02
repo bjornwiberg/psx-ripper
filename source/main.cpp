@@ -111,6 +111,7 @@ struct Card {
 	int repairing;                    // that job is a repair: progress is the re-read sectors
 	char res[200];                    // last rip: one line, coloured res_col
 	uint32_t res_col;
+	int res_bad;                     // the last rip left unreadable or bad sectors (it needs a repair)
 	int res_rd;                      // the last rip against Redump: 1 matches, 0 does not, -1 not checked, -2 no line (off, failed)
 	char res_disc[160];               // which disc the last rip was ("Motorhead (SLUS_007.17)")
 	int res_failed;                   // it was cancelled or failed: an earlier rip there is untouched
@@ -3741,7 +3742,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 	int room = R - L - kw - gap * 2;
 	char name[NCARDS][32], stt[NCARDS][24];
 	uint32_t scol[NCARDS];
-	int w[NCARDS], si = 0;
+	int w[NCARDS], warn[NCARDS], si = 0;
 	for (int i = 0; i < nc; i++) {
 		int c = list[i];
 		Card &k = g_cards[c];
@@ -3765,6 +3766,14 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		else if (list[i] && k.usb_dead) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_NORESP)); scol[i] = 0xF0C060; }
 		else snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_EMPTY));
 		w[i] = pad + isz + igap + ui_text_width(UI_SMALL, name[i]) + gap + ui_text_width(UI_SMALL, stt[i]) + pad;
+		// a warning on the tab: the disc here (or, with none, the last rip) has sectors left to repair or
+		// does not match Redump; put it aside and try again later, without opening the tab
+		warn[i] = 0;
+		if (!k.job) {
+			if (k.state == DISC_READY && k.prev_rip) warn[i] = k.repair_n > 0 || k.rd_state == 0;
+			else if (k.res[0] && !k.res_failed && (k.state == DISC_READY || k.state == DISC_NONE)) warn[i] = k.res_bad || k.res_rd == 0;
+		}
+		if (warn[i]) w[i] += igap + isz;
 	}
 	// the first tab shown: as far left as possible with the selected one still in view
 	int first = 0;
@@ -3783,7 +3792,8 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		ui_icon(list[i] ? "usb" : "drive", tx, y + (th - isz) / 2, isz, on ? 0xFFFFFF : 0x8890A8);
 		tx += isz + igap;
 		tx += ui_text(UI_SMALL, tx, y + (th - ls) / 2, on ? 0xFFFFFF : 0xC8D0E0, name[i]) + gap;
-		ui_text(UI_SMALL, tx, y + (th - ls) / 2, scol[i], stt[i]);
+		tx += ui_text(UI_SMALL, tx, y + (th - ls) / 2, scol[i], stt[i]);
+		if (warn[i]) ui_icon("warn", tx + igap, y + (th - isz) / 2, isz, 0xFF8A80);
 		if (g_cards[list[i]].job) {   // ripping: a thin bar along the bottom of the tab
 			OnCard o(list[i]);
 			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
@@ -4640,6 +4650,7 @@ static int rip_disc_inner(int fresh, int autorip)
 		k.res_col = g_readerrs || g_badsect ? 0xF0C060 : 0x7CE0A0;
 		k.res_failed = 0;
 		k.res_rd = g_rd_result == 1 ? 1 : g_rd_result == 0 ? 0 : g_redump == RD_OFF ? -2 : -1;
+		k.res_bad = g_readerrs || g_badsect;
 	}
 	g_state = ST_HOME;
 	fire_event("rip_finished");
@@ -5043,6 +5054,7 @@ static int repair_disc_inner()
 		k.res_col = g_readerrs || g_badsect ? 0xF0C060 : 0x7CE0A0;
 		k.res_failed = 0;
 		k.res_rd = g_rd_result == 1 ? 1 : g_rd_result == 0 ? 0 : g_redump == RD_OFF ? -2 : -1;
+		k.res_bad = g_readerrs || g_badsect;
 	}
 	g_state = ST_HOME;
 	fire_event("repair_finished");
