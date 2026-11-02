@@ -3766,12 +3766,14 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		else if (list[i] && k.usb_dead) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_NORESP)); scol[i] = 0xF0C060; }
 		else snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_EMPTY));
 		w[i] = pad + isz + igap + ui_text_width(UI_SMALL, name[i]) + gap + ui_text_width(UI_SMALL, stt[i]) + pad;
-		// a warning on the tab: the disc here (or, with none, the last rip) has sectors left to repair or
-		// does not match Redump; put it aside and try again later, without opening the tab
+		// the page's Redump icon on the tab too, for the disc here (or, with none, the last rip): which
+		// discs to put aside and try again later shows without opening each tab
+		// 1 medal (matches), 2 warning (does not, or sectors left to repair), 3 question (not checked)
 		warn[i] = 0;
 		if (!k.job) {
-			if (k.state == DISC_READY && k.prev_rip) warn[i] = k.repair_n > 0 || k.rd_state == 0;
-			else if (k.res[0] && !k.res_failed && (k.state == DISC_READY || k.state == DISC_NONE)) warn[i] = k.res_bad || k.res_rd == 0;
+			if (k.state == DISC_READY && k.prev_rip) warn[i] = k.repair_n > 0 || k.rd_state == 0 ? 2 : k.rd_state == 1 ? 1 : 3;
+			else if (k.res[0] && !k.res_failed && (k.state == DISC_READY || k.state == DISC_NONE) && k.res_rd >= -1)
+				warn[i] = k.res_bad || k.res_rd == 0 ? 2 : k.res_rd == 1 ? 1 : 3;
 		}
 		if (warn[i]) w[i] += igap + isz;
 	}
@@ -3793,7 +3795,8 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		tx += isz + igap;
 		tx += ui_text(UI_SMALL, tx, y + (th - ls) / 2, on ? 0xFFFFFF : 0xC8D0E0, name[i]) + gap;
 		tx += ui_text(UI_SMALL, tx, y + (th - ls) / 2, scol[i], stt[i]);
-		if (warn[i]) ui_icon("warn", tx + igap, y + (th - isz) / 2, isz, 0xFF8A80);
+		if (warn[i]) ui_icon(warn[i] == 1 ? "medal" : warn[i] == 2 ? "warn" : "question", tx + igap, y + (th - isz) / 2, isz,
+		                     warn[i] == 1 ? 0xE8C870 : warn[i] == 2 ? 0xFF8A80 : 0x8890A8);   // the page's icons and colours
 		if (g_cards[list[i]].job) {   // ripping: a thin bar along the bottom of the tab
 			OnCard o(list[i]);
 			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
