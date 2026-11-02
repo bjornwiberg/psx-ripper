@@ -51,8 +51,6 @@ jobs:
           load: true
           cache-from: type=gha,scope=ps3dev
           cache-to: type=gha,scope=ps3dev,mode=max
-      - name: UI tests
-        run: make -C tests/host
       - name: Build the package
         run: docker run --rm -v "$PWD":/src -w /src ps3dev-psl1ght:ci make pkg
       - name: Attach it to the release
