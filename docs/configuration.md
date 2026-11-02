@@ -60,13 +60,13 @@ USB drives by port). `busy` is true while any drive is in use or the lv1 patch i
 
 ```json
 {"app":"PSX Ripper","version":"0.1.0","busy":true,"state":"ripping","drives":[
- {"id":0,"drive":"internal","model":"PS3 Blu-ray drive","state":"ripping",
+ {"drive":"internal","model":"PS3 Blu-ray drive","state":"ripping",
   "title":"Mega Man X4","serial":"SLUS_005.61","size_mb":564,"redump_name":"Mega Man X4 (USA)",
   "redump":"unchecked","already_ripped":false,"known_errors":0,
   "destination":"/dev_hdd0/PSXISO","file":"Mega Man X4 [SLUS_005.61]",
   "job":{"phase":"verifying","percent":29,"sectors_done":251793,"sectors_total":251793,
          "pass_done":12000,"pass_total":41237,"unreadable":0,"fixed":1,"bad":0}},
- {"id":1,"drive":"usb","port":0,"model":"Apple SuperDrive","state":"empty",
+ {"drive":"usb","port":0,"model":"Apple SuperDrive","state":"empty",
   "last":{"result":"done","disc":"Alundra (Europe) (SLES_011.35)","summary":"klar på 14:02",
           "redump":"verified","needs_repair":false}}]}
 ```

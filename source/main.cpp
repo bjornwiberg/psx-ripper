@@ -4393,7 +4393,7 @@ static int status_json(char *js, int n)
 		Card &k = g_cards[c];
 		const char *state = k.job ? (k.repairing ? "repairing" : "ripping") : k.state == DISC_READY ? "ready" : k.state == DISC_READING ? "reading" :
 		                    k.state == DISC_ERROR ? "not_psx" : c && k.usb_dead ? "no_answer" : "empty";
-		put("%s{\"id\":%d,\"drive\":\"%s\"", i ? "," : "", c, c ? "usb" : "internal");
+		put("%s{\"drive\":\"%s\"", i ? "," : "", c ? "usb" : "internal");   // internal, or usb with its port: as the tabs
 		if (c) put(",\"port\":%d", usbodd_port(c - 1));
 		str("model", c ? usbodd_name(c - 1) : "PS3 Blu-ray drive");
 		put(",\"state\":\"%s\"", state);
