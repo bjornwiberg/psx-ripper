@@ -2976,17 +2976,17 @@ static void webhook_settings_screen()
 				ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 			}
 			if (row == R_HDR) {   // on/off with left/right, X edits the headers
-				const char *b[] = {"updown", "leftright", "cross", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_EDIT), T(STR_HINT_BACK)};
-				hint_bar(b, l, 4);
+				const char *b[] = {"updown", "l2r2", "leftright", "cross", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_CHANGE), T(STR_HINT_EDIT), T(STR_HINT_BACK)};
+				hint_bar(b, l, 5);
 			} else if (row == R_ADDR || row == R_TEST) {
-				const char *b[] = {"updown", "cross", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), T(row == R_TEST ? STR_HINT_SEND : STR_HINT_EDIT), T(STR_HINT_BACK)};
-				hint_bar(b, l, 3);
+				const char *b[] = {"updown", "l2r2", "cross", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(row == R_TEST ? STR_HINT_SEND : STR_HINT_EDIT), T(STR_HINT_BACK)};
+				hint_bar(b, l, 4);
 			} else {
-				const char *b[] = {"updown", "leftright", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
-				hint_bar(b, l, 3);
+				const char *b[] = {"updown", "l2r2", "leftright", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
+				hint_bar(b, l, 4);
 			}
 			g_drawn = 2;
 			g_backdrop_shown = 0;
@@ -3353,13 +3353,13 @@ static void settings_screen()
 			                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK)};
 			settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 7);   // row 7 is an action
 			if (row == 9 || row == 5) {   // webhooks and the file name: X opens their own view
-				const char *b[] = {"updown", "leftright", "cross", "triangle", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(row == 5 ? STR_HINT_EDIT : STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
-				hint_bar(b, l, 5);
+				const char *b[] = {"updown", "l2r2", "leftright", "cross", "triangle", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_CHANGE), T(row == 5 ? STR_HINT_EDIT : STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+				hint_bar(b, l, 6);
 			} else {
-				const char *b[] = {"updown", row == 7 ? "cross" : "leftright", "triangle", "circle"};
-				const char *l[] = {T(STR_HINT_SELECT), row == 7 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
-				hint_bar(b, l, 4);
+				const char *b[] = {"updown", "l2r2", row == 7 ? "cross" : "leftright", "triangle", "circle"};
+				const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), row == 7 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+				hint_bar(b, l, 5);
 			}
 		}
 		flip_frame();
@@ -4010,16 +4010,20 @@ static int home_screen()
 			// the bottom row: what the buttons do on the focused card
 			int rereads = 0;   // the rip is in its re-reads: square leaves them
 			if (f.job) { OnCard o(sel); rereads = (g_phase == 1 || g_phase == 2) && !g_skip && !g_abort; }
+			int evs;   // events to scroll with L2/R2
+			{ OnCard o(sel); evs = f.job && g_nev > 3; }
 			if (f.job && rereads) {
-				const char *b[] = {"square", "circle"};
-				const char *l[] = {T(STR_HINT_SKIP), T(STR_HINT_CANCEL_RIP)};
-				hint_bar(b, l, 2);
+				const char *b[] = {"square", "l2r2", "circle"};
+				const char *l[] = {T(STR_HINT_SKIP), T(STR_HINT_EVENTS), T(STR_HINT_CANCEL_RIP)};
+				const char *b2[] = {"square", "circle"};
+				const char *l2[] = {T(STR_HINT_SKIP), T(STR_HINT_CANCEL_RIP)};
+				if (evs) hint_bar(b, l, 3); else hint_bar(b2, l2, 2);
 			} else if (f.job) {
 				int checking;
 				{ OnCard o(sel); checking = g_phase == 4; }
-				const char *b[] = {"circle"};
-				const char *l[] = {T(checking ? STR_HINT_CANCEL_CHECK : STR_HINT_CANCEL_RIP)};
-				hint_bar(b, l, 1);
+				const char *b[] = {"l2r2", "circle"};
+				const char *l[] = {T(STR_HINT_EVENTS), T(checking ? STR_HINT_CANCEL_CHECK : STR_HINT_CANCEL_RIP)};
+				if (evs) hint_bar(b, l, 2); else hint_bar(b + 1, l + 1, 1);
 			} else if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
 				const char *b[] = {"cross", "square", "triangle", "select"};
 				const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};

@@ -338,6 +338,7 @@ int ui_hint_width(const char *button, const char *label)
 	int sw = disc_size();   // face buttons and the d-pad share the icon size
 	if (!strcmp(button, "select")) sw = pill_width("SELECT");
 	if (!strcmp(button, "l1r1")) sw = pill_width("L1  R1");
+	if (!strcmp(button, "l2r2")) sw = pill_width("L2  R2");
 	if (!strcmp(button, "start")) sw = pill_width("START");
 	(void)col;
 	return sw + ui_text_width(UI_BODY, " ") + ui_text_width(UI_BODY, label);
@@ -360,8 +361,8 @@ int ui_hint(int x, int y, const char *button, const char *label)
 	int d = disc_size();
 	int oy = (int)(y + (top + bot + 1) / 2.0f - d / 2.0f + 0.5f);
 	float cx = x + d / 2.0f, cy = oy + d / 2.0f;
-	if (!strcmp(button, "select") || !strcmp(button, "start") || !strcmp(button, "l1r1")) {
-		const char *word = !strcmp(button, "start") ? "START" : !strcmp(button, "l1r1") ? "L1  R1" : "SELECT";
+	if (!strcmp(button, "select") || !strcmp(button, "start") || !strcmp(button, "l1r1") || !strcmp(button, "l2r2")) {
+		const char *word = !strcmp(button, "start") ? "START" : !strcmp(button, "l1r1") ? "L1  R1" : !strcmp(button, "l2r2") ? "L2  R2" : "SELECT";
 		int pw = pill_width(word), r = d * 2 / 5;
 		disc(x + r, cy, r, 0x1E2234, 0x5A6280);
 		disc(x + pw - r, cy, r, 0x1E2234, 0x5A6280);
