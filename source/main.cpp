@@ -28,6 +28,7 @@
 #include "rsxutil.h"
 #include "storage.h"
 #include "lang.h"
+#include "version.h"   // APP_VERSION, from version.txt (written into the build directory by the Makefile)
 #include "ui.h"
 #include "md5.h"
 #include "redump.h"
@@ -3348,8 +3349,9 @@ static void settings_rows(const char *subtitle, const char *const *labels, char 
 		snprintf(v, sizeof(v), r == row && r != action_row ? "‹ %s ›" : "%s", vals[r]);
 		ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
 	}
-	char foot[200];   // all settings live in one file that can also be edited over FTP
-	snprintf(foot, sizeof(foot), T(STR_WH_CFG_PATH), CFG_PATH);
+	char foot[240], cp[200];   // the version, and the one file all settings live in (it can be edited over FTP)
+	snprintf(cp, sizeof(cp), T(STR_WH_CFG_PATH), CFG_PATH);
+	snprintf(foot, sizeof(foot), "PSX Ripper %s  ·  %s", APP_VERSION, cp);
 	footer_note(foot);
 }
 
@@ -5248,6 +5250,7 @@ int main(int argc, char *argv[])
 #endif
 
 	logf("---- PSX Ripper start ----");
+	logf("version %s", APP_VERSION);
 	if (warn[0]) logf("startup checks: %s", warn);
 	logf("video %ux%u pitch=%u", display_width, display_height, color_pitch);
 	struct stat ast;

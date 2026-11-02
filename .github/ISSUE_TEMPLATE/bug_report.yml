@@ -1,0 +1,46 @@
+name: Bug report
+description: Something does not work as it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for the report. Please do not attach disc images, `.sbi` files or other copyrighted material.
+  - type: input
+    id: version
+    attributes:
+      label: PSX Ripper version
+      description: Shown at the bottom of the app's settings
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: Console firmware
+      placeholder: Evilnat 4.93 Cobra
+    validations:
+      required: true
+  - type: dropdown
+    id: drive
+    attributes:
+      label: Drive
+      options: [Internal Blu-ray drive, Apple USB SuperDrive, Several drives at once]
+    validations:
+      required: true
+  - type: input
+    id: disc
+    attributes:
+      label: Disc (title and serial)
+      placeholder: Final Fantasy IX (Europe) Disc 1, SLES_029.65
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: The relevant part of /dev_hdd0/tmp/psxrip.log (remove webhook addresses and headers)
+      render: text

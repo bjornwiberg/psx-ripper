@@ -1,0 +1,66 @@
+# Releases. release-please keeps a release pull request open with the next version (from the
+# Conventional Commits since the last release: fix = patch, feat = minor, ! or BREAKING CHANGE =
+# major) and the changelog. Merging that pull request tags the release, and the package job
+# builds psxripper-<version>.pkg and attaches it to the GitHub release.
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to (re)build and attach the package to, e.g. v0.1.0
+        required: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  package:
+    needs: release-please
+    if: always() && (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ needs.release-please.outputs.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: docker/setup-buildx-action@v3
+      - name: Toolchain image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          platforms: linux/amd64
+          tags: ps3dev-psl1ght:ci
+          load: true
+          cache-from: type=gha,scope=ps3dev
+          cache-to: type=gha,scope=ps3dev,mode=max
+      - name: UI tests
+        run: make -C tests/host
+      - name: Build the package
+        run: docker run --rm -v "$PWD":/src -w /src ps3dev-psl1ght:ci make pkg
+      - name: Attach it to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          v="${TAG#v}"
+          test "$v" = "$(cat version.txt)" || { echo "version.txt ($(cat version.txt)) does not match $TAG"; exit 1; }
+          cp psxripper.pkg "psxripper-${v}.pkg"
+          sha256sum "psxripper-${v}.pkg" > "psxripper-${v}.pkg.sha256"
+          gh release upload "$TAG" "psxripper-${v}.pkg" "psxripper-${v}.pkg.sha256" --clobber

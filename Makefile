@@ -25,6 +25,11 @@ TITLE		:=	PSX Ripper
 ICON0		:=	$(CURDIR)/pkgfiles/ICON0.PNG
 APPID		:=	PSXR00001
 CONTENTID	:=	UP0001-$(APPID)_00-0000000000000000
+
+# The version: version.txt (semantic versioning, bumped by the release workflow). PARAM.SFO takes
+# "MM.mm", so APP_VER is the major and minor version; the app shows the full one.
+VERSION		:=	$(shell cat $(dir $(firstword $(MAKEFILE_LIST)))version.txt 2>/dev/null || echo 0.0.0)
+APP_VER		:=	$(shell echo $(VERSION) | awk -F. '{printf "%02d.%02d", $$1, $$2}')
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
@@ -101,7 +106,11 @@ export LIBPATHS	:=	$(foreach dir,$(LIBDIRS),-L$(dir)/lib) \
 					$(LIBPSL1GHT_LIB)
 
 export OUTPUT	:=	$(CURDIR)/$(TARGET)
-.PHONY: $(BUILD) clean pkg
+export SFOXML	:=	$(CURDIR)/$(BUILD)/sfo.xml
+.PHONY: $(BUILD) clean pkg version
+
+version:
+	@echo $(VERSION)
 
 #---------------------------------------------------------------------------------
 pkg: $(BUILD) $(OUTPUT).pkg
@@ -109,6 +118,9 @@ pkg: $(BUILD) $(OUTPUT).pkg
 #---------------------------------------------------------------------------------
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
+	@echo '#define APP_VERSION "$(VERSION)"' > $@/version.h.new
+	@cmp -s $@/version.h.new $@/version.h && rm $@/version.h.new || mv $@/version.h.new $@/version.h
+	@sed 's/@APP_VER@/$(APP_VER)/' tools/sfo.xml.in > $@/sfo.xml
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
 
 #---------------------------------------------------------------------------------

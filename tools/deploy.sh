@@ -2,8 +2,10 @@
 # Installs psxripper.pkg on the PS3 via webMAN and starts it again.
 # Refuses while the app uses the drive (remote view status.json says "ripping" or "busy":true):
 # killing it then leaves the lv1 patch on and the install hangs the console.
-PS3=${PS3:-192.168.1.50}
+# The console's address: $PS3, or the first line of .ps3host in the repository (not in git).
 cd "$(dirname "$0")/.." || exit 1
+[ -n "$PS3" ] || PS3=$(head -n1 .ps3host 2>/dev/null)
+[ -n "$PS3" ] || { echo "set PS3=<the console's address> or write it into .ps3host"; exit 1; }
 pad() { curl -s --max-time 8 "http://$PS3/pad.ps3?$1" >/dev/null; sleep 1; curl -s --max-time 8 "http://$PS3/pad.ps3?release" >/dev/null; curl -s --max-time 8 "http://$PS3/pad.ps3?off" >/dev/null; }
 st=$(curl -s --max-time 8 "http://$PS3:8090/status.json")
 case "$st" in *'"state":"ripping"'*|*'"busy":true'*) echo "the app is using the drive (rip, repair, identify or lv1 patch on), not installing"; exit 2;; esac

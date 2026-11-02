@@ -1,0 +1,58 @@
+# Every pull request and every push to main: the UI tests on the host and the PS3 build.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui-tests:
+    name: UI tests (host)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Draw the scenarios and check them
+        run: make -C tests/host
+      - name: Keep the frames
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-test-frames
+          path: tests/host/out/*.png
+          retention-days: 14
+
+  build:
+    name: PS3 package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Toolchain image (cached)
+        uses: docker/build-push-action@v6
+        with:
+          context: docker
+          platforms: linux/amd64
+          tags: ps3dev-psl1ght:ci
+          load: true
+          cache-from: type=gha,scope=ps3dev
+          cache-to: type=gha,scope=ps3dev,mode=max
+      - name: Build psxripper.pkg
+        run: docker run --rm -v "$PWD":/src -w /src ps3dev-psl1ght:ci make pkg
+      - name: Name it after the version and commit
+        run: |
+          v=$(cat version.txt)
+          cp psxripper.pkg "psxripper-${v}+${GITHUB_SHA::7}.pkg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: psxripper-pkg
+          path: psxripper-*.pkg
+          retention-days: 30
