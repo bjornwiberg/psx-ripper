@@ -2143,7 +2143,7 @@ static void space_check(uint32_t disc_mb)
 // Destination next to the current one in the list hard disk, USB 0, USB 1, ... (by port; a FAT32
 // drive is mounted by the PS3 as /dev_usbNNN, an exFAT drive is reached through FatFs).
 // dir = +1 forward, -1 back.
-// The destination as "Hårddisk · PSXISO" (drive and folder) and its free space in GB.
+// The destination as "Hard disk · PSXISO" (drive and folder) and its free space in GB.
 static void dest_parts(const char *dir, char *out, size_t n, unsigned *gb)
 {
 	int port;
@@ -2182,7 +2182,7 @@ static void fit_middle(UiFont font, const char *in, char *out, size_t n, int max
 	}
 }
 
-// "Mål: Hårddisk · PSXISO/Croc 2 (Europe) [SLES_020.88].bin · 339 GB ledigt" (no file: just the folder)
+// "Destination: Hard disk · PSXISO/Croc 2 (Europe) [SLES_020.88].bin · 339 GB free" (no file: just the folder)
 static void dest_line(const char *dir, const char *fname, char *out, size_t n, int maxw = 0, const char *wrap = "%s", UiFont font = UI_SMALL)
 {
 	int port;
@@ -3164,7 +3164,7 @@ static int dest_available(const char *dir)
 }
 static const char *HDD_DIR = "/dev_hdd0/PSXISO";
 
-// "PS3:ans läsare", "USB 1 · Apple SuperDrive": like the destinations, by port. drv = usbodd drive, -1 = the PS3's.
+// "Internal drive", "USB 1 · Apple SuperDrive": like the destinations, by port. drv = usbodd drive, -1 = the PS3's.
 static void source_name(int drv, char *out, size_t n)
 {
 	if (drv < 0) { snprintf(out, n, "%s", T(STR_SRC_BD)); return; }
@@ -3826,7 +3826,7 @@ static void ui_text_fit(UiFont f, int x, int y, uint32_t col, const char *text, 
 }
 
 // The right column of a card (and of the file name preview): the drive (icon + "USB 0" /
-// "Intern läsare") level with a body line at y, its model under it in small type, then the disc
+// "Internal drive") level with a body line at y, its model under it in small type, then the disc
 // (disc icon + idl). Right-aligned at right; returns the width it takes.
 static int drive_column(int c, int right, int y, const char *idl)
 {
@@ -3975,7 +3975,7 @@ static int draw_page_body(int c, int y)
 		ui_text_fit(UI_BODY, L, y, 0xFFFFFF, msg, lw);
 	}
 	y += lb + ls / 2;
-	// the destination: "Mål: Hårddisk · PSXISO" with the free space on the right, under it the file name
+	// the destination: "Destination: Hard disk · PSXISO" with the free space on the right, under it the file name
 	auto dest_block = [&](int yy, int arrows, uint32_t col) {
 		char dp[120], m[200], gbs[48], fl[260], fn[260];
 		unsigned gb = 0;
@@ -5438,7 +5438,7 @@ int main(int argc, char *argv[])
 	}
 	if (warn[0]) own_dialog(warn, 0);   // what the start-up checks found and fixed
 	{ struct stat ds; g_debug_on = stat("/dev_hdd0/tmp/psxrip.debug", &ds) == 0; if (g_debug_on) logf("debug commands on (/dbg)"); }
-	usbodd_init();   // USB SuperDrive (setting "Läsare")
+	usbodd_init();   // USB SuperDrives
 	{ sys_ppu_thread_t t; sysThreadCreate(&t, usb_presence_thread, NULL, 1500, 0x4000, 0, (char *)"psxusbpoll"); }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);

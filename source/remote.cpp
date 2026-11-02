@@ -149,7 +149,10 @@ static void client_thread(void *arg)
 	} else {   // the page: the screen, and under it a pad whose buttons press the console's
 		send_str(s, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-cache\r\n\r\n");
 		send_str(s,
-			"<!doctype html><html lang=sv><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>PSX RiPPER</title>\n"
+			"<!doctype html><html lang=");
+		send_str(s, T(STR_HTML_LANG));   // the page in the console's language
+		send_str(s,
+			"><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>PSX RiPPER</title>\n"
 			"<style>\n"
 			":root{--bg:#111;--k:#262b3a;--kb:#3a4160;--t:#dfe3f0;--d:#8890a8;--b:min(52px,10vw)}\n"
 			"*{box-sizing:border-box}\n"
@@ -176,7 +179,10 @@ static void client_thread(void *arg)
 			"<div class=mid><button data-b=select>SELECT</button><button data-b=start>START</button></div>\n"
 			"<div class=fa><span></span><button class=tr data-b=triangle>&#9651;</button><span></span><button class=sq data-b=square>&#9633;</button><span></span><button class=o data-b=circle>&#9675;</button><span></span><button class=c data-b=cross>&#10005;</button><span></span></div>\n"
 			"</div>\n"
-			"<p>Knapparna trycker på konsolens handkontroll. Tangentbord: pilar, Enter = &#10005;, Esc/Backspace = &#9675;, Q/E = L1/R1, 1/3 = L2/R2, T = &#9651;, S = &#9633;. <a href='/status.json'>status.json</a></p>\n"
+			"<p>");
+		send_str(s, T(STR_REMOTE_PAD_HELP));
+		send_str(s,
+			" <a href='/status.json'>status.json</a></p>\n"
 			"<script>\n"
 			"function press(b){var e=document.querySelector('[data-b='+b+']');if(e){e.classList.add('on');setTimeout(function(){e.classList.remove('on')},120)}fetch('/pad',{method:'POST',body:b}).catch(function(){})}\n"
 			"document.querySelectorAll('[data-b]').forEach(function(e){e.addEventListener('click',function(){press(e.dataset.b)})});\n"

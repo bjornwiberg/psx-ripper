@@ -2,7 +2,7 @@
 // storage but does not pass SCSI commands to them, so a SuperDrive cannot even be unlocked that
 // way. This driver claims the drive by vendor/product id and talks USB Mass Storage Bulk-Only
 // Transport itself: CBW (command), data, CSW (status). The ripper uses it as an alternative drive
-// (setting "Läsare"); /dbg can send single commands for diagnosis. Up to USBODD_DRIVES drives,
+// /dbg can send single commands for diagnosis. Up to USBODD_DRIVES drives,
 // each with its own pipes, transfer memory and lock, so they can be used at the same time.
 #include <stdio.h>
 #include <stdlib.h>
