@@ -92,10 +92,13 @@ are made.
 
 ## Credits
 
-- [IRISMAN](https://github.com/aldostools/IRISMAN): lv1 storage patch, BD reset/auth and the raw
-  read method
+Thanks to the projects whose source showed how the PS3's drive is driven (no code is copied from
+them; the structures, syscalls and patch values are interface facts):
+
+- [IRISMAN](https://github.com/aldostools/IRISMAN) by aldostools: lv1 storage patch, BD reset/auth
+  and the raw read method
 - [sacd-ripper](https://github.com/sacd-ripper/sacd-ripper): lv2 storage/ATAPI wrappers
-- [webMAN MOD](https://github.com/aldostools/webMAN-MOD) and Evilnat's Cobra: ATAPI structures,
+- [webMAN MOD](https://github.com/aldostools/webMAN-MOD) by aldostools, and Evilnat's Cobra: ATAPI structures,
   PS3MAPI calls and the LibCrypt `.sbi` handling this app writes for
 - [PSL1GHT](https://github.com/ps3dev/PSL1GHT) and bucanero's prebuilt toolchain
 - Third-party code and data in this repository: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)

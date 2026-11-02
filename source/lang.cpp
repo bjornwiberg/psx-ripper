@@ -280,7 +280,7 @@ static const char *en[STR_COUNT] = {
 	"Free software under the GNU General Public License v3.",
 	"Not affiliated with Sony Interactive Entertainment. Only rip discs you own.",
 	"Built with",
-	"PSL1GHT (PS3 SDK) · zlib · FatFs by ChaN (FAT32 and exFAT)\nstb_image_write (remote view) · DejaVu fonts · GameDB-PSX (game titles)\nOwn driver for the Apple USB SuperDrive (USB Mass Storage, Bulk-Only Transport)\nRaw reading as in IRISMAN, webMAN MOD and sacd-ripper",
+	"PSL1GHT (PS3 SDK) · zlib · FatFs by ChaN (FAT32 and exFAT)\nstb_image_write (remote view) · DejaVu fonts · GameDB-PSX (game titles)\nOwn driver for the Apple USB SuperDrive (USB Mass Storage, Bulk-Only Transport)\nThanks to IRISMAN and webMAN MOD (aldostools) and sacd-ripper for how the PS3 drive is driven",
 	"Open",
 };
 
@@ -558,7 +558,7 @@ static const char *sv[STR_COUNT] = {
 	"Fri programvara under GNU General Public License v3.",
 	"Inte ansluten till Sony Interactive Entertainment. Rippa bara skivor du äger.",
 	"Byggd med",
-	"PSL1GHT (PS3-SDK) · zlib · FatFs av ChaN (FAT32 och exFAT)\nstb_image_write (fjärrvisning) · DejaVu-typsnitt · GameDB-PSX (speltitlar)\nEgen drivrutin för Apple USB SuperDrive (USB Mass Storage, Bulk-Only Transport)\nRå läsning som i IRISMAN, webMAN MOD och sacd-ripper",
+	"PSL1GHT (PS3-SDK) · zlib · FatFs av ChaN (FAT32 och exFAT)\nstb_image_write (fjärrvisning) · DejaVu-typsnitt · GameDB-PSX (speltitlar)\nEgen drivrutin för Apple USB SuperDrive (USB Mass Storage, Bulk-Only Transport)\nTack till IRISMAN och webMAN MOD (aldostools) och sacd-ripper för hur PS3:ans läsare styrs",
 	"Öppna",
 };
 
