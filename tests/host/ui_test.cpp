@@ -162,6 +162,9 @@ int main()
 	disc(1, "Final Fantasy IX (Disc 3)", "Final Fantasy IX (Europe) (Disc 3)", "SLES_229.65", 695); ripping(1, 32768, 310277, 0, 0, 0);
 	disc(2, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654); ripping(2, 120000, 291570, 0, 4, 0);
 	frame("ripping-rereads-events", 0);
+	g_cards[0].pg_scroll = 200; frame("ripping-scrolled-middle", 0);   // the page scrolled: arrows up and down
+	g_cards[0].pg_scroll = 100000; frame("ripping-scrolled-bottom", 0);
+	g_cards[0].pg_scroll = 0;
 	frame("ripping-plain", 1);
 
 	// a very long name, a drive with no disc, one drive only

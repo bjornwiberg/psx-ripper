@@ -264,7 +264,7 @@ static const char *en[STR_COUNT] = {
 	"Not ripped to this destination yet.",
 	"Cancel check",
 	"Cancelled",
-	"Events",
+	"Scroll",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -525,7 +525,7 @@ static const char *sv[STR_COUNT] = {
 	"Inte rippad till det här målet än.",
 	"Avbryt kontroll",
 	"Avbruten",
-	"Händelser",
+	"Bläddra",
 };
 
 static const char **table = en;

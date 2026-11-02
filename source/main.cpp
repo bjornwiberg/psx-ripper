@@ -120,7 +120,7 @@ struct Card {
 	int rd_state;                     // the image here vs Redump: 1 verified, 0 no match, -1 not known (not ripped)
 	uint64_t eta_t0, eta_tw; uint32_t eta_pw; double eta_rate;   // time left of the running rip
 	int eta_phase;
-	int ev_scroll;                    // events: how many rows up from the newest (L2/R2 while ripping)
+	int pg_scroll, pg_max;            // the page: pixels scrolled down, and how far it can (L2/R2)
 };
 static Card g_cards[NCARDS];
 
@@ -2652,6 +2652,19 @@ static void footer_note(const char *text)
 	ui_text(UI_SMALL, ui_w() / 2, hint_y() - ui_line(UI_SMALL) * 2, 0x6870A0, text, UI_CENTER);
 }
 
+static void hint_bar(const char *const *buttons, const char *const *labels, int n);
+// The bottom row of a page that may scroll: L2/R2 go in second when it does.
+static void hint_bar_pg(const char *const *buttons, const char *const *labels, int n, int scrolls)
+{
+	if (!scrolls) { hint_bar(buttons, labels, n); return; }
+	const char *b[8], *l[8];
+	int m = 0;
+	for (int i = 0; i < n && m < 7; i++) {
+		b[m] = buttons[i]; l[m++] = labels[i];
+		if (i == 0) { b[m] = "l2r2"; l[m++] = T(STR_HINT_EVENTS); }
+	}
+	hint_bar(b, l, m);
+}
 static void hint_bar(const char *const *buttons, const char *const *labels, int n)
 {
 	int total = 0, gap = ui_w() / 24, sum = 0;
@@ -3772,7 +3785,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 // One drive's page under the tabs: title (Redump's name) with the Redump icon | drive column;
 // the destination; ripping: a wide bar, percentage and time, what it does, the latest events;
 // not ripping: what is known about the disc here, how the last rip went, the destination to pick.
-static void draw_page(int c, int y)
+static int draw_page_body(int c, int y)
 {
 	const int ytop = y;
 	Card &k = g_cards[c];
@@ -3865,23 +3878,13 @@ static void draw_page(int c, int y)
 			ui_text_fit(UI_SMALL, L, y, g_readerrs ? 0xF0C060 : 0xC8D0E0, cnt, R - L);
 		}
 		y += ls * 3 / 2;
-		// the events, newest at the bottom, as many as fit above the general row; L2/R2 scroll,
-		// arrows at the right edge say there is more
+		// the events, newest first; a longer list makes the page scroll (L2/R2)
 		if (g_nev > 0) {
 			y += section_head(L, R, y, T(STR_EVENTS));
-			int rh = ls + ls / 4, bottom = hint_y() - lb * 3 / 2 - ls / 4, rows = (bottom - y) / rh;   // down to the general row
-			if (rows < 1) rows = 1;
-			int n = g_nev, maxs = n > rows ? n - rows : 0;
-			if (k.ev_scroll > maxs) k.ev_scroll = maxs;
-			if (k.ev_scroll < 0) k.ev_scroll = 0;
-			int last = n - k.ev_scroll, first = last - rows < 0 ? 0 : last - rows;
-			int y0 = y;
-			for (int i = first; i < last; i++) { ui_text_fit(UI_SMALL, L, y, g_ev[i].col, g_ev[i].text, R - L - ui_w() / 30); y += rh; }
-			int asz = ls * 2 / 3;
-			if (first > 0) ui_icon("up", R - asz, y0 + (rh - asz) / 2, asz, 0xC8D0E0);              // older above
-			if (last < n) ui_icon("down", R - asz, y0 + (rows - 1) * rh + (rh - asz) / 2, asz, 0xC8D0E0);   // newer below
+			int rh = ls + ls / 4;
+			for (int i = g_nev - 1; i >= 0; i--) { ui_text_fit(UI_SMALL, L, y, g_ev[i].col, g_ev[i].text, R - L); y += rh; }
 		}
-		return;
+		return y;
 	}
 	// not ripping: the disc here, then where it goes; headed groups with room between them, below
 	// the right column (drive, model, disc)
@@ -3934,7 +3937,26 @@ static void draw_page(int c, int y)
 	y = y + lb > ydest ? y + lb : ydest;
 	y += section_head(L, R, y, T(STR_SEC_DEST));
 	y = dest_block(y, 1, 0xC8D0E0) + ls;
+	return y;
+}
 
+// The page between the tabs and the general row. Taller than that, it scrolls with L2/R2:
+// what is outside is not drawn, and arrows at the right edge, at the top and the bottom, say there
+// is more, as in the settings.
+static void draw_page(int c, int y)
+{
+	Card &k = g_cards[c];
+	int ls = ui_line(UI_SMALL), bottom = hint_y() - ui_line(UI_BODY) * 3 / 2 - ls / 4;
+	if (k.pg_scroll > k.pg_max) k.pg_scroll = k.pg_max;
+	if (k.pg_scroll < 0) k.pg_scroll = 0;
+	ui_clip(y, bottom);
+	int end = draw_page_body(c, y - k.pg_scroll) + k.pg_scroll;
+	ui_clip(0, 0);
+	k.pg_max = end - ls > bottom ? end - ls - bottom : 0;   // the last line's spacing need not show
+	if (k.pg_scroll > k.pg_max) k.pg_scroll = k.pg_max;
+	int asz = ls * 2 / 3, ax = ui_w() * 7 / 8 + ui_w() / 40;
+	if (k.pg_scroll > 0) ui_icon("up", ax, y, asz, 0xC8D0E0);
+	if (k.pg_scroll < k.pg_max) ui_icon("down", ax, bottom - asz, asz, 0xC8D0E0);
 }
 
 static void rip_job_start(int c, int fresh);
@@ -3971,8 +3993,7 @@ static void home_draw(const int *list, int nc, int sel)
 	// the bottom row: what the buttons do on the focused card
 	int rereads = 0;   // the rip is in its re-reads: square leaves them
 	if (f.job) { OnCard o(sel); rereads = (g_phase == 1 || g_phase == 2) && !g_skip && !g_abort; }
-	int evs;   // events to scroll with L2/R2
-	{ OnCard o(sel); evs = f.job && g_nev > 3; }
+	int evs = f.pg_max > 0;   // the page scrolls with L2/R2
 	if (f.job && rereads) {
 		const char *b[] = {"square", "l2r2", "circle"};
 		const char *l[] = {T(STR_HINT_SKIP), T(STR_HINT_EVENTS), T(STR_HINT_CANCEL_RIP)};
@@ -3988,23 +4009,23 @@ static void home_draw(const int *list, int nc, int sel)
 	} else if (st == DISC_READY && f.prev_rip && f.repair_n) {   // ripped here with known errors: square repairs
 		const char *b[] = {"cross", "square", "triangle", "select"};
 		const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_REPAIR), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
-		hint_bar(b, l, 4);
+		hint_bar_pg(b, l, 4, evs);
 	} else if (st == DISC_READY && f.prev_rip && f.rd_state < 0) {   // ripped here, not checked: square checks the file
 		const char *b[] = {"cross", "square", "triangle", "select"};
 		const char *l[] = {T(STR_HINT_NEWRIP), T(STR_HINT_CHECK), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
-		hint_bar(b, l, 4);
+		hint_bar_pg(b, l, 4, evs);
 	} else if (st == DISC_READY) {
 		const char *b[] = {"cross", "triangle", "select"};
 		const char *l[] = {T(f.prev_rip ? STR_HINT_NEWRIP : STR_HINT_RIP), T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
-		hint_bar(b, l, 3);
+		hint_bar_pg(b, l, 3, evs);
 	} else if (st == DISC_ERROR) {
 		const char *b[] = {"triangle", "select"};
 		const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_DRIVE)};
-		hint_bar(b, l, 2);
+		hint_bar_pg(b, l, 2, evs);
 	} else {
 		const char *b[] = {"select"};
 		const char *l[] = {T(STR_HINT_DRIVE)};
-		hint_bar(b, l, 1);
+		hint_bar_pg(b, l, 1, evs);
 	}
 }
 
@@ -4086,9 +4107,10 @@ static int home_screen()
 		if ((p & B_DOWN) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }
 		if ((p & B_R1) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }   // the next / previous tab
 		if ((p & B_L1) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }
-		if (f.job && (p & (B_L2 | B_R2))) {   // a ripping tab: L2/R2 scroll its events (older / newer)
-			if (p & B_L2) f.ev_scroll++;
-			if ((p & B_R2) && f.ev_scroll > 0) f.ev_scroll--;
+		if (f.pg_max > 0 && (p & (B_L2 | B_R2))) {   // a page taller than the screen: L2/R2 scroll it (up / down)
+			int step = (ui_line(UI_SMALL) * 5 / 4) * 4;   // four event rows
+			if (p & B_L2) f.pg_scroll -= step;
+			if (p & B_R2) f.pg_scroll += step;
 			g_redraw = 2;
 			p &= ~(B_L2 | B_R2);
 		}
@@ -4748,7 +4770,7 @@ static void job_reset(int c)
 	g_done = 0; g_total = 0; g_readpos = 0; g_phase = 0;
 	g_pass2_total = 0; g_pass2_done = 0; g_rr_max = 0; g_rr_try = 0;
 	g_readerrs = 0; g_recovered = 0; g_badsect = 0;
-	g_cards[c].ev_scroll = 0;
+	g_cards[c].pg_scroll = 0;
 	g_cards[c].eta_t0 = 0;
 }
 

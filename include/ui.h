@@ -23,6 +23,9 @@ int ui_hint(int x, int y, const char *button, const char *label);
 int ui_hint_width(const char *button, const char *label);
 void ui_icon(const char *name, int x, int y, int size, uint32_t rgb);   // "disc", "usb", "medal", "warn": own drawings
 extern int ui_guides;
+// Vertical clip: texts and icons not wholly inside [top, bottom) are skipped, rectangles cut.
+// ui_clip(0, 0) turns it off. (A page that scrolls draws through it.)
+void ui_clip(int top, int bottom);
 // UI tests (host build): called for every text, rectangle and icon drawn; null on the PS3.
 enum { UI_TRACE_TEXT, UI_TRACE_RECT, UI_TRACE_ICON };
 typedef void (*UiTrace)(int kind, int x, int y, int w, int h, const char *text, int extra);   // extra: missing glyphs / alpha

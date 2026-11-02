@@ -55,10 +55,19 @@ void ui_background()
 	}
 }
 
+static int clip_top = 0, clip_bot = 0;   // 0, 0: no clip
+void ui_clip(int top, int bottom) { clip_top = top; clip_bot = bottom; }
+static int clipped(int y, int h) { return clip_bot && (y < clip_top || y + h > clip_bot); }
+
 UiTrace ui_trace = 0;   // UI tests on the host record what is drawn; unset on the PS3
 
 void ui_rect(int x, int y, int w, int h, uint32_t argb)
 {
+	if (clip_bot) {   // cut to the clip
+		if (y < clip_top) { h -= clip_top - y; y = clip_top; }
+		if (y + h > clip_bot) h = clip_bot - y;
+		if (h <= 0) return;
+	}
 	if (ui_trace) ui_trace(UI_TRACE_RECT, x, y, w, h, 0, (int)(argb >> 24));
 	uint32_t a = argb >> 24;
 	for (int j = y < 0 ? 0 : y; j < y + h && j < (int)display_height; j++) {
@@ -217,6 +226,7 @@ static bool in_warn(float u, float v)
 }
 void ui_icon(const char *name, int x0, int y0, int size, uint32_t rgb)
 {
+	if (clipped(y0, size)) return;
 	if (ui_trace) ui_trace(UI_TRACE_ICON, x0, y0, size, size, name, 0);
 	int kind = !strcmp(name, "usb") ? 1 : !strcmp(name, "medal") ? 2 : !strcmp(name, "warn") ? 3 : !strcmp(name, "question") ? 4 : !strcmp(name, "drive") ? 5 : !strcmp(name, "up") ? 6 : !strcmp(name, "down") ? 7 :
 	           !strcmp(name, "left") ? 8 : !strcmp(name, "right") ? 9 : 0;
@@ -299,6 +309,7 @@ int ui_text(UiFont fi, int x, int y, uint32_t rgb, const char *s, UiAlign align)
 	int w = ui_text_width(fi, s);
 	if (align == UI_CENTER) x -= w / 2; else if (align == UI_RIGHT) x -= w;
 	const Font *f = fonts[fi];
+	if (clipped(y, f->height)) return w;
 	if (ui_trace) {   // the text's box, and how many of its characters the font does not have
 		int missing = 0;
 		for (const char *q = s; *q; ) {
