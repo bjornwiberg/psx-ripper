@@ -119,6 +119,7 @@ struct Card {
 	int rd_state;                     // the image here vs Redump: 1 verified, 0 no match, -1 not known (not ripped)
 	uint64_t eta_t0, eta_tw; uint32_t eta_pw; double eta_rate;   // time left of the running rip
 	int eta_phase;
+	int ev_scroll;                    // events: how many rows up from the newest (L2/R2 while ripping)
 };
 static Card g_cards[NCARDS];
 
@@ -213,7 +214,7 @@ static void cfg_save()
 #define SECT_Q (RAW_SIZE + SUBQ_SIZE)
 #define MAX_HARD 8192
 #define MAX_SUSPECT 512
-#define NEV 5
+#define NEV 20   // events kept per rip (the page shows what fits, L2/R2 scroll)
 enum { ST_HOME, ST_RIPPING };
 struct Track {
 	int num;
@@ -3839,10 +3840,21 @@ static void draw_page(int c, int y)
 			ui_text_fit(UI_BODY, L, y, g_readerrs ? 0xF0C060 : 0xC8D0E0, cnt, R - L);
 		}
 		y += lb + ls;
-		// the latest events, newest at the bottom
+		// the events, newest at the bottom, as many as fit above the general row; L2/R2 scroll,
+		// arrows at the right edge say there is more
 		if (g_nev > 0) {
 			y += section_head(L, R, y, T(STR_EVENTS));
-			for (int i = 0; i < g_nev; i++) { ui_text_fit(UI_SMALL, L, y, g_ev[i].col, g_ev[i].text, R - L); y += ls + ls / 4; }
+			int rh = ls + ls / 4, bottom = hint_y() - lb * 2, rows = (bottom - y) / rh;
+			if (rows < 1) rows = 1;
+			int n = g_nev, maxs = n > rows ? n - rows : 0;
+			if (k.ev_scroll > maxs) k.ev_scroll = maxs;
+			if (k.ev_scroll < 0) k.ev_scroll = 0;
+			int last = n - k.ev_scroll, first = last - rows < 0 ? 0 : last - rows;
+			int y0 = y;
+			for (int i = first; i < last; i++) { ui_text_fit(UI_SMALL, L, y, g_ev[i].col, g_ev[i].text, R - L - ui_w() / 30); y += rh; }
+			int asz = ls * 2 / 3;
+			if (first > 0) ui_icon("up", R - asz, y0 + (rh - asz) / 2, asz, 0xC8D0E0);              // older above
+			if (last < n) ui_icon("down", R - asz, y0 + (rows - 1) * rh + (rh - asz) / 2, asz, 0xC8D0E0);   // newer below
 		}
 		return;
 	}
@@ -4036,6 +4048,12 @@ static int home_screen()
 		if ((p & B_DOWN) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }
 		if ((p & B_R1) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }   // the next / previous tab
 		if ((p & B_L1) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }
+		if (f.job && (p & (B_L2 | B_R2))) {   // a ripping tab: L2/R2 scroll its events (older / newer)
+			if (p & B_L2) f.ev_scroll++;
+			if ((p & B_R2) && f.ev_scroll > 0) f.ev_scroll--;
+			g_redraw = 2;
+			p &= ~(B_L2 | B_R2);
+		}
 		if ((p & B_R2) && nc > 1) { sel = list[nc - 1]; g_redraw = 2; }   // the last / first tab
 		if ((p & B_L2) && nc > 1) { sel = list[0]; g_redraw = 2; }
 		if (f.job) {   // a ripping card: only cancel, and the general settings (they apply to the next rips)
