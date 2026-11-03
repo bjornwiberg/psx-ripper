@@ -312,7 +312,7 @@ static const Tool k_tools[] = {
 	{"list_settings", T_LIST, true, "Every setting with its key, labels (en, sv), value, allowed values and scope; secret values are left out.", {}},
 	{"set_setting", T_SET, false, "Changes a setting as its screen would (same checks and side effects) and returns the new value.", {
 		{"key", A_KEY, true, "The setting's key, as list_settings gives it"},
-		{"value", A_VALUE, true, "The new value, one of the setting's allowed values (any text for free-text settings)"},
+		{"value", A_VALUE, true, "The new value, one of the setting's allowed values (any text for free-text settings); numbers and true/false are taken as their text (true = 1)"},
 		{"drive", A_DRIVE, false, "The drive for a per-drive setting; leave out for the standard settings"}}},
 	{"go_screen", T_SCREEN, false, "Opens one of the app's screens and returns the screen state.", {
 		{"screen", A_SCREEN, true, "The screen to open"},
@@ -358,7 +358,7 @@ static void w_tools_list(W *w)
 			case A_SCREEN: w_str(w, "\"type\":\"string\","); w_enum(w, k_screens); break;
 			case A_BUTTON: w_str(w, "\"type\":\"string\","); w_enum(w, k_buttons); break;
 			case A_KEY: w_str(w, "\"type\":\"string\",\"minLength\":1"); break;
-			case A_VALUE: w_str(w, "\"type\":\"string\""); break;
+			case A_VALUE: w_str(w, "\"type\":[\"string\",\"number\",\"boolean\"]"); break;
 			case A_FROM: w_str(w, "\"type\":\"integer\",\"minimum\":0"); break;
 			case A_MAX: w_fmt(w, "\"type\":\"integer\",\"minimum\":1,\"maximum\":%d", MCP_MAX_LOG_LINES); break;
 			}
@@ -461,6 +461,19 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			a->num[i] = n;
 			continue;
 		}
+		if (g.type == A_VALUE && *v != '"') {
+			// agents often send 4 or true for "4" or "1": the config's text form (on/off keys are 1/0);
+			// a number's text goes on as it was sent, the app's own checks decide
+			const char *end = j_skip(v, e);
+			if (*v == 't') snprintf(a->str[i], MAX_VALUE, "1");
+			else if (*v == 'f') snprintf(a->str[i], MAX_VALUE, "0");
+			else if (*v == '-' || (*v >= '0' && *v <= '9')) {
+				if (end - v >= MAX_VALUE) return set_err(er, -32602, g.name, "too long");
+				memcpy(a->str[i], v, end - v);
+				a->str[i][end - v] = 0;
+			} else return set_err(er, -32602, g.name, "must be a string, a number or true/false");
+			continue;
+		}
 		if (*v != '"') return set_err(er, -32602, g.name, "must be a string");
 		int len = j_decode(v, e, a->str[i], g.type == A_VALUE ? MAX_VALUE : MAX_KEY);
 		if (len < 0) return set_err(er, -32602, g.name, "too long");
@@ -506,7 +519,9 @@ static int tools_call(const char *params, const char *e, W *w, Err *er)
 	const char *nm = j_get(params, e, "name");
 	if (!nm || *nm != '"') return set_err(er, -32602, "name", "the tool's name (a string) is required");
 	char name[MAX_KEY];
-	if (j_decode(nm, e, name, sizeof(name)) < 0) return set_err(er, -32602, "name", "unknown tool");
+	int nlen = j_decode(nm, e, name, sizeof(name));
+	// a NUL inside (\u0000) would cut the name short: such a name is no tool's
+	if (nlen < 0 || (int)strlen(name) != nlen) return set_err(er, -32602, "name", "unknown tool");
 	const Tool *t = NULL;
 	for (int i = 0; i < k_ntools; i++) if (!strcmp(k_tools[i].name, name)) t = &k_tools[i];
 	if (!t) return set_err(er, -32602, "name", "unknown tool %s", name);
@@ -622,7 +637,8 @@ int mcp_handle(const char *body, int len, char *out, int n)
 	}
 	if (*mv != '"') { set_err(&er, -32600, NULL, "Invalid request: the method must be a string"); return finish_error(out, n, id, &er, 400); }
 	char method[MAX_KEY];
-	if (j_decode(mv, e, method, sizeof(method)) < 0) method[0] = 0;
+	int mlen = j_decode(mv, e, method, sizeof(method));
+	if (mlen < 0 || (int)strlen(method) != mlen) method[0] = 0;   // too long, or a NUL inside: no method's name
 	const char *params = j_get(p, e, "params");
 
 	W w = {out, n, 0, false};

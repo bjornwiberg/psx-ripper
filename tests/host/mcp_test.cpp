@@ -140,6 +140,7 @@ static void tools_list(int &bad)
 	CHECK(count(g_out, "\"additionalProperties\":false") == k_ntools);
 	// arguments are described
 	CHECK(has("\"required\":[\"key\",\"value\"]"));
+	CHECK(has("\"value\":{\"type\":[\"string\",\"number\",\"boolean\"]"));
 	CHECK(has("\"enum\":[\"cross\",\"circle\",\"triangle\",\"square\",\"up\",\"down\",\"left\",\"right\",\"start\",\"select\",\"l1\",\"r1\",\"l2\",\"r2\"]"));
 	CHECK(has("\"enum\":[\"home\",\"settings\",\"drive_settings\",\"filename\",\"webhooks\",\"about\",\"audit_log\",\"remote_control\"]"));
 	CHECK(has("\"max_lines\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":500"));
@@ -179,6 +180,12 @@ static void routing(int &bad)
 	CHECK(text_ok(tool("read_log", NULL), esc)); CHECK(g_call == "log|-1|100");
 	CHECK(text_ok(tool("read_log", "{\"from_line\":0,\"max_lines\":500}"), esc)); CHECK(g_call == "log|0|500");
 	CHECK(text_ok(tool("read_log", "{\"from_line\":123456,\"max_lines\":1}"), esc)); CHECK(g_call == "log|123456|1");
+	// a number or true/false as the value: its text form (on/off settings are 1/0)
+	CHECK(text_ok(tool("set_setting", "{\"key\":\"speed\",\"value\":4}"), esc)); CHECK(g_call == "set|speed|4|(null)");
+	CHECK(text_ok(tool("set_setting", "{\"key\":\"eject\",\"value\":true}"), esc)); CHECK(g_call == "set|eject|1|(null)");
+	CHECK(text_ok(tool("set_setting", "{\"key\":\"eject\",\"value\":false,\"drive\":\"usb0\"}"), esc)); CHECK(g_call == "set|eject|0|usb0");
+	CHECK(text_ok(tool("set_setting", "{\"key\":\"speed\",\"value\":-1}"), esc)); CHECK(g_call == "set|speed|-1|(null)");
+	CHECK(text_ok(tool("set_setting", "{\"key\":\"speed\",\"value\":1.5}"), esc)); CHECK(g_call == "set|speed|1.5|(null)");
 	// escapes in arguments arrive decoded as UTF-8
 	CHECK(text_ok(tool("set_setting", "{\"key\":\"name_pattern\",\"value\":\"a\\\"b\\\\c\\/\\u00e9\\ud83d\\ude00\\t\"}"), esc));
 	CHECK(g_call == "set|name_pattern|a\"b\\c/\xc3\xa9\xf0\x9f\x98\x80\t|(null)");
@@ -218,7 +225,9 @@ static void bad_arguments(int &bad)
 	CHECK(param_err(tool("set_setting", "{\"value\":\"1\"}"), "key"));
 	CHECK(param_err(tool("set_setting", "{\"key\":\"\",\"value\":\"1\"}"), "key"));
 	CHECK(param_err(tool("set_setting", "{\"key\":\"speed\"}"), "value"));
-	CHECK(param_err(tool("set_setting", "{\"key\":\"speed\",\"value\":4}"), "value"));
+	CHECK(param_err(tool("set_setting", "{\"key\":\"speed\",\"value\":null}"), "value"));
+	CHECK(param_err(tool("set_setting", "{\"key\":\"speed\",\"value\":[4]}"), "value"));
+	CHECK(param_err(tool("set_setting", "{\"key\":\"speed\",\"value\":{\"v\":4}}"), "value"));
 	CHECK(param_err(tool("set_setting", "{\"key\":\"speed\",\"value\":\"4\\nwebhook=x\"}"), "value"));
 	CHECK(param_err(tool("set_setting", "{\"key\":\"sp\\reed\",\"value\":\"4\"}"), "key"));
 	CHECK(param_err(tool("set_setting", "{\"key\":\"speed\",\"value\":\"a\\u0000b\"}"), "value"));
@@ -234,6 +243,7 @@ static void bad_arguments(int &bad)
 	CHECK(param_err(tool("get_state", "[]"), "arguments"));
 	CHECK(param_err(tool("get_state", "\"x\""), "arguments"));
 	CHECK(param_err(tool("format_disc", "{}"), "name"));
+	CHECK(param_err(tool("get_state\\u0000junk", "{}"), "name"));   // a NUL does not cut the name short
 	CHECK(param_err(call("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{}}"), "name"));
 	CHECK(param_err(call("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":5}}"), "name"));
 	CHECK(param_err(call("{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\"}"), "params"));
@@ -323,6 +333,8 @@ static void protocol_errors(int &bad)
 	// well-formed UTF-8 is fine (and comes back in the message)
 	error_shape(bad, call("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"r\xc3\xa4kna \xf0\x9f\x98\x80\"}"), 200, -32601, "1");
 	CHECK(has("r\xc3\xa4kna \xf0\x9f\x98\x80"));
+	// a NUL inside the method name does not cut it short
+	error_shape(bad, call("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\\u0000junk\"}"), 200, -32601, "1");
 	// an embedded NUL byte
 	CHECK(mcp_handle("{\"jsonrpc\":\"2.0\",\0\"id\":1,\"method\":\"ping\"}", 41, g_out, sizeof(g_out)) == 400);
 	CHECK(has("-32700"));
