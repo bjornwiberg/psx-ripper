@@ -9,6 +9,7 @@
 #include <sys/thread.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <netinet/in.h>
 #include <net/netctl.h>
 
@@ -23,8 +24,14 @@
 
 #define MCP_MAX_RESPONSE (512 * 1024)   // a screenshot (base64) is the largest answer
 
+#ifndef REMOTE_READ_SECONDS
+#define REMOTE_READ_SECONDS 10   // a request (headers and body) must have come by then
+#endif
+#define REMOTE_MAX_CLIENTS 8     // connections served at once; more get 503
+
 static RemoteHooks g_hooks;
 static volatile int g_paths = 0, g_listen = -1, g_running = 0;
+static volatile int g_clients = 0;    // client threads running
 static volatile int g_mcp_busy = 0;   // one MCP request at a time (two clients: one waits)
 
 int remote_ip(char *out, int n)
@@ -81,25 +88,63 @@ static int send_all(int s, const void *p, int n)
 
 static int send_str(int s, const char *t) { return send_all(s, t, strlen(t)); }
 
-// The Content-Length of a request (its header name in any case, as HTTP allows), 0 when it has
-// none; a value too large to be real comes back as INT_MAX.
+// The value of header `name` (given with its colon; any case, as HTTP allows) in the header block
+// up to hend, without the spaces before it; NULL when the request has no such header.
+static const char *header(const char *req, const char *hend, const char *name)
+{
+	size_t nl = strlen(name);
+	for (const char *l = strstr(req, "\r\n"); l && l + 2 < hend; l = strstr(l + 2, "\r\n")) {
+		if (strncasecmp(l + 2, name, nl)) continue;
+		const char *v = l + 2 + nl;
+		while (*v == ' ' || *v == '\t') v++;
+		return v;
+	}
+	return NULL;
+}
+
+// The Content-Length of a request, 0 when it has none; a value too large to be real comes back
+// as INT_MAX.
 static int content_length(const char *req, const char *hend)
 {
-	for (const char *l = strstr(req, "\r\n"); l && l + 2 < hend; l = strstr(l + 2, "\r\n")) {
-		if (strncasecmp(l + 2, "Content-Length:", 15)) continue;
-		const char *v = l + 17;
-		while (*v == ' ' || *v == '\t') v++;
-		long x = 0;
-		for (; *v >= '0' && *v <= '9'; v++) if ((x = x * 10 + (*v - '0')) > 0x7FFFFFFF / 10) return 0x7FFFFFFF;
-		return (int)x;
+	const char *v = header(req, hend, "Content-Length:");
+	long x = 0;
+	for (; v && *v >= '0' && *v <= '9'; v++) if ((x = x * 10 + (*v - '0')) > 0x7FFFFFFF / 10) return 0x7FFFFFFF;
+	return (int)x;
+}
+
+// A browser sends Origin with a request a page makes: only the console's own pages may reach
+// /mcp (a page elsewhere could otherwise use the browser to control the app). No Origin: a
+// program such as an MCP client, allowed.
+static int origin_ok(const char *req, const char *hend)
+{
+	const char *v = header(req, hend, "Origin:");
+	if (!v) return 1;
+	char o[96], ip[20], me[64];
+	size_t k = strcspn(v, " \t\r\n");
+	if (k >= sizeof(o)) return 0;
+	memcpy(o, v, k); o[k] = 0;
+	remote_ip(ip, sizeof(ip));
+	const char *hosts[] = {ip, "localhost", "127.0.0.1"};   // the last two: the simulator on a computer
+	for (int i = 0; i < 3; i++) {
+		snprintf(me, sizeof(me), "http://%s:%d", hosts[i], REMOTE_PORT);
+		if (!strcasecmp(o, me)) return 1;
 	}
 	return 0;
+}
+
+// The request line is "<method> /mcp" (or "/mcp?..."): MCP's path, whatever the method.
+static int mcp_path(const char *req)
+{
+	const char *p = strchr(req, ' ');
+	return p && !strncmp(p + 1, "/mcp", 4) && (p[5] == ' ' || p[5] == '?');
 }
 
 static const char *http_reason(int st)
 {
 	return st == 200 ? "OK" : st == 202 ? "Accepted" : st == 403 ? "Forbidden" : st == 413 ? "Payload Too Large" : "Bad Request";
 }
+
+static void send_rpc_error(int s, int status, int code, const char *msg);
 
 static void send_json(int s, int status, const char *js)
 {
@@ -111,29 +156,38 @@ static void send_json(int s, int status, const char *js)
 
 // POST /mcp: the body (at most MCP_MAX_REQUEST bytes, by its Content-Length; part of it may have
 // come with the headers) through mcp_handle, its answer with the status mcp_handle gives.
-static void mcp_request(int s, const char *got, int have, int want)
+static void send_rpc_error(int s, int status, int code, const char *msg)
 {
-	if (!(g_paths & REMOTE_MCP)) {   // the agent learns why, and what to do about it
-		send_json(s, 403, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32000,\"message\":"
-		          "\"MCP is off on the console. Turn it on in PSX RiPPER: Settings → Remote control → MCP.\"}}");
-		return;
-	}
+	char js[256];
+	snprintf(js, sizeof(js), "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":%d,\"message\":\"%s\"}}", code, msg);
+	send_json(s, status, js);
+}
+
+static void mcp_request(int s, const char *got, int have, int want, time_t deadline)
+{
 	if (want > MCP_MAX_REQUEST) {   // refused before reading it
-		char js[160];
-		snprintf(js, sizeof(js), "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large (at most %d bytes)\"}}", MCP_MAX_REQUEST);
-		send_json(s, 413, js);
+		char m[64];
+		snprintf(m, sizeof(m), "Request too large (at most %d bytes)", MCP_MAX_REQUEST);
+		send_rpc_error(s, 413, -32600, m);
 		return;
 	}
-	char *body = (char *)malloc(want + 1), *out = (char *)malloc(MCP_MAX_RESPONSE);
-	if (body && out) {
-		int n = have < want ? have : want;
-		memcpy(body, got, n);
-		while (n < want) {
-			int r = recv(s, body + n, want - n, 0);
-			if (r <= 0) break;   // the client stopped sending: what came is parsed (and refused)
-			n += r;
-		}
-		body[n] = 0;
+	char *body = (char *)malloc(want + 1);
+	if (!body) return;
+	int n = have < want ? have : want;
+	memcpy(body, got, n);
+	while (n < want && time(NULL) < deadline) {
+		int r = recv(s, body + n, want - n, 0);
+		if (r <= 0) break;
+		n += r;
+	}
+	if (n < want) {   // the client stopped sending, or too slowly: never handled
+		free(body);
+		send_rpc_error(s, 400, -32700, "Parse error: the request ended before its Content-Length");
+		return;
+	}
+	body[n] = 0;
+	char *out = (char *)malloc(MCP_MAX_RESPONSE);   // only now: a slow client never holds it
+	if (out) {
 		while (__sync_lock_test_and_set(&g_mcp_busy, 1)) usleep(5 * 1000);
 		int st = mcp_handle(body, n, out, MCP_MAX_RESPONSE);
 		__sync_lock_release(&g_mcp_busy);
@@ -147,30 +201,37 @@ static void mcp_request(int s, const char *got, int have, int want)
 static void client_thread(void *arg)
 {
 	int s = (int)(long)arg;
-	// a client that stops sending must not hold the thread: give up after a while
-	struct timeval rt = {10, 0};
+	// a client that stops sending, or sends a byte now and then, must not hold the thread: each
+	// recv waits at most REMOTE_READ_SECONDS, and the whole request must have come by then
+	struct timeval rt = {REMOTE_READ_SECONDS, 0};
 	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &rt, sizeof(rt));
+	const time_t deadline = time(NULL) + REMOTE_READ_SECONDS;
 	char req[2048];
 	int n = 0;
 	// read the headers and, for a POST, the (small) body; /mcp reads its own (larger) body
 	const char *hend = NULL;
-	for (;;) {
+	while (time(NULL) < deadline) {
 		int r = recv(s, req + n, sizeof(req) - 1 - n, 0);
 		if (r <= 0) break;
 		n += r; req[n] = 0;
 		char *e = strstr(req, "\r\n\r\n");
 		if (!e) { if (n >= (int)sizeof(req) - 1) break; continue; }
 		hend = e + 4;
-		if (!strncmp(req, "POST /mcp", 9) || (int)(req + n - hend) >= content_length(req, hend) || n >= (int)sizeof(req) - 1) break;
+		if (mcp_path(req) || (int)(req + n - hend) >= content_length(req, hend) || n >= (int)sizeof(req) - 1) break;
 	}
 	req[n] = 0;
 	const char *body = hend ? hend : "";
 	const int view = g_paths & REMOTE_VIEW;
 	const char *not_found = "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 
-	if (!strncmp(req, "POST /mcp", 9) && (req[9] == ' ' || req[9] == '?')) {
-		if (hend) mcp_request(s, hend, req + n - hend, content_length(req, hend));
-		else send_str(s, "HTTP/1.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n");   // headers over 2 KB
+	if (mcp_path(req)) {
+		if (!(g_paths & REMOTE_MCP))   // the agent learns why, and what to do about it
+			send_rpc_error(s, 403, -32000, "MCP is off on the console. Turn it on in PSX RiPPER: Settings → Remote control → MCP.");
+		else if (!hend) send_rpc_error(s, 400, -32700, "Parse error: incomplete request headers (or over 2 KB)");
+		else if (!origin_ok(req, hend)) send_rpc_error(s, 403, -32000, "Origin not allowed: only the console's own pages may use MCP");
+		else if (strncmp(req, "POST ", 5))   // no event stream (GET): only POST
+			send_str(s, "HTTP/1.0 405 Method Not Allowed\r\nAllow: POST\r\nContent-Length: 0\r\n\r\n");
+		else mcp_request(s, hend, req + n - hend, content_length(req, hend), deadline);
 	} else if (!strncmp(req, "GET /status.json", 16) && !(g_paths & REMOTE_STATUS)) {
 		send_str(s, not_found);
 	} else if (!view && strncmp(req, "GET /status.json", 16)) {   // the remote view's paths, and anything else
@@ -285,12 +346,14 @@ static void client_thread(void *arg)
 			"</script></html>\n");
 	}
 	close(s);
+	__sync_fetch_and_sub(&g_clients, 1);
 	sysThreadExit(0);
 }
 
-static void server_thread(void *arg)
+static int listen_socket()
 {
 	int ls = socket(AF_INET, SOCK_STREAM, 0);
+	if (ls < 0) return -1;
 	int one = 1;
 	setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
 	struct sockaddr_in sa;
@@ -298,21 +361,43 @@ static void server_thread(void *arg)
 	sa.sin_family = AF_INET;
 	sa.sin_port = htons(REMOTE_PORT);
 	sa.sin_addr.s_addr = htonl(INADDR_ANY);
-	if (ls < 0 || bind(ls, (struct sockaddr *)&sa, sizeof(sa)) || listen(ls, 4)) {
-		if (ls >= 0) close(ls);
+	if (bind(ls, (struct sockaddr *)&sa, sizeof(sa)) || listen(ls, 4)) { close(ls); return -1; }
+	return ls;
+}
+
+// Listens while any path is on. remote_set(0) takes the listening socket (g_listen) and closes
+// it; switched on again before this thread noticed, the thread listens anew instead of ending.
+static void server_thread(void *arg)
+{
+	for (;;) {
+		while (g_paths) {
+			int ls = -1;
+			for (int i = 0; i < 20 && g_paths && (ls = listen_socket()) < 0; i++) usleep(100 * 1000);   // the old socket may linger a moment
+			if (ls < 0) break;
+			g_listen = ls;
+			while (g_paths && g_listen == ls) {
+				int s = accept(ls, NULL, NULL);
+				if (s < 0) { if (!g_paths || g_listen != ls) break; usleep(100 * 1000); continue; }
+				if (__sync_fetch_and_add(&g_clients, 1) >= REMOTE_MAX_CLIENTS) {   // full: try again later
+					__sync_fetch_and_sub(&g_clients, 1);
+					send_str(s, "HTTP/1.0 503 Service Unavailable\r\nRetry-After: 5\r\nContent-Length: 0\r\n\r\n");
+					close(s);
+					continue;
+				}
+				sys_ppu_thread_t t;
+				// low priority (higher number): never compete with the rip threads
+				if (sysThreadCreate(&t, client_thread, (void *)(long)s, 2000, 0x8000, 0, (char *)"psxremote")) {
+					close(s);
+					__sync_fetch_and_sub(&g_clients, 1);
+				}
+			}
+			if (__sync_bool_compare_and_swap(&g_listen, ls, -1)) close(ls);   // not taken by remote_set
+		}
 		g_running = 0;
-		sysThreadExit(0);
+		__sync_synchronize();
+		// switched on while this thread was ending: it goes on (remote_set saw it still running)
+		if (!g_paths || !__sync_bool_compare_and_swap(&g_running, 0, 1)) break;
 	}
-	g_listen = ls;
-	while (g_paths) {
-		int s = accept(ls, NULL, NULL);
-		if (s < 0) { if (!g_paths) break; usleep(100 * 1000); continue; }
-		sys_ppu_thread_t t;
-		// low priority (higher number): never compete with the rip threads
-		if (sysThreadCreate(&t, client_thread, (void *)(long)s, 2000, 0x8000, 0, (char *)"psxremote")) close(s);
-	}
-	g_listen = -1;
-	g_running = 0;
 	sysThreadExit(0);
 }
 
@@ -324,15 +409,14 @@ void remote_init(const RemoteHooks *hooks)
 
 void remote_set(int paths)
 {
-	int was = g_paths;
 	g_paths = paths;   // a path whose switch went off stops answering at once
-	if (paths && !g_running) {
-		g_running = 1;
+	__sync_synchronize();
+	if (paths && __sync_bool_compare_and_swap(&g_running, 0, 1)) {
 		sys_ppu_thread_t t;
 		if (sysThreadCreate(&t, server_thread, NULL, 2000, 0x4000, 0, (char *)"psxremoted")) g_running = 0;
-	} else if (!paths && was) {
+	} else if (!paths) {
 		// stream clients stop after their current frame
-		int ls = g_listen;
+		int ls = __sync_lock_test_and_set(&g_listen, -1);
 		if (ls >= 0) { shutdown(ls, SHUT_RDWR); close(ls); }   // wakes accept()
 	}
 }
