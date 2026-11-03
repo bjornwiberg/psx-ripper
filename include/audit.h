@@ -75,6 +75,9 @@ void audit_sector(uint32_t job, const char *file, uint32_t lba, const uint8_t *o
 void audit_setting(AuditSrc src, const char *key, const char *before, const char *after);
 // Same for a secret setting: `before`/`after` are only labels (set / cleared); the row is never reversible.
 void audit_setting_private(AuditSrc src, const char *key, const char *before, const char *after);
+// The value of each setting as the log knows it (its newest row, undos counted): keys up to 47
+// characters, values as logged (a secret: set / cleared). Returns how many.
+int audit_setting_values(char (*keys)[48], char (*vals)[192], int max);
 
 // Queries; each returns how many it wrote into out.
 // One entry per disc that has rows, newest activity first.

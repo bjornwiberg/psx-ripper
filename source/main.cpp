@@ -310,12 +310,30 @@ static void cfg_text(char *txt, size_t cap)
 	put("audit_mb=%d\n", g_audit_mb);
 }
 
+// At start: the file may have been edited (over FTP) while the app was off. Every setting whose
+// value differs from the last one the audit log knows gets an `app` row, so an undo compares with
+// the real value. A setting the log never saw has nothing to differ from.
+static void cfg_audit_boot()
+{
+	static char keys[96][48], vals[96][192];
+	int n = audit_setting_values(keys, vals, 96);
+	char v[512];
+	for (int i = 0; i < n; i++) {
+		if (!cfg_find(g_cfg_last, keys[i], v, sizeof(v))) v[0] = 0;   // a line that is gone: empty
+		if (cfg_key_secret(keys[i])) {
+			const char *now = v[0] ? "set" : "cleared";
+			if (strcmp(vals[i], now)) audit_setting_private(AU_APP, keys[i], vals[i], now);
+		} else if (strncmp(vals[i], v, sizeof(vals[0]) - 1)) audit_setting(AU_APP, keys[i], vals[i], v);   // the log keeps 191 characters
+	}
+}
+
 // At start, after the config was read: the text the next save is compared with, so that the first
-// real change after a boot is logged too.
+// real change after a boot is logged too; and the log learns the values the file has now.
 static void cfg_prime()
 {
 	cfg_text(g_cfg_last, sizeof(g_cfg_last));
 	g_cfg_primed = true;
+	cfg_audit_boot();
 }
 
 static void cfg_save_src(AuditSrc src)

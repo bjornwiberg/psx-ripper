@@ -600,6 +600,44 @@ int main()
 			if (set_setting_hook("remote", "1") != 0 || g_remote != 1) { printf("FAIL remote undo\n"); bad++; }
 			set_setting_hook("remote", "0");
 		}
+		// I2: the config file edited while the app was off (FTP): the boot logs the value it finds as
+		// an app row, so the undo of an older row sees that the setting changed since
+		{
+			system("rm -rf out/audit");
+			audit_init("out/audit", &vf_io);
+			audit_set_hooks(set_setting_hook, NULL);
+			g_webhook_hdr[0][0] = 0; g_webhook[0] = 0;
+			g_cfg_primed = false; g_std.speed = 1; cfg_save();   // primes
+			g_std.speed = 2; cfg_save();   // the log: speed 1 -> 2
+			n = rows();
+			uint32_t old = n == 1 ? r[0].id : 0;
+			g_cfg_primed = false; g_std.speed = 3;   // the edit: written, not logged
+			snprintf(g_webhook_hdr[0], sizeof(g_webhook_hdr[0]), "X-Token: topsecret");
+			cfg_save();
+			g_std.speed = 0; g_webhook_hdr[0][0] = 0;
+			g_cfg_primed = false; cfg_load(); cfg_prime();   // boot
+			n = rows();
+			bool spd = false;
+			for (int i = 0; i < n; i++)
+				if (!strcmp(r[i].what, "speed") && r[i].src == AU_APP && !strcmp(r[i].before, "2") && !strcmp(r[i].after, "3")) spd = true;
+			// the header was never in the log: nothing to compare with, no row
+			if (g_std.speed != 3 || n != 2 || !spd) { printf("FAIL boot after an edit: %d rows, speed row %d\n", n, spd); bad++; }
+			AuditReason rs;
+			if (audit_undo_row(old, why, sizeof why, &rs) == 0 || rs.code != AW_SETTING_CHANGED || g_std.speed != 3)
+				{ printf("FAIL undo over an edited setting: code %d, speed %d\n", (int)rs.code, g_std.speed); bad++; }
+			g_cfg_primed = false; cfg_load(); cfg_prime();   // a second boot: nothing new
+			if (rows() != 2) { printf("FAIL a boot without an edit logged %d rows\n", rows() - 2); bad++; }
+			// a secret the log knows as set, cleared in the file: a set -> cleared row, never reversible
+			g_webhook_hdr[0][0] = 0; cfg_save();   // the log: set -> cleared -> set
+			snprintf(g_webhook_hdr[0], sizeof(g_webhook_hdr[0]), "X-Token: topsecret"); cfg_save();
+			if (rows() != 4) { printf("FAIL header rows: %d\n", rows()); bad++; }
+			g_cfg_primed = false; g_webhook_hdr[0][0] = 0; cfg_save();   // the edit
+			g_cfg_primed = false; cfg_load(); cfg_prime();
+			n = rows();
+			if (n != 5 || strcmp(r[0].what, "webhook_header1") || strcmp(r[0].before, "set") || strcmp(r[0].after, "cleared") || r[0].src != AU_APP || r[0].reversible)
+				{ printf("FAIL boot after a header edit: %d rows, %s %s -> %s\n", n, r[0].what, r[0].before, r[0].after); bad++; }
+			g_std.speed = 0;
+		}
 		// audit_mb: the listed sizes, anything else is 256
 		cfg_apply_line("audit_mb=16");
 		if (g_audit_mb != 16) { printf("FAIL audit_mb=16 gave %d\n", g_audit_mb); bad++; }

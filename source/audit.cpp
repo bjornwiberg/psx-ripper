@@ -602,6 +602,20 @@ int audit_discs(char (*keys)[96], char (*names)[96], int *events, uint32_t *last
 	return n;
 }
 
+int audit_setting_values(char (*keys)[48], char (*vals)[192], int max)
+{
+	UndoState st;
+	lock();
+	build_state(st);
+	unlock();
+	int n = 0;
+	for (auto it = st.cur.begin(); it != st.cur.end() && n < max; ++it, n++) {
+		copyn(keys[n], 48, it->first.c_str());
+		copyn(vals[n], 192, it->second.c_str());
+	}
+	return n;
+}
+
 int audit_events(AuditDom dom, const char *disc, AuditRow *out, int max)
 {
 	if (max <= 0) return 0;

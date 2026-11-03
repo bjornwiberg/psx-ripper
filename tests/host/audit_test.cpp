@@ -872,6 +872,27 @@ static void short_write_not_glued(int &bad)
 	CHECK(audit_events(AU_FILES, NULL, r, 8) == 3 && r[0].id == 4);
 }
 
+// I2: what the log says each setting is now (newest row, undos counted), for the boot's comparison
+static void setting_values(int &bad)
+{
+	fresh();
+	hooks_reset();
+	audit_setting(AU_PAD, "speed", "1", "2");
+	audit_setting(AU_PAD, "retries", "4", "8");
+	audit_setting(AU_REMOTE, "speed", "2", "3");
+	audit_setting_private(AU_PAD, "webhook", "cleared", "set");
+	char why[160];
+	CHECK(audit_undo_row(newest_setting_id() - 1, why, sizeof why) == 0);   // speed 3 -> 2 (the hook)
+	char k[8][48], v[8][192];
+	int n = audit_setting_values(k, v, 8);
+	std::string got;
+	for (int i = 0; i < n; i++) got += std::string(k[i]) + "=" + v[i] + ";";
+	CHECK(n == 3 && got.find("speed=2;") != std::string::npos && got.find("retries=8;") != std::string::npos &&
+	      got.find("webhook=set;") != std::string::npos);
+	CHECK(audit_setting_values(k, v, 1) == 1);
+	audit_set_hooks(NULL, NULL);
+}
+
 int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
@@ -888,6 +909,7 @@ int main()
 		{"cap_keeps_running_job", cap_keeps_running_job}, {"cap_lowered_prunes_now", cap_lowered_prunes_now},
 		{"reason_codes", reason_codes}, {"reversible_queries", reversible_queries},
 		{"undo_refused_after_rerip", undo_refused_after_rerip}, {"short_write_not_glued", short_write_not_glued},
+		{"setting_values", setting_values},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {
