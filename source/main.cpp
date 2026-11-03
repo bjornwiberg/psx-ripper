@@ -920,6 +920,7 @@ static void er_set_retries(int n)   // n < 0: restore the original page
 
 static uint32_t be32(const uint8_t *p) { return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3]; }
 
+static void tstart_init();
 static int read_toc()
 {
 	uint8_t cdb[12] = {0x43, 0x00, 0x00, 0, 0, 0, 0x01, 0x03, 0x24, 0, 0, 0};  // LBA, format 0, from track 1, alloc 804
@@ -952,6 +953,7 @@ static int read_toc()
 		g_tracks[g_ntracks].lba = lba;
 		g_ntracks++;
 	}
+	tstart_init();   // the pregap starts of this disc, not of the one read before it
 	return (g_ntracks > 0 && g_leadout > 0) ? 0 : -2;
 }
 
@@ -963,7 +965,15 @@ static int read_toc()
 static uint32_t audio_pregap(uint32_t *index1)
 {
 	for (int t = 1; t < g_ntracks; t++)
-		if (!(g_tracks[t].ctrl & 0x4) && (g_tracks[t - 1].ctrl & 0x4)) { *index1 = g_tracks[t].lba; return g_tstart[t]; }
+		if (!(g_tracks[t].ctrl & 0x4) && (g_tracks[t - 1].ctrl & 0x4)) {
+			uint32_t l = g_tracks[t].lba, s = g_tstart[t];
+			*index1 = l;
+			// the pregap start from the subchannel, when it belongs to this disc: within 10 s before
+			// INDEX 01 (a value left from another disc, read with the same drive, made identify read
+			// SYSTEM.CNF as audio); else the usual 2 s
+			if (s < l && s + 750 >= l) return s;
+			return l >= 150 ? l - 150 : 0;
+		}
 	return 0;
 }
 
