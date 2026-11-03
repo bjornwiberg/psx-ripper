@@ -137,6 +137,17 @@ The agent can do everything the pad can on the app's own screens, and see the re
 - **State**: every drive (tab) with its disc, state, job and progress, the screen shown and the
   selected tab; the same information as status.json and more (which screen, which row is
   selected, the hint bar's buttons).
+- **Two ways to answer** (decided by the user): a question ("which games need checking against
+  Redump?") is answered to the agent **without touching the screen**; that is the default. Only
+  when the user asks to see it **in the app** ("show them in the app") does the agent drive the
+  screen: open the game list, choose the source and filter, move the selection.
+- **Screen state**, so the agent can always check what the app shows: a tool returning the screen
+  shown (home, settings, a drive's settings, game list, file name, webhooks, about, audit log, trash),
+  the selected tab and row, the game list's source and filter and selected game, and whether a
+  dialog is open (and its text and buttons). **Every tool that changes the screen returns this
+  state afterwards**, so the agent sees whether it worked instead of assuming it. When something
+  is in the way (an open yes/no dialog, a screen that cannot be left now), the tool says so, and
+  the agent can close it or ask the user.
 - **Screen**: a screenshot of the canvas as an image (the remote view already encodes JPEG), so
   the agent sees what the user sees.
 - **Navigation**: select a tab ("show USB 1"), open the settings / a drive's settings / webhooks /
