@@ -959,18 +959,50 @@ static int read_toc()
 // Reads `count` raw sectors, each 2352 bytes followed by 16 bytes formatted Q,
 // the same way IRISMAN does (syscall 604, one ATAPI block per sector, DMA).
 
+// The first audio track after the data track: where its pregap starts (INDEX 00) and INDEX 01.
+// 0 when the disc has no audio track after a data track.
+static uint32_t audio_pregap(uint32_t *index1)
+{
+	for (int t = 1; t < g_ntracks; t++)
+		if (!(g_tracks[t].ctrl & 0x4) && (g_tracks[t - 1].ctrl & 0x4)) { *index1 = g_tracks[t].lba; return g_tstart[t]; }
+	return 0;
+}
+
+static int sector_zero(const uint8_t *p)
+{
+	for (int i = 0; i < RAW_SIZE; i++) if (p[i]) return 0;
+	return 1;
+}
+
 // READ CD with a chosen subchannel selection: 0 = none, 1 = raw P-W (96 bytes), 2 = formatted Q (16 bytes)
 static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, uint32_t blk)
 {
 	if (g_use == SRC_USB) {   // one USB command moves at most USBODD_MAX bytes: split the read
+		// The 2 s pregap between the data track and the first audio track: a SuperDrive refuses every
+		// sector there when asked for "any sector type" (the subchannel says audio, the drive does not
+		// agree), so a rip spent an hour re-reading 150 sectors and filled them with silence. Asked
+		// for CD-DA it reads them. Audio sectors are read as CD-DA from that pregap on; a read never
+		// spans the boundary, so data sectors are never read as audio.
+		uint32_t idx1 = 0, ap = audio_pregap(&idx1);
 		uint32_t per = USBODD_MAX / blk;
 		for (uint32_t done = 0; done < count; ) {
 			uint32_t n = count - done < per ? count - done : per, l = lba + done;
-			uint8_t c[12] = {0xBE, 0, (uint8_t)(l >> 24), (uint8_t)(l >> 16), (uint8_t)(l >> 8), (uint8_t)l,
+			int audio = ap && l >= ap;
+			if (ap && l < ap && l + n > ap) n = ap - l;
+			uint8_t c[12] = {0xBE, (uint8_t)(audio ? 0x04 : 0), (uint8_t)(l >> 24), (uint8_t)(l >> 16), (uint8_t)(l >> 8), (uint8_t)l,
 			                 (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n, 0xF8, sub, 0};
-			int r = usbodd_cmd(g_usb, c, 12, buf + (size_t)done * blk, n * blk, 1);
+			uint8_t *dst = buf + (size_t)done * blk;
+			int r = usbodd_cmd(g_usb, c, 12, dst, n * blk, 1);
 			if (r) return r;
 			if (usbodd_last_got(g_usb) != (int)(n * blk)) return -1;   // fewer sectors than asked for
+			// A pregap sector that is not silence: the SuperDrive hands out the last data sector's
+			// bytes for a sector it cannot really read as audio. Such a sector counts as unreadable.
+			for (uint32_t i = 0; audio && i < n && l + i < idx1; i++) {
+				if (sector_zero(dst + (size_t)i * blk)) continue;
+				uint8_t prev[RAW_SIZE] __attribute__((aligned(16)));
+				uint8_t pc[12] = {0xBE, 0x04, (uint8_t)((ap - 1) >> 24), (uint8_t)((ap - 1) >> 16), (uint8_t)((ap - 1) >> 8), (uint8_t)(ap - 1), 0, 0, 1, 0xF8, 0, 0};
+				if (usbodd_cmd(g_usb, pc, 12, prev, RAW_SIZE, 1) || !memcmp(prev, dst + (size_t)i * blk, RAW_SIZE)) return -1;
+			}
 			done += n;
 		}
 		return 0;
@@ -1109,6 +1141,28 @@ static int find_file(const uint8_t *dir, uint32_t dirlen, const char *name, uint
 }
 
 
+// The disc ID out of SYSTEM.CNF: "BOOT = cdrom:\\SLUS_005.53;1" -> "SLUS_005.53". Some discs write
+// it in lower case ("cdrom:\\scus_943.51;1", Wipeout XL): matched either way, stored in upper case.
+// Empty when there is none.
+static void serial_from_cnf(const char *cnf, char *out)
+{
+	out[0] = 0;
+	for (const char *p = cnf; *p; p++) {
+		int ok = 1;
+		for (int i = 0; i < 11 && ok; i++) {
+			char c = p[i];
+			if (i < 4) ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+			else if (i == 4) ok = c == '_';
+			else if (i == 8) ok = c == '.';
+			else ok = c >= '0' && c <= '9';
+		}
+		if (!ok) continue;
+		for (int i = 0; i < 11; i++) out[i] = (p[i] >= 'a' && p[i] <= 'z') ? p[i] - 32 : p[i];
+		out[11] = 0;
+		return;
+	}
+}
+
 static void detect_disc_id()
 {
 	uint8_t pvd[2048], dir[2048], cnf[2048];
@@ -1129,14 +1183,7 @@ static void detect_disc_id()
 		return;
 	}
 	cnf[2047] = 0;
-	// BOOT = cdrom:\SLUS_005.53;1
-	for (char *p = (char *)cnf; *p; p++) {
-		if ((p[0] >= 'A' && p[0] <= 'Z') && p[4] == '_' && p[8] == '.' && p[1] >= 'A' && p[3] >= 'A') {
-			memcpy(g_serial, p, 11);
-			g_serial[11] = 0;
-			break;
-		}
-	}
+	serial_from_cnf((const char *)cnf, g_serial);
 	logf("volume=%s serial=%s", g_volid, g_serial);
 }
 
