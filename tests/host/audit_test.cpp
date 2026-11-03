@@ -93,6 +93,31 @@ static void half_line_ignored(int &bad)
 	CHECK(n == 3 && r[0].id == 3 && !strcmp(r[0].what, "z"));   // next id after 2 is 3, not 100
 }
 
+// the copy that drops a half line cannot run (tmp file not creatable): the rows stay readable and
+// the next row is not glued onto the half line
+static void cut_fails(int &bad)
+{
+	fresh();
+	audit_note(0, AU_FILES, "", "file", "x", "", "");
+	audit_note(0, AU_FILES, "", "file", "y", "", "");
+	char p[256], cmd[300];
+	snprintf(p, sizeof p, "%s/audit.log", DIR);
+	FILE *f = fopen(p, "ab");
+	fputs("id=99\tt=1\tsrc=pad\tdom=files\tjob=0\tdisc=\tkind=file", f);   // cut after kind=
+	fclose(f);
+	snprintf(cmd, sizeof cmd, "mkdir %s.tmp", p);   // a directory in the way: fopen(tmp) fails
+	if (system(cmd)) {}
+	audit_init(DIR, &IO);
+	audit_note(0, AU_FILES, "", "file", "z", "", "");
+	AuditRow r[8];
+	int n = audit_events(AU_FILES, NULL, r, 8);
+	CHECK(n == 3);
+	for (int i = 0; i < n; i++) CHECK(r[i].id != 99);
+	CHECK(n == 3 && r[0].id == 3 && !strcmp(r[0].what, "z") && !strcmp(r[2].what, "x"));
+	audit_init(DIR, &IO);   // and it reloads the same
+	CHECK(audit_events(AU_FILES, NULL, r, 8) == 3);
+}
+
 static void escaping(int &bad)
 {
 	fresh();
@@ -156,7 +181,7 @@ static void threads(int &bad)
 		unsigned id = 0;
 		char what[16] = "";
 		size_t n = strlen(line);
-		if (n && line[n - 1] == '\n' && sscanf(line, "id=%u", &id) == 1 && strstr(line, "\tkind=file\twhat=thread\tbefore=a\tafter=b\n")) { whole++; ids.insert(id); }
+		if (n && line[n - 1] == '\n' && sscanf(line, "id=%u", &id) == 1 && strstr(line, "\tkind=file\twhat=thread\tbefore=a\tafter=b\tend=1\n")) { whole++; ids.insert(id); }
 	}
 	fclose(f);
 	CHECK(lines == 2000 && whole == 2000 && ids.size() == 2000);
@@ -192,7 +217,7 @@ int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
 		{"rows_survive_reload", rows_survive_reload}, {"half_line_ignored", half_line_ignored},
-		{"escaping", escaping}, {"blob_layout", blob_layout}, {"threads", threads},
+		{"cut_fails", cut_fails}, {"escaping", escaping}, {"blob_layout", blob_layout}, {"threads", threads},
 		{"discs_grouping", discs_grouping},
 	};
 	if (system("mkdir -p out")) {}

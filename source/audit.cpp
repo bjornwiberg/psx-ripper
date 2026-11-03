@@ -89,7 +89,7 @@ static bool parse_line(char *line, AuditRow *r)
 {
 	memset(r, 0, sizeof *r);
 	r->src = AU_APP;
-	bool has_id = false, has_kind = false;
+	bool has_id = false, has_kind = false, has_end = false;
 	char *save = line;
 	while (save) {
 		char *tab = strchr(save, '\t');
@@ -112,11 +112,12 @@ static bool parse_line(char *line, AuditRow *r)
 			else if (!strcmp(k, "what")) copyn(r->what, sizeof r->what, v);
 			else if (!strcmp(k, "before")) copyn(r->before, sizeof r->before, v);
 			else if (!strcmp(k, "after")) copyn(r->after, sizeof r->after, v);
+			else if (!strcmp(k, "end")) has_end = true;
 			else if (!strcmp(k, "file")) copyn(r->file, sizeof r->file, v);
 		}
 		save = tab ? tab + 1 : NULL;
 	}
-	return has_id && has_kind && r->id;
+	return has_id && has_kind && has_end && r->id;   // `end` is the last key: a cut line lacks it
 }
 
 // Calls fn for each whole row of the log in order. Returns the offset just past the last whole
@@ -152,24 +153,30 @@ template <class F> static long scan_log(F fn)
 	return good;
 }
 
-static void cut_log(long keep)
+// Copies the first `keep` bytes of the log over the log. The original is replaced only when every
+// byte was copied and written; on any failure it stays as it is and false is returned.
+static bool cut_log(long keep)
 {
 	char p[256], t[260];
 	path_log(p, sizeof p);
 	snprintf(t, sizeof t, "%s.tmp", p);
 	FILE *in = fopen(p, "rb"), *out = fopen(t, "wb");
+	long done = 0;
 	if (in && out) {
 		static char buf[4096];
-		while (keep > 0) {
-			size_t n = fread(buf, 1, keep < (long)sizeof buf ? (size_t)keep : sizeof buf, in);
-			if (!n) break;
-			fwrite(buf, 1, n, out);
-			keep -= (long)n;
+		while (done < keep) {
+			long want = keep - done < (long)sizeof buf ? keep - done : (long)sizeof buf;
+			size_t n = fread(buf, 1, (size_t)want, in);
+			if (!n || fwrite(buf, 1, n, out) != n) break;
+			done += (long)n;
 		}
 	}
 	if (in) fclose(in);
-	if (out) fclose(out);
-	if (in && out) { remove(p); rename(t, p); }
+	bool ok = in && out && done == keep;
+	if (out && fclose(out) != 0) ok = false;
+	if (ok && (remove(p) != 0 || rename(t, p) != 0)) ok = false;
+	if (!ok) remove(t);
+	return ok;
 }
 
 void audit_init(const char *dir, const AuditIo *io)
@@ -194,7 +201,11 @@ void audit_init(const char *dir, const AuditIo *io)
 		if (r.id >= g_next_id) g_next_id = r.id + 1;
 		if (r.job >= g_next_job) g_next_job = r.job + 1;
 	});
-	if (good < size) cut_log(good);   // drop a half line so the next row does not glue onto it
+	// Drop a half line so the next row does not glue onto it. If that fails, keep the original and
+	// end the half line with a newline; it has no end marker, so it is never read as a row.
+	if (good < size && !cut_log(good)) {
+		if (FILE *f = fopen(p, "ab")) { fputc('\n', f); fclose(f); }
+	}
 	unlock();
 }
 
@@ -231,14 +242,14 @@ static uint32_t write_row(uint32_t job, AuditSrc src, AuditDom dom, const char *
 	};
 	for (auto &x : f) {
 		n += (size_t)snprintf(line + n, sizeof line - n, "\t%s=", x.k);
-		n = put_esc(line, n, sizeof line - 2, x.v, x.max);
+		n = put_esc(line, n, sizeof line - 24, x.v, x.max);
 	}
 	if (sector) {
 		n += (size_t)snprintf(line + n, sizeof line - n, "\tfile=");
-		n = put_esc(line, n, sizeof line - 2, file, 255);
+		n = put_esc(line, n, sizeof line - 24, file, 255);
 		n += (size_t)snprintf(line + n, sizeof line - n, "\tlba=%u\tblob=%u", (unsigned)lba, (unsigned)blob);
 	}
-	line[n++] = '\n';
+	n += (size_t)snprintf(line + n, sizeof line - n, "\tend=1\n");
 	char p[256];
 	path_log(p, sizeof p);
 	if (FILE *fp = fopen(p, "ab")) {
