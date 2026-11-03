@@ -62,10 +62,12 @@ int audit_undo_job(uint32_t job, char *why, size_t n);
 // every reversible row of a disc from time since_t on
 int audit_undo_disc_since(const char *disc, uint32_t since_t, char *why, size_t n);
 // set_setting applies a config key/value the way the app does (0 = applied); recheck checks a rip
-// again from its file, called once per file after its sectors were undone. Both are called without
-// the audit's lock held, so they may write audit rows. NULL = none (a setting is then not undone).
+// again from its file, called once per file after its sectors were undone, with the n sectors put
+// back (lbas) and for each whether its restored bytes are all zero (zero[i] = 1: a sector the rip
+// could not read). Both are called without the audit's lock held, so they may write audit rows.
+// NULL = none (a setting is then not undone).
 void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
-                     void (*recheck)(const char *file));
+                     void (*recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n));
 // The audit_mb setting in bytes (default 256 MB). When the job<N>.bin files together exceed it, the
 // oldest are deleted, never the file of a running job; their rows stay, no longer reversible.
 // Applies at once.

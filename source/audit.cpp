@@ -34,9 +34,11 @@ static int g_slot_rr;
 
 // jobs begun and not ended in this run: their job<N>.bin is never pruned and their rows not undone
 static uint32_t g_running[16];
+// how each ended job ended (its result row): only a finished job's sectors can be undone
+static std::map<uint32_t, std::string> g_results;
 static uint64_t g_cap = 256ull << 20, g_blob_total;   // the audit_mb setting; all job<N>.bin together
 static int (*g_set_setting)(const char *key, const char *value);
-static void (*g_recheck)(const char *file);
+static void (*g_recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n);
 
 static void lock() { sysMutexLock(g_mx, 0); }
 static void unlock() { sysMutexUnlock(g_mx); }
@@ -248,6 +250,7 @@ void audit_init(const char *dir, const AuditIo *io)
 	g_next_id = g_next_job = 1;
 	memset(g_slots, 0, sizeof g_slots);
 	memset(g_running, 0, sizeof g_running);
+	g_results.clear();
 	char p[256], t[260];
 	path_log(p, sizeof p);
 	snprintf(t, sizeof t, "%s.tmp", p);
@@ -258,6 +261,7 @@ void audit_init(const char *dir, const AuditIo *io)
 	long good = scan_log([](const AuditRow &r) {
 		if (r.id >= g_next_id) g_next_id = r.id + 1;
 		if (r.job >= g_next_job) g_next_job = r.job + 1;
+		if (!strcmp(r.kind, "result")) g_results[r.job] = r.after;
 	});
 	// Drop a half line so the next row does not glue onto it. If that fails, keep the original and
 	// end the half line with a newline; it has no end marker, so it is never read as a row.
@@ -342,6 +346,7 @@ void audit_job_end(uint32_t job, const char *result)
 	lock();
 	JobSlot *s = slot_of(job);
 	for (uint32_t &r : g_running) if (r == job) r = 0;
+	g_results[job] = result ? result : "";
 	write_row(job, s->src, AU_RIPS, s->disc, "result", "", "", result, NULL, false, 0, 0);
 	unlock();
 }
@@ -453,6 +458,14 @@ static const char *sector_block(const AuditRow &r, char *msg, size_t n, bool *re
 			snprintf(msg, n, "a job on this disc is running (job %u)", (unsigned)j);
 			return msg;
 		}
+	}
+	// A rip that did not finish wrote into a .part that is gone; its rows name the image an earlier
+	// rip left under that name, which must not get this job's first reads. No result row and not
+	// running: the app stopped in the middle, the same.
+	auto res = g_results.find(r.job);
+	if (res == g_results.end() || res->second != "finished") {
+		snprintf(msg, n, "job %u was not finished (%s)", (unsigned)r.job, res == g_results.end() ? "no result" : res->second.c_str());
+		return msg;
 	}
 	char p[256];
 	path_blob(p, sizeof p, r.job);
@@ -611,7 +624,8 @@ template <class F> static void collect(F want, std::vector<Target> &ts, std::vec
 static int undo_sectors(const std::vector<Target> &ts, const std::vector<std::string> &files,
                         const std::vector<std::string> &discs, char *why, size_t n)
 {
-	std::vector<char> touched(files.size(), 0);
+	std::vector<std::vector<uint32_t> > lbas(files.size());   // per file: the sectors put back
+	std::vector<std::vector<uint8_t> > zero(files.size());   // and whether their old bytes are all zero
 	int rc = 0;
 	char msg[160];
 	for (const Target &t : ts) {
@@ -625,6 +639,8 @@ static int undo_sectors(const std::vector<Target> &ts, const std::vector<std::st
 		bool restored;
 		const char *e = sector_block(r, msg, sizeof msg, &restored);
 		bool written = false;
+		bool zeros = true;   // the old bytes, still in g_blob_buf
+		if (!e) for (int i = 0; i < SECTOR && zeros; i++) zeros = !g_blob_buf[i];
 		if (!e && !restored) {
 			// A failed close may still have written the sector; the next undo then finds the old
 			// bytes and only adds the row.
@@ -643,12 +659,13 @@ static int undo_sectors(const std::vector<Target> &ts, const std::vector<std::st
 			}
 		}
 		unlock();
-		if (written || restored) touched[t.file] = 1;
+		if (written || restored) { lbas[t.file].push_back(r.lba); zero[t.file].push_back(zeros ? 1 : 0); }
 		if (e) { say(why, n, "row %u: %s", t.id, e); rc = -1; break; }
 	}
-	void (*recheck)(const char *) = g_recheck;
+	void (*recheck)(const char *, const uint32_t *, const uint8_t *, int) = g_recheck;
 	if (recheck)
-		for (size_t i = 0; i < files.size(); i++) if (touched[i]) recheck(files[i].c_str());
+		for (size_t i = 0; i < files.size(); i++)
+			if (!lbas[i].empty()) recheck(files[i].c_str(), lbas[i].data(), zero[i].data(), (int)lbas[i].size());
 	return rc;
 }
 
@@ -717,7 +734,8 @@ int audit_undo_disc_since(const char *disc, uint32_t since_t, char *why, size_t 
 	return undo_sectors(ts, files, discs, why, n);
 }
 
-void audit_set_hooks(int (*set_setting)(const char *key, const char *value), void (*recheck)(const char *file))
+void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
+                     void (*recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n))
 {
 	g_set_setting = set_setting;
 	g_recheck = recheck;

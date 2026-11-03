@@ -400,7 +400,16 @@ static int set_hook(const char *k, const char *v)
 }
 static char g_recheck_file[256];
 static int g_recheck_calls;
-static void recheck_hook(const char *f) { snprintf(g_recheck_file, sizeof g_recheck_file, "%s", f); g_recheck_calls++; }
+static uint32_t g_recheck_lbas[16];
+static uint8_t g_recheck_zero[16];
+static int g_recheck_n;
+static void recheck_hook(const char *f, const uint32_t *lbas, const uint8_t *zero, int n)
+{
+	snprintf(g_recheck_file, sizeof g_recheck_file, "%s", f);
+	g_recheck_calls++;
+	g_recheck_n = n;
+	for (int i = 0; i < n && i < 16; i++) { g_recheck_lbas[i] = lbas[i]; g_recheck_zero[i] = zero[i]; }
+}
 
 static void hooks_reset()
 {
@@ -522,6 +531,59 @@ static void undo_refused_while_disc_busy(int &bad)
 }
 
 // the image got its old bytes back but the undo row could not be appended: say so, and the next
+// the recheck gets every undone sector of the file and whether its restored bytes are all zero
+// (an unreadable sector the rip filled with zeros)
+static void recheck_gets_sectors(int &bad)
+{
+	fresh();
+	hooks_reset();
+	img_make(4);
+	uint32_t job = audit_job_begin(AU_PAD, "U:4", "U", "repair");
+	repair_write(job, 1, 0x00, 0x22);
+	repair_write(job, 3, 0x11, 0x22);
+	audit_job_end(job, "finished");
+	char why[128] = "";
+	CHECK(audit_undo_job(job, why, sizeof why) == 0);
+	CHECK(g_recheck_calls == 1 && g_recheck_n == 2);
+	bool z1 = false, b3 = false;
+	for (int i = 0; i < g_recheck_n; i++) {
+		if (g_recheck_lbas[i] == 1 && g_recheck_zero[i]) z1 = true;
+		if (g_recheck_lbas[i] == 3 && !g_recheck_zero[i]) b3 = true;
+	}
+	CHECK(z1 && b3);
+	audit_set_hooks(NULL, NULL);
+}
+
+// R8: a rip that was cancelled (or never ended) wrote into a .part that is gone; its rows name the
+// image an earlier rip left there, so their undo is refused; a finished job's undo works
+static void undo_refused_unfinished(int &bad)
+{
+	fresh();
+	img_make(4);
+	uint32_t job = audit_job_begin(AU_PAD, "U:4", "U", "rip");
+	repair_write(job, 1, 0x11, 0x22);
+	audit_job_end(job, "cancelled");
+	char why[128] = "";
+	AuditRow r;
+	CHECK(row_of(job, sector_id(job, 0), &r) && r.reversible == 0);
+	CHECK(audit_undo_job(job, why, sizeof why) == -1 && strstr(why, "not finished"));
+	CHECK(img_is(1, 0x22));
+	// no result row and not running (the app stopped in the middle): the same
+	uint32_t j2 = audit_job_begin(AU_PAD, "V:4", "V", "rip");
+	repair_write(j2, 2, 0x11, 0x22);
+	audit_init(DIR, &IO);   // a new run: nothing is running
+	why[0] = 0;
+	CHECK(audit_undo_job(j2, why, sizeof why) == -1 && strstr(why, "not finished"));
+	CHECK(img_is(2, 0x22));
+	// the result survives a reload: a finished job stays reversible
+	uint32_t j3 = audit_job_begin(AU_PAD, "W:4", "W", "repair");
+	repair_write(j3, 3, 0x11, 0x22);
+	audit_job_end(j3, "finished");
+	audit_init(DIR, &IO);
+	CHECK(row_of(j3, sector_id(j3, 0), &r) && r.reversible == 1);
+	CHECK(audit_undo_job(j3, why, sizeof why) == 0 && img_is(3, 0x11));
+}
+
 // undo only adds the missing row instead of being refused forever
 static void undo_row_lost(int &bad)
 {
@@ -618,6 +680,7 @@ int main()
 		{"undo_job_newest_first", undo_job_newest_first}, {"undo_job_stops_at_refusal", undo_job_stops_at_refusal},
 		{"undo_missing_blob", undo_missing_blob}, {"undo_setting", undo_setting}, {"private_setting_not_reversible", private_setting_not_reversible},
 		{"recheck_called_once_per_file", recheck_called_once_per_file}, {"undo_disc_since", undo_disc_since},
+		{"recheck_gets_sectors", recheck_gets_sectors}, {"undo_refused_unfinished", undo_refused_unfinished},
 		{"undo_refused_while_disc_busy", undo_refused_while_disc_busy}, {"undo_row_lost", undo_row_lost},
 		{"cap_keeps_running_job", cap_keeps_running_job}, {"cap_lowered_prunes_now", cap_lowered_prunes_now},
 	};

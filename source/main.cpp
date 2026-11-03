@@ -5424,13 +5424,68 @@ static int check_image(const char *base, int job = 0)
 	return 0;
 }
 
-// The audit's recheck after an undo wrote sectors back: `file` is the image (.bin).
-static void recheck_hook(const char *file)
+// Sectors an undo put back into a rip: each goes into its log again as unreadable (its restored
+// bytes are all zero, as the rip fills a sector it could not read) or bad, unless the log lists it
+// already, and the counts follow; so a later repair reads them again.
+static void riplog_put_back(const char *base, const uint32_t *lbas, const uint8_t *zero, int n)
+{
+	char path[320];
+	snprintf(path, sizeof(path), "%s.log", base);
+	char *lb = (char *)malloc(65536);
+	uint8_t *add = (uint8_t *)malloc(n);
+	if (!lb || !add) { free(lb); free(add); return; }
+	int len = 0;
+	VFile *f = vf_open(path, "rb");
+	if (f) { len = (int)vf_read(f, lb, 65535); vf_close(f); }
+	lb[len > 0 ? len : 0] = 0;
+	int nu = 0, nb = 0;
+	for (int i = 0; i < n; i++) {
+		add[i] = 1;
+		for (int j = 0; j < i; j++) if (add[j] && lbas[j] == lbas[i]) add[i] = 0;   // twice in one undo
+	}
+	for (char *l = lb; *l; ) {   // listed already: unreadable, bad, or uncertain and not confirmed
+		size_t ll = strcspn(l, "\n");
+		char t[96];
+		snprintf(t, sizeof(t), "%.*s", (int)(ll < sizeof(t) - 1 ? ll : sizeof(t) - 1), l);
+		unsigned v;
+		if (sscanf(t, "unreadable=%u", &v) == 1 || sscanf(t, "bad=%u", &v) == 1 || (sscanf(t, "uncertain=%u", &v) == 1 && strstr(t, "unconfirmed")))
+			for (int i = 0; i < n; i++) if (lbas[i] == v) add[i] = 0;
+		l += ll + (l[ll] == '\n');
+	}
+	for (int i = 0; i < n; i++) if (add[i]) { if (zero[i]) nu++; else nb++; }
+	if (nu + nb) {
+		VFile *of = vf_open(path, "wb");
+		if (of) {
+			int seen_u = 0, seen_b = 0;
+			for (char *l = lb; *l; ) {
+				size_t ll = strcspn(l, "\n");
+				unsigned v;
+				if (sscanf(l, "unreadable_count=%u", &v) == 1) { vf_printf(of, "unreadable_count=%u\n", v + nu); seen_u = 1; }
+				else if (sscanf(l, "bad_count=%u", &v) == 1) { vf_printf(of, "bad_count=%u\n", v + nb); seen_b = 1; }
+				else if (sscanf(l, "fixed_count=%u", &v) == 1) vf_printf(of, "fixed_count=%u\n", v > (unsigned)(nu + nb) ? v - nu - nb : 0);
+				else { vf_write(of, l, ll); vf_write(of, "\n", 1); }
+				l += ll + (l[ll] == '\n');
+			}
+			if (!seen_u) vf_printf(of, "unreadable_count=%d\n", nu);
+			if (!seen_b) vf_printf(of, "bad_count=%d\n", nb);
+			for (int i = 0; i < n; i++) if (add[i]) vf_printf(of, "%s=%u\n", zero[i] ? "unreadable" : "bad", lbas[i]);
+			vf_close(of);
+			logf("undo: %d unreadable and %d bad sector(s) back in %s", nu, nb, path);
+		}
+	}
+	free(add);
+	free(lb);
+}
+
+// The audit's recheck after an undo wrote sectors back into `file` (the image, .bin): the sectors
+// go back into its log, then the image is checked again.
+static void recheck_hook(const char *file, const uint32_t *lbas, const uint8_t *zero, int n)
 {
 	char base[320];
 	snprintf(base, sizeof(base), "%s", file);
-	size_t n = strlen(base);
-	if (n > 4 && !strcmp(base + n - 4, ".bin")) base[n - 4] = 0;
+	size_t len = strlen(base);
+	if (len > 4 && !strcmp(base + len - 4, ".bin")) base[len - 4] = 0;
+	if (n > 0 && lbas && zero) riplog_put_back(base, lbas, zero, n);
 	check_image(base);
 	g_redraw = 2;   // the tabs' Redump icons follow the log
 }

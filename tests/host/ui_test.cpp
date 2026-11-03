@@ -525,9 +525,53 @@ int main()
 				{ printf("FAIL check_image log:\n%s", s.c_str()); bad++; }
 			// the audit's recheck hook takes the image's path
 			remove("out/t4/two.md5");
-			recheck_hook("out/t4/two.bin");
+			recheck_hook("out/t4/two.bin", NULL, NULL, 0);
 			if (!get_file("out/t4/two.md5", s) || s != exp) { printf("FAIL recheck hook\n"); bad++; }
 			if (check_image("out/t4/none") == 0) { printf("FAIL check_image without an image\n"); bad++; }
+		}
+		// R9: undoing a repair puts its sectors back into the rip's log, so a later repair reads them again
+		{
+			static uint8_t rep[4 * RAW_SIZE];
+			memset(rep, 0x5A, sizeof rep);
+			memset(rep + RAW_SIZE, 0, RAW_SIZE);   // sector 1: unreadable, the rip filled it with zeros
+			memset(rep + 2 * RAW_SIZE, 0x66, RAW_SIZE);   // sector 2: bad bytes
+			put_file("out/t4/rep.bin", rep, sizeof rep);
+			const char *cue = "FILE \"rep.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n";
+			put_file("out/t4/rep.cue", cue, strlen(cue));
+			// the log after the repair fixed both: no sector lines, counts 0
+			const char *log = "PSX Ripper rip log\nsectors=4\ntrack=01 start=0 md5=00000000000000000000000000000000\nredump=no_match\nunreadable_count=0\nbad_count=0\nfixed_count=2\nuncertain=3 unconfirmed\n";
+			put_file("out/t4/rep.log", log, strlen(log));
+			OnCard o(0);
+			snprintf(k.exist, sizeof(k.exist), "out/t4/rep");
+			snprintf(g_base, sizeof(g_base), "out/t4/rep");
+			g_leadout = 4;
+			audit_card_begin(0, AU_PAD, "repair");
+			uint32_t job = k.audit_job;
+			g_out = vf_open("out/t4/rep.bin", "r+b");
+			uint8_t good[RAW_SIZE];
+			memset(good, 0x77, sizeof good);
+			if (!g_out || write_sector_audited(1, good) || write_sector_audited(2, good)) { printf("FAIL repair writes\n"); bad++; }
+			if (g_out) vf_close(g_out);
+			g_out = NULL;
+			audit_card_end(0, "finished");
+			char why[200] = "";
+			if (audit_undo_job(job, why, sizeof why) != 0) { printf("FAIL undo of the repair: %s\n", why); bad++; }
+			std::string s;
+			get_file("out/t4/rep.log", s);
+			auto has = [&](const char *l) { return s.find(l) != std::string::npos; };
+			if (!has("\nunreadable=1\n") || !has("\nbad=2\n") || !has("unreadable_count=1\n") || !has("bad_count=1\n") || !has("fixed_count=0\n") || !has("uncertain=3 unconfirmed\n"))
+				{ printf("FAIL the log after the undo:\n%s", s.c_str()); bad++; }
+			snprintf(g_base, sizeof(g_base), "out/t4/rep");
+			int open = riplog_open_count();
+			if (open != 3) { printf("FAIL riplog_open_count after the undo: %d, want 3\n", open); bad++; }
+			// already listed: not added twice, counts unchanged
+			uint32_t l2[2] = {1, 2};
+			uint8_t z2[2] = {1, 0};
+			recheck_hook("out/t4/rep.bin", l2, z2, 2);
+			get_file("out/t4/rep.log", s);
+			size_t a = s.find("unreadable=1\n"), b = s.find("bad=2\n");
+			if (a == std::string::npos || s.find("unreadable=1\n", a + 1) != std::string::npos || s.find("bad=2\n", b + 1) != std::string::npos || !has("unreadable_count=1\n") || !has("bad_count=1\n"))
+				{ printf("FAIL the log after a second recheck:\n%s", s.c_str()); bad++; }
 		}
 		audit_set_hooks(set_setting_hook, NULL);
 		system("rm -rf out/audit");
