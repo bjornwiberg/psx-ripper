@@ -62,7 +62,8 @@ VFile *vf_open(const char *path, const char *mode)
 		return f;
 	}
 	Lk lk;
-	BYTE m = !strcmp(mode, "rb") ? FA_READ : !strcmp(mode, "r+b") ? (FA_READ | FA_WRITE) : (FA_WRITE | FA_CREATE_ALWAYS);
+	BYTE m = !strcmp(mode, "rb") ? FA_READ : !strcmp(mode, "r+b") ? (FA_READ | FA_WRITE)
+	       : !strcmp(mode, "w+b") ? (FA_READ | FA_WRITE | FA_CREATE_ALWAYS) : (FA_WRITE | FA_CREATE_ALWAYS);
 	if (f_open(&f->fil, fp, m) != FR_OK) { free(f); return NULL; }
 	return f;
 }

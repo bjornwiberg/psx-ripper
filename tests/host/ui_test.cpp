@@ -5,6 +5,7 @@
 //  - characters the font does not have (they come out as "?").
 // Run: make -C tests/host   (exit status 1 when a check fails)
 #include "host.h"
+#define CFG_PATH "out/psxrip.cfg"   // not the console's path
 #define main psx_main
 #include "../../source/main.cpp"
 #undef main
@@ -123,6 +124,267 @@ static void frame(const char *name, int sel)
 	size_t before = g_fail;
 	check(name);
 	printf("%s %s\n", g_fail == (int)before ? "ok  " : "FAIL", name);
+}
+
+// ---------------------------------------------------------------- the audit log screen
+static int g_sfx_sv;   // the Swedish frames get "-sv" after their name
+static void aframe(const char *name, const AuditView &v)
+{
+	char nm[96];
+	snprintf(nm, sizeof nm, "%s%s", name, g_sfx_sv ? "-sv" : "");
+	g_boxes.clear();
+	audit_draw(v);
+	save(nm);
+	size_t before = g_fail;
+	check(nm);
+	printf("%s %s\n", g_fail == (int)before ? "ok  " : "FAIL", nm);
+}
+static void put_bin(const char *p, const void *d, size_t n) { FILE *f = fopen(p, "wb"); if (f) { fwrite(d, 1, n, f); fclose(f); } }
+static bool has_text(const char *s)
+{
+	for (auto &b : g_boxes) if (b.kind == UI_TRACE_TEXT && strstr(b.text.c_str(), s)) return true;
+	return false;
+}
+
+// A prepared log: Alundra (a rip, and a repair that wrote 1015 sectors: 1017 rows), Final Fantasy IX
+// (a rip, a check, and a rip that was cancelled after writing a sector), and settings from every source.
+static void audit_scenarios()
+{
+	int bad = 0;
+	system("rm -rf out/audit out/t5 out/psxrip.cfg && mkdir -p out/t5");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, recheck_hook);
+	g_cfg_primed = false;
+	reset_all();
+	const uint32_t NS = 1100;
+	std::vector<uint8_t> img((size_t)NS * RAW_SIZE);
+	for (size_t i = 0; i < img.size(); i++) img[i] = (uint8_t)(i * 13 + i / RAW_SIZE);
+	put_bin("out/t5/alundra.bin", img.data(), img.size());
+	put_bin("out/t5/ff9.bin", img.data(), 10 * RAW_SIZE);
+	static const char cue[] = "FILE \"alundra.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n";
+	put_bin("out/t5/alundra.cue", cue, sizeof cue - 1);
+	static const char rlog[] = "PSX Ripper rip log\ntitle=Alundra\nredump=verified Alundra (Europe)\n";
+	put_bin("out/t5/alundra.log", rlog, sizeof rlog - 1);
+	uint8_t zero[RAW_SIZE];
+	memset(zero, 0, sizeof zero);
+	const char *FF9 = "SLES_029.65:314937", *ALU = "SLES_011.35:1100";
+	uint32_t j = audit_job_begin(AU_REMOTE, FF9, "Final Fantasy IX (Disc 1)", "rip");
+	audit_job_end(j, "finished");
+	j = audit_job_begin(AU_APP, FF9, "Final Fantasy IX (Disc 1)", "check");
+	audit_note(j, AU_RIPS, FF9, "redump", "", "unchecked", "verified Final Fantasy IX (Europe) (Disc 1)");
+	audit_job_end(j, "finished");
+	j = audit_job_begin(AU_PAD, FF9, "Final Fantasy IX (Disc 1)", "rip");
+	audit_sector(j, "out/t5/ff9.bin", 3, zero, img.data() + 3 * RAW_SIZE);
+	audit_job_end(j, "cancelled");
+	g_std.speed = 1; g_redump = RD_OFF; g_webhook_hdr[0][0] = 0; g_audit_mb = 256;
+	g_input_src = AU_PAD; cfg_save();   // primes
+	g_std.speed = 2; cfg_save();
+	g_input_src = AU_REMOTE; g_redump = RD_ONLINE; cfg_save();
+	g_redump = RD_LOCAL; cfg_save();   // the row before is then "changed since"
+	g_input_src = AU_PAD; snprintf(g_webhook_hdr[0], sizeof g_webhook_hdr[0], "X-Token: abc"); cfg_save();
+	g_input_src = AU_MCP; g_audit_mb = 64; cfg_save();
+	g_input_src = AU_PAD;
+	j = audit_job_begin(AU_PAD, ALU, "Alundra", "rip");
+	audit_job_end(j, "finished");
+	uint32_t rep = audit_job_begin(AU_APP, ALU, "Alundra", "repair");
+	for (uint32_t l = 20; l < 20 + 1015; l++) audit_sector(rep, "out/t5/alundra.bin", l, zero, img.data() + (size_t)l * RAW_SIZE);
+	audit_job_end(rep, "finished");
+
+	AuditView v;
+	audit_view_init(v);
+	if (v.level != 0 || v.empty) { printf("FAIL the log's first level: level %d, empty %d\n", v.level, v.empty); bad++; }
+	aframe("audit-domains", v);
+	audit_open(v);   // Rips
+	if (v.level != 1 || v.n != 2 || strcmp(av_names[0], "Alundra") || strcmp(av_names[1], "Final Fantasy IX (Disc 1)"))
+		{ printf("FAIL the discs: level %d, %d disc(s), first \"%s\"\n", v.level, v.n, v.n ? av_names[0] : ""); bad++; }
+	aframe("audit-discs", v);
+	audit_open(v);   // Alundra
+	if (v.level != 2 || v.n != 2 || strcmp(av_rows[0].what, "repair") || !audit_can_undo(v))
+		{ printf("FAIL Alundra's events: level %d, %d event(s), undo %d\n", v.level, v.n, audit_can_undo(v)); bad++; }
+	aframe("audit-events", v);
+	audit_open(v);   // the repair: 1017 rows, a page at a time
+	if (v.level != 3 || !v.more || v.base != 0 || strcmp(av_rows[0].kind, "job") || audit_can_undo(v))
+		{ printf("FAIL the repair's rows: level %d, more %d, first \"%s\"\n", v.level, v.more, av_rows[0].kind); bad++; }
+	aframe("audit-rows", v);
+	for (int i = 0; i < 55; i++) audit_nav(v, B_R2);   // far down: 55 pages
+	audit_nav(v, B_DOWN);
+	const AuditRow *r = audit_focused(v);
+	if (v.row != 55 * AV_PAGE + 1 || !r || strcmp(r->kind, "sector") || r->lba != 20 + 55 * AV_PAGE || !audit_can_undo(v))
+		{ printf("FAIL paging the rows: row %d, %s %u\n", v.row, r ? r->kind : "-", r ? (unsigned)r->lba : 0); bad++; }
+	aframe("audit-rows-paged", v);
+	if (!has_text(g_sfx_sv ? "Sektor 515: ändrad" : "Sector 515: changed")) { printf("FAIL the focused sector row is not shown\n"); bad++; }
+	{   // the question before an undo
+		char q[256], label[160];
+		audit_label(v, v.row, label, sizeof label);
+		snprintf(q, sizeof q, T(STR_AUDIT_UNDO_Q), label);
+		char nm[64];
+		snprintf(nm, sizeof nm, "audit-undo-dialog%s", g_sfx_sv ? "-sv" : "");
+		g_boxes.clear(); own_dialog_draw(q, 1); save(nm); size_t b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+	}
+	{   // the wait while the rip is checked again
+		char nm[64];
+		snprintf(nm, sizeof nm, "audit-wait%s", g_sfx_sv ? "-sv" : "");
+		g_boxes.clear(); audit_wait_draw("Alundra (Europe) (En,Fr,De,Es,It,Nl,Sv) [SLES-01135]", 412); save(nm); size_t b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+	}
+	{   // the wait while a big undo writes its sectors back; closing the app stops it
+		char nm[64];
+		snprintf(nm, sizeof nm, "audit-undoing%s", g_sfx_sv ? "-sv" : "");
+		g_boxes.clear(); audit_wait_draw("Alundra (Europe) (En,Fr,De,Es,It,Nl,Sv) [SLES-01135]", 2, STR_AUDIT_UNDOING); save(nm); size_t b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+		snprintf(nm, sizeof nm, "audit-redoing%s", g_sfx_sv ? "-sv" : "");
+		g_boxes.clear(); audit_wait_draw("Alundra (Europe) (En,Fr,De,Es,It,Nl,Sv) [SLES-01135]", 2, STR_AUDIT_REDOING); save(nm); b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+		if (!has_text(g_sfx_sv ? "Gör om" : "Redoing")) { printf("FAIL the redo's wait screen does not say so\n"); bad++; }
+		if (audit_wait_what(1) != STR_AUDIT_REDOING || audit_wait_what(0) != STR_AUDIT_UNDOING) { printf("FAIL the wait text of an undo / redo\n"); bad++; }
+		if (audit_undo_tick(0, 100) != 0) { printf("FAIL the undo tick stops without an exit request\n"); bad++; }
+		exit_requested = 1;
+		if (audit_undo_tick(64, 100) == 0) { printf("FAIL the undo tick does not stop on exit\n"); bad++; }
+		exit_requested = 0;
+	}
+	{   // undo of that sector: the image gets its old bytes, the rip is checked again, the drive's card follows
+		disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 3);
+		Card &k = g_cards[0];
+		snprintf(k.dest, sizeof k.dest, "out/t5");
+		snprintf(k.exist, sizeof k.exist, "out/t5/alundra");
+		k.rd_state = 1;
+		{ OnCard o(0); OUT_DIR = k.dest; g_serial[0] = 0; snprintf(g_base, sizeof g_base, "out/t5/alundra"); }
+		uint32_t lba = r->lba;
+		char why[200];
+		if (audit_undo(v, why, sizeof why) != 0) { printf("FAIL undo of a sector from the screen: %s\n", why); bad++; }
+		r = audit_focused(v);
+		FILE *f = fopen("out/t5/alundra.bin", "rb");
+		uint8_t got[RAW_SIZE] = {1};
+		if (f) { fseek(f, (long)lba * RAW_SIZE, SEEK_SET); if (fread(got, 1, RAW_SIZE, f) != RAW_SIZE) got[0] = 1; fclose(f); }
+		if (memcmp(got, zero, RAW_SIZE) || !r || !r->undone || !audit_can_undo(v)) { printf("FAIL after the undo: bytes back %d, row undone %d, redo offered %d\n", !memcmp(got, zero, RAW_SIZE), r ? r->undone : -1, audit_can_undo(v)); bad++; }
+		if (!vf_exists("out/t5/alundra.md5")) { printf("FAIL the rip was not checked again after the undo\n"); bad++; }
+		if (k.rd_state != -1 || strcmp(k.exist, "out/t5/alundra")) { printf("FAIL the card after the undo: redump state %d, exist \"%s\"\n", k.rd_state, k.exist); bad++; }
+		aframe("audit-rows-undone", v);
+		if (!has_text(T(STR_HINT_REDO)) || (g_sfx_sv && !has_text("Gör om"))) { printf("FAIL the undone sector row does not offer \"%s\"\n", T(STR_HINT_REDO)); bad++; }
+		// △ on the undone row redoes it: the new bytes again, the row not undone, △ undoes again
+		if (audit_undo(v, why, sizeof why) != 0) { printf("FAIL redo of the sector row from the screen: %s\n", why); bad++; }
+		r = audit_focused(v);
+		f = fopen("out/t5/alundra.bin", "rb");
+		if (f) { fseek(f, (long)lba * RAW_SIZE, SEEK_SET); if (fread(got, 1, RAW_SIZE, f) != RAW_SIZE) got[0] ^= 1; fclose(f); }
+		if (memcmp(got, img.data() + (size_t)lba * RAW_SIZE, RAW_SIZE) || !r || r->undone || !audit_can_undo(v)) { printf("FAIL after the redo of the row: row undone %d\n", r ? r->undone : -1); bad++; }
+		aframe("audit-rows-redone", v);
+		if (!has_text(T(STR_HINT_UNDO)) || has_text(T(STR_HINT_REDO))) { printf("FAIL the redone row's hint is not \"%s\"\n", T(STR_HINT_UNDO)); bad++; }
+		if (audit_undo(v, why, sizeof why) != 0 || !(r = audit_focused(v)) || !r->undone) { printf("FAIL undo again of the sector row: %s\n", why); bad++; }
+		reset_all();
+	}
+	{   // the whole repair undone: its undo is now a redo, and says so; then redone from the screen
+		audit_back(v);   // Alundra's events, the repair focused
+		char why[200];
+		if (v.level != 2 || !audit_can_undo(v) || audit_undo(v, why, sizeof why) != 0) { printf("FAIL undo of the repair from the screen: %s\n", why); bad++; }
+		const AuditRow *e = audit_focused(v);
+		if (!e || strcmp(e->kind, "job") || !audit_can_undo(v) || !v.undo_redo) { printf("FAIL the undone repair does not offer a redo (%d)\n", v.undo_redo); bad++; }
+		aframe("audit-events-redo", v);
+		if (!has_text(T(STR_HINT_REDO)) || has_text(T(STR_HINT_UNDO))) { printf("FAIL the undone repair's hint is not \"%s\"\n", T(STR_HINT_REDO)); bad++; }
+		if (g_sfx_sv && !has_text("Gör om")) { printf("FAIL the Swedish redo hint\n"); bad++; }
+		{
+			char q[256], label[160], nm[64];
+			audit_label(v, v.row, label, sizeof label);
+			snprintf(q, sizeof q, T(STR_AUDIT_REDO_Q), label);
+			snprintf(nm, sizeof nm, "audit-redo-dialog%s", g_sfx_sv ? "-sv" : "");
+			g_boxes.clear(); own_dialog_draw(q, 1); save(nm); size_t b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+		}
+		if (audit_undo(v, why, sizeof why) != 0) { printf("FAIL redo of the repair from the screen: %s\n", why); bad++; }
+		FILE *f = fopen("out/t5/alundra.bin", "rb");
+		uint8_t got[RAW_SIZE] = {0};
+		if (f) { fseek(f, 515L * RAW_SIZE, SEEK_SET); if (fread(got, 1, RAW_SIZE, f) != RAW_SIZE) got[0] ^= 1; fclose(f); }
+		if (memcmp(got, img.data() + 515 * RAW_SIZE, RAW_SIZE) || v.undo_redo || !audit_can_undo(v)) { printf("FAIL after the redo: bytes again %d, redo %d\n", !memcmp(got, img.data() + 515 * RAW_SIZE, RAW_SIZE), v.undo_redo); bad++; }
+	}
+	audit_back(v);   // the discs
+	audit_nav(v, B_DOWN);
+	audit_open(v);   // Final Fantasy IX: the cancelled rip first; its sector cannot be undone
+	if (v.level != 2 || v.n != 3 || strcmp(av_rows[0].what, "rip") || audit_can_undo(v))
+		{ printf("FAIL FF9's events: %d, undo of the cancelled rip offered %d\n", v.n, audit_can_undo(v)); bad++; }
+	aframe("audit-events-cancelled", v);
+	if (!has_text(T(STR_AW_UNFINISHED))) { printf("FAIL the cancelled rip does not say why it cannot be undone\n"); bad++; }
+	audit_back(v);   // the discs, FF9 focused: its only change is the cancelled rip's, so no undo
+	if (v.level != 1 || v.row != 1 || audit_can_undo(v)) { printf("FAIL the FF9 disc offers undo (%d)\n", audit_can_undo(v)); bad++; }
+	aframe("audit-discs-no-undo", v);
+	if (!has_text(T(STR_AW_UNFINISHED)) || has_text(T(STR_HINT_UNDO))) { printf("FAIL the FF9 disc: no reason, or an undo hint\n"); bad++; }
+	audit_nav(v, B_UP);   // Alundra: its repair can be undone; the question names the whole disc
+	if (!audit_can_undo(v)) { printf("FAIL the Alundra disc does not offer undo\n"); bad++; }
+	{
+		char q[256], label[160], nm[64];
+		audit_label(v, v.row, label, sizeof label);
+		snprintf(q, sizeof q, T(STR_AUDIT_UNDO_DISC_Q), label);
+		snprintf(nm, sizeof nm, "audit-undo-disc-dialog%s", g_sfx_sv ? "-sv" : "");
+		g_boxes.clear(); own_dialog_draw(q, 1); save(nm); size_t b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+	}
+	audit_back(v);   // the domains
+	audit_nav(v, B_DOWN);
+	audit_open(v);   // Settings
+	if (v.level != 1 || v.dom != AU_SETTINGS || v.n != 5) { printf("FAIL the settings: level %d, %d event(s)\n", v.level, v.n); bad++; }
+	aframe("audit-settings", v);
+	if (!has_text("MCP") || !has_text(T(STR_AUDIT_SRC_REMOTE))) { printf("FAIL the settings rows do not show their sources\n"); bad++; }
+	{
+		int hdr = -1, spd = -1;
+		for (int i = 0; i < v.n; i++) {
+			if (!strcmp(av_rows[i].what, "webhook_header1")) hdr = i;
+			if (!strcmp(av_rows[i].what, "speed")) spd = i;
+		}
+		v.row = hdr;
+		if (hdr < 0 || audit_can_undo(v)) { printf("FAIL the header row offers undo\n"); bad++; }
+		aframe("audit-settings-secret", v);
+		if (!has_text(T(STR_AW_SECRET))) { printf("FAIL the secret row does not say why\n"); bad++; }
+		int old = -1;
+		for (int i = 0; i < v.n; i++) if (!strcmp(av_rows[i].what, "redump") && !strcmp(av_rows[i].after, "1")) old = i;
+		v.row = old;
+		char exp[160];
+		snprintf(exp, sizeof exp, T(STR_AW_SETTING_CHANGED), T(STR_L_REDUMP));
+		if (old < 0 || audit_can_undo(v)) { printf("FAIL the redump row changed since offers undo\n"); bad++; }
+		aframe("audit-settings-changed", v);
+		if (!has_text(exp)) { printf("FAIL the changed setting does not say \"%s\"\n", exp); bad++; }
+		v.row = spd;
+		char why[200];
+		if (spd < 0 || !audit_can_undo(v) || audit_undo(v, why, sizeof why) != 0 || g_std.speed != 1) { printf("FAIL undo of the speed from the screen (speed %d)\n", g_std.speed); bad++; }
+		if (v.n != 7) { printf("FAIL the settings after the undo: %d event(s), want 7\n", v.n); bad++; }   // + the undo's own rows
+		aframe("audit-settings-undone", v);
+		// the undo's own row: undoing it sets the speed again
+		int u = -1;
+		for (int i = 0; i < v.n; i++) if (!strcmp(av_rows[i].kind, "undo")) u = i;
+		v.row = u;
+		if (u < 0 || !audit_can_undo(v) || !av_rows[u].redo) { printf("FAIL the speed's undo row offers no redo\n"); bad++; }
+		aframe("audit-settings-redo", v);
+		if (!has_text(T(STR_HINT_REDO))) { printf("FAIL the undo row's hint is not \"%s\"\n", T(STR_HINT_REDO)); bad++; }
+		if (u < 0 || audit_undo(v, why, sizeof why) != 0 || g_std.speed != 2) { printf("FAIL redo of the speed from the screen (speed %d): %s\n", g_std.speed, why); bad++; }
+		if (v.n != 9) { printf("FAIL the settings after the redo: %d event(s), want 9\n", v.n); bad++; }
+	}
+	{   // sector reasons: one changed since, then all kept bytes dropped by the size cap
+		FILE *f = fopen("out/t5/alundra.bin", "r+b");
+		uint8_t junk[RAW_SIZE];
+		memset(junk, 0x5A, sizeof junk);
+		if (f) { fseek(f, 21L * RAW_SIZE, SEEK_SET); fwrite(junk, 1, sizeof junk, f); fclose(f); }
+		AuditView w;
+		audit_view_init(w);
+		audit_open(w); audit_open(w); audit_open(w);   // Rips, Alundra, the repair
+		audit_nav(w, B_DOWN); audit_nav(w, B_DOWN);   // sector 21
+		char exp[160];
+		snprintf(exp, sizeof exp, T(STR_AW_SECTOR_CHANGED), 21u);
+		const AuditRow *x = audit_focused(w);
+		if (!x || x->lba != 21 || audit_can_undo(w)) { printf("FAIL sector 21 changed since: row %u, undo %d\n", x ? (unsigned)x->lba : 0, audit_can_undo(w)); bad++; }
+		aframe("audit-rows-changed", w);
+		if (!has_text(exp)) { printf("FAIL the changed sector does not say why\n"); bad++; }
+		audit_set_cap(0);
+		audit_back(w); audit_open(w);   // read again
+		audit_nav(w, B_DOWN);   // sector 20
+		aframe("audit-rows-dropped", w);
+		if (audit_can_undo(w) || !has_text(T(STR_AW_DROPPED))) { printf("FAIL a sector whose bytes were dropped: undo %d\n", audit_can_undo(w)); bad++; }
+		audit_set_cap(256ull << 20);
+	}
+	{   // an empty log
+		system("rm -rf out/audit");
+		audit_init("out/audit", &vf_io);
+		AuditView e;
+		audit_view_init(e);
+		if (!e.empty) { printf("FAIL an empty log is not shown as empty\n"); bad++; }
+		aframe("audit-empty", e);
+		if (!has_text(T(STR_AUDIT_EMPTY))) { printf("FAIL the empty log says nothing\n"); bad++; }
+	}
+	audit_set_hooks(set_setting_hook, NULL);
+	g_webhook_hdr[0][0] = 0; g_audit_mb = 256; g_std.speed = 1; g_redump = RD_OFF;
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   the audit log screen (levels, paging, undo, sources)%s\n", g_sfx_sv ? " (sv)" : "");
 }
 
 int main()
@@ -293,10 +555,417 @@ int main()
 		const time_t when = 1793530800;   // 2026-11-01, when the local copy was downloaded
 		g_boxes.clear(); settings_draw(0, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings"); size_t b0 = g_fail; check("settings");
 		printf("%s settings\n", g_fail == (int)b0 ? "ok  " : "FAIL");
-		g_boxes.clear(); settings_draw(10, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings-about-row"); b0 = g_fail; check("settings-about-row");
+		g_boxes.clear(); settings_draw(12, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings-about-row"); b0 = g_fail; check("settings-about-row");
 		printf("%s settings-about-row\n", g_fail == (int)b0 ? "ok  " : "FAIL");
+		// the audit log rows, just above About: the log (X opens it) and the size of its sector data
+		g_audit_mb = 64;
+		g_boxes.clear(); settings_draw(11, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings-audit-row"); b0 = g_fail; check("settings-audit-row");
+		printf("%s settings-audit-row\n", g_fail == (int)b0 ? "ok  " : "FAIL");
+		g_boxes.clear(); settings_draw(10, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings-audit-log-row"); b0 = g_fail; check("settings-audit-log-row");
+		printf("%s settings-audit-log-row\n", g_fail == (int)b0 ? "ok  " : "FAIL");
+		g_audit_mb = 256;
 	}
 
+	{   // settings in the audit log: what changed, where it came from, no secrets
+		system("rm -rf out/audit out/psxrip.cfg");
+		audit_init("out/audit", &vf_io);
+		audit_set_hooks(set_setting_hook, NULL);
+		g_cfg_primed = false; g_webhook_hdr[0][0] = 0; g_webhook[0] = 0;
+		int bad = 0;
+		AuditRow r[20];
+		auto rows = [&]() { return audit_events(AU_SETTINGS, NULL, r, 20); };
+		g_input_src = AU_PAD;
+		cfg_save();   // the first save after start only primes the last text
+		if (rows() != 0) { printf("FAIL the first cfg_save logged %d rows\n", rows()); bad++; }
+		g_std.speed = 2;
+		cfg_save();
+		int n = rows();
+		if (n != 1 || strcmp(r[0].kind, "setting") || strcmp(r[0].what, "speed") || strcmp(r[0].before, "0") || strcmp(r[0].after, "2") || r[0].src != AU_PAD)
+			{ printf("FAIL speed change: %d rows, %s %s -> %s\n", n, n ? r[0].what : "-", n ? r[0].before : "-", n ? r[0].after : "-"); bad++; }
+		cfg_save();
+		if (rows() != 1) { printf("FAIL a save without a change logged a row\n"); bad++; }
+		snprintf(g_webhook_hdr[0], sizeof(g_webhook_hdr[0]), "X-Token: topsecret");
+		snprintf(g_webhook, sizeof(g_webhook), "http://h/secretid");
+		cfg_save();
+		n = rows();
+		bool hdr = false, url = false;
+		for (int i = 0; i < n; i++) {
+			if (!strcmp(r[i].what, "webhook_header1") && !strcmp(r[i].before, "cleared") && !strcmp(r[i].after, "set")) hdr = true;
+			if (!strcmp(r[i].what, "webhook") && !strcmp(r[i].before, "cleared") && !strcmp(r[i].after, "set")) url = true;
+		}
+		if (n != 3 || !hdr || !url) { printf("FAIL header/address rows: %d rows, header %d, address %d\n", n, hdr, url); bad++; }
+		{   // the secrets are nowhere in the audit directory
+			int leak = system("grep -rq -e topsecret -e secretid out/audit");
+			if (leak == 0) { printf("FAIL a secret reached the audit log\n"); bad++; }
+		}
+		// the remote pad: a press from the web page is a remote source
+		g_remote_btn = B_CROSS;
+		int p = pad_pressed();
+		if (!(p & B_CROSS) || g_input_src != AU_REMOTE) { printf("FAIL remote press source: %d\n", (int)g_input_src); bad++; }
+		g_std.eject = 0;
+		cfg_save();
+		n = rows();
+		if (n != 4 || r[0].src != AU_REMOTE || strcmp(r[0].what, "eject")) { printf("FAIL a change after a remote press is not from the remote\n"); bad++; }
+		// undo through the hook: the setting goes back and the undo is its own source
+		char why[200];
+		g_std.speed = 2;
+		uint32_t sid = 0;
+		for (int i = 0; i < n; i++) if (!strcmp(r[i].what, "speed")) sid = r[i].id;
+		if (audit_undo_row(sid, why, sizeof why) != 0 || g_std.speed != 0) { printf("FAIL undo of speed: %s (speed %d)\n", why, g_std.speed); bad++; }
+		n = rows();
+		bool us = false, um = false;   // the hook's save row, then the undo marker row
+		for (int i = 0; i < n; i++) {
+			if (r[i].src == AU_UNDO && !strcmp(r[i].kind, "setting") && !strcmp(r[i].what, "speed") && !strcmp(r[i].after, "0")) us = true;
+			if (r[i].src == AU_UNDO && !strcmp(r[i].kind, "undo")) um = true;
+		}
+		if (!us || !um) { printf("FAIL the undo's rows: setting %d, marker %d\n", us, um); bad++; }
+		// R4: a header (or the address) is never put back with "set" / "cleared"
+		snprintf(g_webhook_hdr[0], sizeof(g_webhook_hdr[0]), "X-Token: topsecret");
+		uint32_t hid = 0;
+		n = rows();
+		for (int i = 0; i < n; i++) if (!strcmp(r[i].what, "webhook_header1")) hid = r[i].id;
+		if (set_setting_hook("webhook_header1", "cleared") == 0 || strcmp(g_webhook_hdr[0], "X-Token: topsecret")) { printf("FAIL the hook accepted a header\n"); bad++; }
+		if (audit_undo_row(hid, why, sizeof why) == 0 || strcmp(g_webhook_hdr[0], "X-Token: topsecret") || !strstr(why, "not kept in the log")) { printf("FAIL undo of a header row: \"%s\"\n", why); bad++; }
+		for (int i = 0; i < n; i++)
+			if (!strcmp(r[i].what, "webhook_header1") || !strcmp(r[i].what, "webhook")) if (r[i].reversible) { printf("FAIL a secret row reads reversible\n"); bad++; }
+		// a boot with a config: the first change after it is logged, and so is an undo as the first one
+		{
+			system("rm -rf out/audit");
+			audit_init("out/audit", &vf_io);
+			audit_set_hooks(set_setting_hook, NULL);
+			g_std.retries = 4; g_std.speed = 0; g_remote = 0;
+			cfg_save();   // the config of the "earlier run"
+			g_std.retries = 9; g_cfg_primed = false;
+			cfg_load(); cfg_prime();   // boot: reads the file (retries=4 again)
+			if (g_std.retries != 4) { printf("FAIL boot read the config\n"); bad++; }
+			g_std.speed = 3;
+			cfg_save();
+			n = rows();
+			if (n != 1 || strcmp(r[0].what, "speed") || strcmp(r[0].after, "3")) { printf("FAIL first change after boot not logged (%d rows)\n", n); bad++; }
+			// the same for an undo as the very first action after a boot
+			g_cfg_primed = false; cfg_load(); cfg_prime();
+			if (set_setting_hook("speed", "2") != 0) { printf("FAIL hook speed\n"); bad++; }
+			n = rows();
+			if (n != 2 || r[0].src != AU_UNDO || strcmp(r[0].what, "speed") || strcmp(r[0].before, "3") || strcmp(r[0].after, "2")) { printf("FAIL first undo after boot not logged (%d rows)\n", n); bad++; }
+			// the cards follow an undo like they follow the screens
+			g_bdcfg = {1, 5, 1, 1, 0, 1};
+			cfg_save();
+			g_bdcfg = {1, 6, 2, 0, 1, 0};
+			cfg_save();
+			card_from(g_cards[0], g_bdcfg);
+			if (set_setting_hook("drive_bd", "5,1,1,0,1") != 0 || g_cards[0].retries != 5 || g_cards[0].speed != 1 || g_cards[0].eject != 1 || g_cards[0].autostart != 0 || g_cards[0].check != 1)
+				{ printf("FAIL card copy after drive_bd undo (retries %d)\n", g_cards[0].retries); bad++; }
+			g_cards[0].recheck = 0;
+			snprintf(g_outdir, sizeof(g_outdir), "/dev_hdd0/PSXISO");
+			if (set_setting_hook("outdir", "/dev_hdd0/OTHER") != 0 || strcmp(g_cards[0].outdir, "/dev_hdd0/OTHER") || strcmp(g_cards[0].dest, "/dev_hdd0/OTHER") || !g_cards[0].recheck)
+				{ printf("FAIL card outdir after undo\n"); bad++; }
+			// M1: the card takes the global destination itself (the copy is not made onto itself)
+			snprintf(g_outdir, sizeof(g_outdir), "/dev_hdd0/SELF");
+			card_apply_outdir(0, g_outdir);
+			if (strcmp(g_outdir, "/dev_hdd0/SELF") || strcmp(g_cards[0].outdir, "/dev_hdd0/SELF") || strcmp(g_cards[0].dest, "/dev_hdd0/SELF"))
+				{ printf("FAIL card_apply_outdir with the global itself: %s\n", g_outdir); bad++; }
+			// M2: a card with a running job keeps its destination and drive settings until the job ends
+			{
+				Card &k0 = g_cards[0];
+				snprintf(g_outdir, sizeof(g_outdir), "/dev_hdd0/OTHER");
+				card_apply_outdir(0, g_outdir);
+				card_from(k0, g_bdcfg);
+				int sp = k0.speed;
+				k0.job = 1; k0.recheck = 0;
+				if (set_setting_hook("outdir", "/dev_hdd0/BUSY") != 0 || strcmp(g_outdir, "/dev_hdd0/BUSY") || strcmp(k0.outdir, "/dev_hdd0/OTHER") || strcmp(k0.dest, "/dev_hdd0/OTHER") || !k0.recheck)
+					{ printf("FAIL outdir undo on a busy card: card %s / %s, global %s\n", k0.outdir, k0.dest, g_outdir); bad++; }
+				if (set_setting_hook("drive_bd", "5,3,1,0,1") != 0 || g_bdcfg.speed != 3 || k0.speed != sp)
+					{ printf("FAIL drive_bd undo on a busy card: card speed %d\n", k0.speed); bad++; }
+				cards_take_pending();   // still busy: nothing
+				if (strcmp(k0.outdir, "/dev_hdd0/OTHER") || k0.speed != sp) { printf("FAIL pending applied while busy\n"); bad++; }
+				k0.job = 0;
+				cards_take_pending();   // the job ended
+				if (strcmp(k0.outdir, "/dev_hdd0/BUSY") || strcmp(k0.dest, "/dev_hdd0/BUSY") || k0.speed != 3 || !k0.recheck)
+					{ printf("FAIL pending after the job: card %s, speed %d\n", k0.outdir, k0.speed); bad++; }
+			}
+			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 0;
+			set_setting_hook("name_pattern", "%D");
+			bool all = true;
+			for (int c = 0; c < NCARDS; c++) if (!g_cards[c].recheck) all = false;
+			if (!all || strcmp(g_name_pat, "%D")) { printf("FAIL recheck after name_pattern undo\n"); bad++; }
+			g_remote = 0;
+			if (set_setting_hook("remote", "1") != 0 || g_remote != 1) { printf("FAIL remote undo\n"); bad++; }
+			set_setting_hook("remote", "0");
+		}
+		// I2: the config file edited while the app was off (FTP): the boot logs the value it finds as
+		// an app row, so the undo of an older row sees that the setting changed since
+		{
+			system("rm -rf out/audit");
+			audit_init("out/audit", &vf_io);
+			audit_set_hooks(set_setting_hook, NULL);
+			g_webhook_hdr[0][0] = 0; g_webhook[0] = 0;
+			g_cfg_primed = false; g_std.speed = 1; cfg_save();   // primes
+			g_std.speed = 2; cfg_save();   // the log: speed 1 -> 2
+			n = rows();
+			uint32_t old = n == 1 ? r[0].id : 0;
+			g_cfg_primed = false; g_std.speed = 3;   // the edit: written, not logged
+			snprintf(g_webhook_hdr[0], sizeof(g_webhook_hdr[0]), "X-Token: topsecret");
+			cfg_save();
+			g_std.speed = 0; g_webhook_hdr[0][0] = 0;
+			g_cfg_primed = false; cfg_load(); cfg_prime();   // boot
+			n = rows();
+			bool spd = false;
+			for (int i = 0; i < n; i++)
+				if (!strcmp(r[i].what, "speed") && r[i].src == AU_APP && !strcmp(r[i].before, "2") && !strcmp(r[i].after, "3")) spd = true;
+			// the header was never in the log: nothing to compare with, no row
+			if (g_std.speed != 3 || n != 2 || !spd) { printf("FAIL boot after an edit: %d rows, speed row %d\n", n, spd); bad++; }
+			AuditReason rs;
+			if (audit_undo_row(old, why, sizeof why, &rs) == 0 || rs.code != AW_SETTING_CHANGED || g_std.speed != 3)
+				{ printf("FAIL undo over an edited setting: code %d, speed %d\n", (int)rs.code, g_std.speed); bad++; }
+			g_cfg_primed = false; cfg_load(); cfg_prime();   // a second boot: nothing new
+			if (rows() != 2) { printf("FAIL a boot without an edit logged %d rows\n", rows() - 2); bad++; }
+			// a secret the log knows as set, cleared in the file: a set -> cleared row, never reversible
+			g_webhook_hdr[0][0] = 0; cfg_save();   // the log: set -> cleared -> set
+			snprintf(g_webhook_hdr[0], sizeof(g_webhook_hdr[0]), "X-Token: topsecret"); cfg_save();
+			if (rows() != 4) { printf("FAIL header rows: %d\n", rows()); bad++; }
+			g_cfg_primed = false; g_webhook_hdr[0][0] = 0; cfg_save();   // the edit
+			g_cfg_primed = false; cfg_load(); cfg_prime();
+			n = rows();
+			if (n != 5 || strcmp(r[0].what, "webhook_header1") || strcmp(r[0].before, "set") || strcmp(r[0].after, "cleared") || r[0].src != AU_APP || r[0].reversible)
+				{ printf("FAIL boot after a header edit: %d rows, %s %s -> %s\n", n, r[0].what, r[0].before, r[0].after); bad++; }
+			g_std.speed = 0;
+		}
+		// audit_mb: the listed sizes, anything else is 256
+		cfg_apply_line("audit_mb=16");
+		if (g_audit_mb != 16) { printf("FAIL audit_mb=16 gave %d\n", g_audit_mb); bad++; }
+		cfg_apply_line("audit_mb=3");
+		if (g_audit_mb != 256) { printf("FAIL audit_mb=3 gave %d\n", g_audit_mb); bad++; }
+		if (bad) g_fail += bad; else printf("ok   settings in the audit log (changes, source, secrets, undo, audit_mb)\n");
+	}
+	{   // jobs and their sector writes in the audit log, and the check of a rip from its file
+		system("rm -rf out/audit out/t4 && mkdir -p out/t4");
+		audit_init("out/audit", &vf_io);
+		audit_set_hooks(set_setting_hook, recheck_hook);
+		int bad = 0;
+		auto put_file = [](const char *p, const void *d, size_t n) { FILE *f = fopen(p, "wb"); fwrite(d, 1, n, f); fclose(f); };
+		auto get_file = [](const char *p, std::string &s) { s.clear(); FILE *f = fopen(p, "rb"); if (!f) return false; char b[4096]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) s.append(b, n); fclose(f); return true; };
+		static uint8_t img[5 * RAW_SIZE];
+		for (size_t i = 0; i < sizeof img; i++) img[i] = (uint8_t)(i * 7 + i / RAW_SIZE);
+		put_file("out/t4/img.bin", img, sizeof img);
+		reset_all();
+		disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+		Card &k = g_cards[0];
+		{
+			OnCard o(0);
+			g_leadout = 5;
+			char key[96];
+			disc_key(key, sizeof key);
+			if (strcmp(key, "SLES_011.35:5")) { printf("FAIL disc key \"%s\"\n", key); bad++; }
+			snprintf(k.exist, sizeof(k.exist), "out/t4/img");
+			snprintf(g_base, sizeof(g_base), "out/t4/img");
+			audit_card_begin(0, AU_PAD, "repair");
+			if (!k.audit_job || strcmp(k.rd_before, "unchecked")) { printf("FAIL job begin: job %u, before \"%s\"\n", (unsigned)k.audit_job, k.rd_before); bad++; }
+			// a sector written into an image opened r+b: the new bytes in the file, a sector row with the old ones
+			g_out = vf_open("out/t4/img.bin", "r+b");
+			uint8_t sec[RAW_SIZE];
+			memset(sec, 0xAB, sizeof sec);
+			if (!g_out || write_sector_audited(2, sec) != 0) { printf("FAIL write_sector_audited on r+b\n"); bad++; }
+			// past the end of the image: the old bytes cannot be read, so the write fails and nothing is logged
+			if (g_out && write_sector_audited(40, sec) == 0) { printf("FAIL a sector without readable old bytes was written\n"); bad++; }
+			if (g_out) vf_close(g_out);
+			g_out = NULL;
+			std::string s;
+			get_file("out/t4/img.bin", s);
+			if (s.size() != sizeof img || memcmp(s.data() + 2 * RAW_SIZE, sec, RAW_SIZE) || memcmp(s.data(), img, 2 * RAW_SIZE) || memcmp(s.data() + 3 * RAW_SIZE, img + 3 * RAW_SIZE, 2 * RAW_SIZE))
+				{ printf("FAIL the image after the write (size %zu)\n", s.size()); bad++; }
+			AuditRow r[8];
+			int n = audit_rows(k.audit_job, r, 0, 8), sectors = 0;
+			for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, "sector")) {
+				sectors++;
+				if (r[i].lba != 2 || strcmp(r[i].file, "out/t4/img.bin") || strcmp(r[i].disc, "SLES_011.35:5")) { printf("FAIL sector row: lba %u file %s disc %s\n", (unsigned)r[i].lba, r[i].file, r[i].disc); bad++; }
+			}
+			if (sectors != 1) { printf("FAIL %d sector row(s), want 1\n", sectors); bad++; }
+			char bp[64];
+			snprintf(bp, sizeof bp, "out/audit/job%u.bin", (unsigned)k.audit_job);
+			if (!get_file(bp, s) || s.size() != 2 * RAW_SIZE || memcmp(s.data(), img + 2 * RAW_SIZE, RAW_SIZE) || memcmp(s.data() + RAW_SIZE, sec, RAW_SIZE))
+				{ printf("FAIL the job's sector bytes (old, new): %zu bytes\n", s.size()); bad++; }
+			// the Redump result as a row: before = the rip's earlier line
+			g_rd_result = 1; snprintf(g_rd_result_name, sizeof(g_rd_result_name), "Alundra (Europe)");
+			audit_card_redump(0);
+			uint32_t job = k.audit_job;
+			audit_card_end(0, "finished");
+			n = audit_rows(job, r, 0, 8);
+			bool rd = false, res = false;
+			for (int i = 0; i < n; i++) {
+				if (!strcmp(r[i].kind, "redump") && !strcmp(r[i].before, "unchecked") && !strcmp(r[i].after, "verified Alundra (Europe)")) rd = true;
+				if (!strcmp(r[i].kind, "result") && !strcmp(r[i].after, "finished")) res = true;
+			}
+			if (!rd || !res || k.audit_job) { printf("FAIL redump row %d, result row %d, job cleared %d\n", rd, res, !k.audit_job); bad++; }
+			// the rip's earlier line from its log
+			put_file("out/t4/img.log", "PSX Ripper rip log\nredump=verified Alundra (Europe)\n", 51);
+			audit_card_begin(0, AU_REMOTE, "check");
+			if (strcmp(k.rd_before, "verified Alundra (Europe)") || k.job_src != AU_REMOTE) { printf("FAIL earlier redump line \"%s\"\n", k.rd_before); bad++; }
+			audit_card_end(0, "cancelled");
+			// a rip writes its file w+b: the old bytes can be read back before a sector is written again
+			g_out = vf_open("out/t4/new.bin", "w+b");
+			audit_card_begin(0, AU_APP, "rip");
+			if (!g_out || vf_write(g_out, img, sizeof img) != sizeof img || write_sector_audited(1, sec) != 0) { printf("FAIL write_sector_audited on a w+b rip file\n"); bad++; }
+			if (g_out) vf_close(g_out);
+			g_out = NULL;
+			audit_card_end(0, "finished");
+		}
+		// how each job ends: every way out names its result
+		{
+			OnCard o(0);
+			g_disc_lost[0] = 0; g_abort = 0;
+			const char *a = rip_result(1), *b = rip_result(0);
+			g_abort = 1; const char *c = rip_result(0), *d = repair_result(1);
+			g_disc_lost[0] = 1; const char *e = rip_result(0), *f = repair_result(1);
+			g_disc_lost[0] = 0; g_abort = 0; const char *g = repair_result(0), *h = repair_result(1);
+			if (strcmp(a, "finished") || strcmp(b, "failed") || strcmp(c, "cancelled") || strcmp(d, "cancelled") || strcmp(e, "disc_lost") || strcmp(f, "disc_lost") || strcmp(g, "failed") || strcmp(h, "finished"))
+				{ printf("FAIL job results: %s %s %s %s %s %s %s %s\n", a, b, c, d, e, f, g, h); bad++; }
+		}
+		// a job whose thread cannot start (always on the host) is ended at once: it never stays "running"
+		{
+			snprintf(k.exist, sizeof(k.exist), "out/t4/img");
+			k.job = 0;
+			rip_job_start(0, AU_PAD, 0);
+			repair_job_start(0, AU_APP);
+			check_job_start(0, AU_REMOTE);
+			AuditRow r[30];
+			int n = audit_events(AU_RIPS, "SLES_011.35:5", r, 30), open = 0;
+			for (int i = 0; i < n; i++) {
+				if (strcmp(r[i].kind, "job")) continue;
+				AuditRow rr[30];
+				int m = audit_rows(r[i].job, rr, 0, 30), ended = 0;
+				for (int j = 0; j < m; j++) if (!strcmp(rr[j].kind, "result")) ended = 1;
+				if (!ended) open++;
+			}
+			if (n != 6 || open || k.audit_job || k.job) { printf("FAIL jobs that could not start: %d events, %d not ended\n", n, open); bad++; }
+		}
+		// check_image: MD5 per track from the cue, the .md5 and the log written
+		{
+			static uint8_t two[5 * RAW_SIZE];
+			for (size_t i = 0; i < sizeof two; i++) two[i] = (uint8_t)(i * 13 + 5);
+			put_file("out/t4/two.bin", two, sizeof two);
+			const char *cue = "FILE \"two.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    INDEX 00 00:00:03\n    INDEX 01 00:00:04\n";
+			put_file("out/t4/two.cue", cue, strlen(cue));
+			const char *log = "PSX Ripper rip log\ntitle=Two\nsectors=5\ntrack=01 start=0 md5=00000000000000000000000000000000\ntrack=02 start=3 md5=11111111111111111111111111111111\nredump=verified Two (Europe)\nunreadable_count=0\n";
+			put_file("out/t4/two.log", log, strlen(log));
+			char want[2][33];
+			for (int t = 0; t < 2; t++) {
+				Md5 m; uint8_t d[16];
+				md5_init(&m);
+				md5_update(&m, two + (t ? 3 : 0) * RAW_SIZE, (t ? 2 : 3) * RAW_SIZE);
+				md5_final(&m, d);
+				md5_hex(d, want[t]);
+			}
+			int r = check_image("out/t4/two");
+			std::string s;
+			char exp[200];
+			snprintf(exp, sizeof exp, "%s  track 01\n%s  track 02\n", want[0], want[1]);
+			if (r != 0 || !get_file("out/t4/two.md5", s) || s != exp) { printf("FAIL check_image .md5 (%d): \"%s\"\n", r, s.c_str()); bad++; }
+			// the log: the tracks' MD5 and the Redump line now (no local copy on the host: unchecked)
+			get_file("out/t4/two.log", s);
+			char t1[80], t2[80];
+			snprintf(t1, sizeof t1, "track=01 start=0 md5=%s\n", want[0]);
+			snprintf(t2, sizeof t2, "track=02 start=3 md5=%s\n", want[1]);
+			if (s.find(t1) == std::string::npos || s.find(t2) == std::string::npos || s.find("redump=unchecked\n") == std::string::npos || s.find("verified") != std::string::npos || s.find("unreadable_count=0\n") == std::string::npos)
+				{ printf("FAIL check_image log:\n%s", s.c_str()); bad++; }
+			// the audit's recheck hook takes the image's path
+			remove("out/t4/two.md5");
+			recheck_hook("out/t4/two.bin", NULL, NULL, 0, 0);
+			if (!get_file("out/t4/two.md5", s) || s != exp) { printf("FAIL recheck hook\n"); bad++; }
+			if (check_image("out/t4/none") == 0) { printf("FAIL check_image without an image\n"); bad++; }
+		}
+		// R9: undoing a repair puts its sectors back into the rip's log, so a later repair reads them again
+		{
+			static uint8_t rep[4 * RAW_SIZE];
+			memset(rep, 0x5A, sizeof rep);
+			memset(rep + RAW_SIZE, 0, RAW_SIZE);   // sector 1: unreadable, the rip filled it with zeros
+			memset(rep + 2 * RAW_SIZE, 0x66, RAW_SIZE);   // sector 2: bad bytes
+			put_file("out/t4/rep.bin", rep, sizeof rep);
+			const char *cue = "FILE \"rep.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n";
+			put_file("out/t4/rep.cue", cue, strlen(cue));
+			// the log after the repair fixed both: no sector lines, counts 0
+			const char *log = "PSX Ripper rip log\nsectors=4\ntrack=01 start=0 md5=00000000000000000000000000000000\nredump=no_match\nunreadable_count=0\nbad_count=0\nfixed_count=2\nuncertain=3 unconfirmed\n";
+			put_file("out/t4/rep.log", log, strlen(log));
+			OnCard o(0);
+			snprintf(k.exist, sizeof(k.exist), "out/t4/rep");
+			snprintf(g_base, sizeof(g_base), "out/t4/rep");
+			g_leadout = 4;
+			audit_card_begin(0, AU_PAD, "repair");
+			uint32_t job = k.audit_job;
+			g_out = vf_open("out/t4/rep.bin", "r+b");
+			uint8_t good[RAW_SIZE];
+			memset(good, 0x77, sizeof good);
+			if (!g_out || write_sector_audited(1, good) || write_sector_audited(2, good)) { printf("FAIL repair writes\n"); bad++; }
+			if (g_out) vf_close(g_out);
+			g_out = NULL;
+			audit_card_end(0, "finished");
+			char why[200] = "";
+			if (audit_undo_job(job, why, sizeof why) != 0) { printf("FAIL undo of the repair: %s\n", why); bad++; }
+			std::string s;
+			get_file("out/t4/rep.log", s);
+			auto has = [&](const char *l) { return s.find(l) != std::string::npos; };
+			if (!has("\nunreadable=1\n") || !has("\nbad=2\n") || !has("unreadable_count=1\n") || !has("bad_count=1\n") || !has("fixed_count=0\n") || !has("uncertain=3 unconfirmed\n"))
+				{ printf("FAIL the log after the undo:\n%s", s.c_str()); bad++; }
+			snprintf(g_base, sizeof(g_base), "out/t4/rep");
+			int open = riplog_open_count();
+			if (open != 3) { printf("FAIL riplog_open_count after the undo: %d, want 3\n", open); bad++; }
+			// already listed: not added twice, counts unchanged
+			uint32_t l2[2] = {1, 2};
+			uint8_t z2[2] = {1, 0};
+			recheck_hook("out/t4/rep.bin", l2, z2, 2, 0);
+			get_file("out/t4/rep.log", s);
+			size_t a = s.find("unreadable=1\n"), b = s.find("bad=2\n");
+			if (a == std::string::npos || s.find("unreadable=1\n", a + 1) != std::string::npos || s.find("bad=2\n", b + 1) != std::string::npos || !has("unreadable_count=1\n") || !has("bad_count=1\n"))
+				{ printf("FAIL the log after a second recheck:\n%s", s.c_str()); bad++; }
+			// undoing the undo (a redo): the repaired bytes again, the sectors out of the log again
+			if (audit_undo_job(job, why, sizeof why) != 0) { printf("FAIL redo of the repair: %s\n", why); bad++; }
+			get_file("out/t4/rep.bin", s);
+			if (s.size() != sizeof rep || memcmp(s.data() + RAW_SIZE, good, RAW_SIZE) || memcmp(s.data() + 2 * RAW_SIZE, good, RAW_SIZE)) { printf("FAIL the image after the redo\n"); bad++; }
+			get_file("out/t4/rep.log", s);
+			if (has("unreadable=1\n") || has("bad=2\n") || !has("unreadable_count=0\n") || !has("bad_count=0\n") || !has("fixed_count=2\n") || !has("uncertain=3 unconfirmed\n"))
+				{ printf("FAIL the log after the redo:\n%s", s.c_str()); bad++; }
+			snprintf(g_base, sizeof(g_base), "out/t4/rep");
+			if ((open = riplog_open_count()) != 1) { printf("FAIL riplog_open_count after the redo: %d, want 1\n", open); bad++; }
+			// and undone again: back in the log once more
+			if (audit_undo_job(job, why, sizeof why) != 0) { printf("FAIL second undo of the repair: %s\n", why); bad++; }
+			get_file("out/t4/rep.log", s);
+			if (!has("\nunreadable=1\n") || !has("\nbad=2\n") || !has("unreadable_count=1\n") || !has("bad_count=1\n") || !has("fixed_count=0\n"))
+				{ printf("FAIL the log after the second undo:\n%s", s.c_str()); bad++; }
+		}
+		audit_set_hooks(set_setting_hook, NULL);
+		system("rm -rf out/audit");
+		audit_init("out/audit", &vf_io);
+		reset_all();
+		if (bad) g_fail += bad; else printf("ok   jobs and sectors in the audit log (sector rows, results, redump, check_image)\n");
+	}
+	// the audit log screen, in both languages
+	host_lang = PS3_LANG_SWEDISH; lang_init(); g_sfx_sv = 1;
+	audit_scenarios();
+	host_lang = PS3_LANG_ENGLISH_US; lang_init(); g_sfx_sv = 0;
+	audit_scenarios();
+	{   // undoing an audit_mb row applies the size cap at once (the kept sectors over it go)
+		system("rm -rf out/audit out/psxrip.cfg");
+		audit_init("out/audit", &vf_io);
+		audit_set_hooks(set_setting_hook, NULL);
+		int bad = 0;
+		g_cfg_primed = false; g_input_src = AU_PAD;
+		g_audit_mb = 1; audit_apply_cap(); cfg_save();   // primes
+		g_audit_mb = 256; cfg_save(); audit_apply_cap();
+		AuditRow e[4];
+		int n = audit_events(AU_SETTINGS, NULL, e, 4);
+		uint32_t job = audit_job_begin(AU_APP, "SLES_011.35:500", "Alundra", "repair");
+		uint8_t a[RAW_SIZE], b[RAW_SIZE];
+		memset(a, 1, sizeof a); memset(b, 2, sizeof b);
+		for (uint32_t l = 0; l < 500; l++) audit_sector(job, "out/t5/none.bin", l, a, b);   // 2.3 MB kept
+		audit_job_end(job, "finished");
+		char bp[64], why[200];
+		snprintf(bp, sizeof bp, "out/audit/job%u.bin", (unsigned)job);
+		bool kept = vf_exists(bp);
+		int rc = n == 1 && !strcmp(e[0].what, "audit_mb") ? audit_undo_row(e[0].id, why, sizeof why) : -2;
+		if (!kept || rc != 0 || g_audit_mb != 1 || vf_exists(bp)) { printf("FAIL undo of audit_mb: rows %d, kept %d, rc %d, audit_mb %d, file left %d\n", n, kept, rc, g_audit_mb, vf_exists(bp)); bad++; }
+		g_audit_mb = 256; audit_apply_cap();
+		audit_set_hooks(set_setting_hook, NULL);
+		if (bad) g_fail += bad; else printf("ok   undoing an audit_mb row applies the cap at once\n");
+	}
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

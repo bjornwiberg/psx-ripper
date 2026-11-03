@@ -37,6 +37,7 @@
 #include "webhook.h"
 #include "vfs.h"
 #include "usbodd.h"
+#include "audit.h"
 #include <sys/mutex.h>
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
@@ -45,7 +46,9 @@ static const char *SBI_DIR = "/dev_hdd0/tmp/sbi";
 static int g_mounttest = 0;   // flag psxrip.mounttest: rip the image Cobra has mounted (development aid)
 
 // ---------------------------------------------------------------- settings (saved in CFG_PATH)
+#ifndef CFG_PATH   // the host tests point it elsewhere
 #define CFG_PATH "/dev_hdd0/tmp/psxrip.cfg"
+#endif
 static char g_outdir[64] = "/dev_hdd0/PSXISO";
 static int g_redump = RD_OFF;      // verification against Redump: off, online or local copy
 static int g_remote = 0;           // remote view (web server on port 8090)
@@ -105,6 +108,7 @@ struct Card {
 	char rd[160];                     // Redump line, "" = none
 	volatile int prev_rip, repair_n, space_short;
 	volatile int recheck;             // the destination changed: look again for an earlier rip there
+	volatile int pend_cfg;            // CF_*: config the card takes when its job ends (an undo changed it meanwhile)
 	char base[256];                   // destination + file name without extension (g_base of the card)
 	char outdir[64];                  // chosen destination
 	char dest[64];                    // used: the chosen one, or the hard disk while it is out
@@ -127,6 +131,10 @@ struct Card {
 	uint64_t eta_t0, eta_tw; uint32_t eta_pw, eta_p0; double eta_rate;   // time left of the running rip
 	int eta_phase;
 	int pg_scroll, pg_max;            // the page: pixels scrolled down, and how far it can (L2/R2)
+	uint32_t audit_job;               // the running job's id in the audit log, 0 = none
+	AuditSrc job_src;                 // what started it (pad, remote, app)
+	char audit_disc[96];              // its disc key
+	char rd_before[RD_NAME + 16];     // the rip's Redump line before the job ("unchecked" when none)
 };
 static Card g_cards[NCARDS];
 
@@ -143,6 +151,73 @@ static void card_store(int c)
 	if (port >= 0 && port < 8) g_usbcfg[port] = d;
 }
 static volatile int g_card = 0;       // changes only while no identification, rip or repair runs
+// The audit's image access: the app's own file layer (it also reaches exFAT drives).
+static void *au_open(const char *p, const char *m) { return vf_open(p, m); }
+static size_t au_read(void *f, void *p, size_t n) { return vf_read((VFile *)f, p, n); }
+static size_t au_write(void *f, const void *p, size_t n) { return vf_write((VFile *)f, p, n); }
+static int au_seek(void *f, uint64_t pos) { return vf_seek((VFile *)f, pos); }
+static int au_close(void *f) { return vf_close((VFile *)f); }
+static const AuditIo vf_io = {au_open, au_read, au_write, au_seek, au_close};
+
+// Where the last button press came from (set by pad_pressed): the source of the changes made after it.
+static AuditSrc g_input_src = AU_PAD;
+static int g_audit_mb = 256;   // size cap of the audit's sector files, in MB
+static const int audit_mb_steps[] = {1, 2, 4, 8, 16, 32, 64, 128, 256};
+static void audit_apply_cap() { audit_set_cap((uint64_t)g_audit_mb << 20); }
+
+// One config line ("key=value") into the settings. Returns 1 when it was a known key with a usable
+// value, else 0 (nothing changed).
+static int cfg_apply_line(const char *line)
+{
+	if (!strncmp(line, "outdir=", 7)) {
+		if (line[7] != '/' && strncmp(line + 7, "exfat", 5)) return 0;   // also exFAT drives
+		snprintf(g_outdir, sizeof(g_outdir), "%s", line + 7);
+	}
+	else if (!strncmp(line, "retries=", 8)) { int r = atoi(line + 8); if (r < 1 || r > 64) return 0; g_std.retries = r; }
+	else if (!strncmp(line, "speed=", 6)) { int v = atoi(line + 6); if (v < 0 || v > 3) return 0; g_std.speed = v; }
+	else if (!strncmp(line, "eject=", 6)) g_std.eject = atoi(line + 6) ? 1 : 0;
+	else if (!strncmp(line, "autostart=", 10)) g_std.autostart = atoi(line + 10) ? 1 : 0;
+	else if (!strncmp(line, "redump=", 7)) { int v = atoi(line + 7); if (v < RD_OFF || v > RD_LOCAL) return 0; g_redump = v; }
+	else if (!strncmp(line, "remote=", 7)) g_remote = atoi(line + 7) ? 1 : 0;
+	else if (!strncmp(line, "check=", 6)) { int v = atoi(line + 6); if (v < CHECK_OFF || v > CHECK_BITPERFECT) return 0; g_std.check = v; }
+	else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
+	else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
+	else if (!strncmp(line, "webhook_events=", 15)) g_webhook_mask = atoi(line + 15) & ((1 << WH_COUNT) - 1);
+	else if (!strncmp(line, "webhook_headers_on=", 19)) g_webhook_hdr_on = atoi(line + 19) ? 1 : 0;
+	else if (!strncmp(line, "webhook_header", 14) && line[14] >= '1' && line[14] <= '0' + WH_HEADERS && line[15] == '=') {
+		snprintf(g_webhook_hdr[line[14] - '1'], sizeof(g_webhook_hdr[0]), "%s", line + 16);
+		clean_header(g_webhook_hdr[line[14] - '1']);
+	}
+	else if (!strncmp(line, "outdir_usb", 10) && line[10] >= '0' && line[10] <= '7' && line[11] == '=') {   // destination of the USB drive on port N
+		if (line[12] != '/' && strncmp(line + 12, "exfat", 5)) return 0;
+		snprintf(g_outdir_usb[line[10] - '0'], sizeof(g_outdir_usb[0]), "%s", line + 12);
+	}
+	else if ((!strncmp(line, "drive_usb", 9) && line[9] >= '0' && line[9] <= '7' && line[10] == '=') || !strncmp(line, "drive_bd=", 9)) {
+		// drive_bd= / drive_usbN=retries,speed,eject,autostart,check; -1 = the standard
+		DriveCfg c = {1, -1, -1, -1, -1, -1};
+		const char *v = strchr(line, '=') + 1;
+		if (sscanf(v, "%d,%d,%d,%d,%d", &c.retries, &c.speed, &c.eject, &c.autostart, &c.check) == 5 &&
+		    (c.retries == -1 || (c.retries >= 1 && c.retries <= 64)) && c.speed >= -1 && c.speed <= 3 && c.eject >= -1 && c.eject <= 1 &&
+		    c.autostart >= -1 && c.autostart <= 1 && c.check >= -1 && c.check <= CHECK_BITPERFECT) {
+			if (line[6] == 'b') g_bdcfg = c; else g_usbcfg[line[9] - '0'] = c;
+		} else return 0;
+	}
+	else if (!strncmp(line, "name_pattern=", 13) && line[13]) snprintf(g_name_pat, sizeof(g_name_pat), "%s", line + 13);
+	else if (!strncmp(line, "webhook_step=", 13)) {
+		int v = atoi(line + 13), ok = 0;
+		for (int i = 0; i < 7; i++) if (wh_steps[i] == v) { g_webhook_step = v; ok = 1; }
+		if (!ok) return 0;
+	}
+	else if (!strncmp(line, "audit_mb=", 9)) {
+		int v = atoi(line + 9), mb = 256;   // anything but a listed size is the default
+		for (size_t i = 0; i < sizeof(audit_mb_steps) / sizeof(audit_mb_steps[0]); i++) if (audit_mb_steps[i] == v) mb = v;
+		g_audit_mb = mb;
+		audit_apply_cap();
+	}
+	else return 0;
+	return 1;
+}
+
 // Returns 0 when there is no config file yet.
 static int cfg_load()
 {
@@ -151,60 +226,144 @@ static int cfg_load()
 	char line[640];
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = 0;
-		if (!strncmp(line, "outdir=", 7) && (line[7] == '/' || !strncmp(line + 7, "exfat", 5)))   // also exFAT drives
-			snprintf(g_outdir, sizeof(g_outdir), "%s", line + 7);
-		else if (!strncmp(line, "retries=", 8)) { int r = atoi(line + 8); if (r >= 1 && r <= 64) g_std.retries = r; }
-		else if (!strncmp(line, "speed=", 6)) { int v = atoi(line + 6); if (v >= 0 && v <= 3) g_std.speed = v; }
-		else if (!strncmp(line, "eject=", 6)) g_std.eject = atoi(line + 6) ? 1 : 0;
-		else if (!strncmp(line, "autostart=", 10)) g_std.autostart = atoi(line + 10) ? 1 : 0;
-		else if (!strncmp(line, "redump=", 7)) { int v = atoi(line + 7); if (v >= RD_OFF && v <= RD_LOCAL) g_redump = v; }
-		else if (!strncmp(line, "remote=", 7)) g_remote = atoi(line + 7) ? 1 : 0;
-		else if (!strncmp(line, "check=", 6)) { int v = atoi(line + 6); if (v >= CHECK_OFF && v <= CHECK_BITPERFECT) g_std.check = v; }
-		else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
-		else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
-		else if (!strncmp(line, "webhook_events=", 15)) g_webhook_mask = atoi(line + 15) & ((1 << WH_COUNT) - 1);
-		else if (!strncmp(line, "webhook_headers_on=", 19)) g_webhook_hdr_on = atoi(line + 19) ? 1 : 0;
-		else if (!strncmp(line, "webhook_header", 14) && line[14] >= '1' && line[14] <= '0' + WH_HEADERS && line[15] == '=') {
-			snprintf(g_webhook_hdr[line[14] - '1'], sizeof(g_webhook_hdr[0]), "%s", line + 16);
-			clean_header(g_webhook_hdr[line[14] - '1']);
-		}
-		else if (!strncmp(line, "outdir_usb", 10) && line[10] >= '0' && line[10] <= '7' && line[11] == '=' &&
-		         (line[12] == '/' || !strncmp(line + 12, "exfat", 5)))   // destination of the USB drive on port N
-			snprintf(g_outdir_usb[line[10] - '0'], sizeof(g_outdir_usb[0]), "%s", line + 12);
-		else if ((!strncmp(line, "drive_usb", 9) && line[9] >= '0' && line[9] <= '7' && line[10] == '=') || !strncmp(line, "drive_bd=", 9)) {
-			// drive_bd= / drive_usbN=retries,speed,eject,autostart,check; -1 = the standard
-			DriveCfg c = {1, -1, -1, -1, -1, -1};
-			const char *v = strchr(line, '=') + 1;
-			if (sscanf(v, "%d,%d,%d,%d,%d", &c.retries, &c.speed, &c.eject, &c.autostart, &c.check) == 5 &&
-			    (c.retries == -1 || (c.retries >= 1 && c.retries <= 64)) && c.speed >= -1 && c.speed <= 3 && c.eject >= -1 && c.eject <= 1 &&
-			    c.autostart >= -1 && c.autostart <= 1 && c.check >= -1 && c.check <= CHECK_BITPERFECT) {
-				if (line[6] == 'b') g_bdcfg = c; else g_usbcfg[line[9] - '0'] = c;
-			}
-		}
-		else if (!strncmp(line, "name_pattern=", 13) && line[13]) snprintf(g_name_pat, sizeof(g_name_pat), "%s", line + 13);
-		else if (!strncmp(line, "webhook_step=", 13)) { int v = atoi(line + 13); for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
+		cfg_apply_line(line);
 	}
 	fclose(f);
 	return 1;
 }
 
-static void cfg_save()
+// The config text as last written; every line that differs after the next save is an audit row.
+static char g_cfg_last[4096];
+static bool g_cfg_primed = false;   // the first save after start only fills g_cfg_last
+
+// The webhook address may hold a secret id and the headers often hold a token: neither goes into the log.
+static bool cfg_key_secret(const char *key) { return !strcmp(key, "webhook") || (!strncmp(key, "webhook_header", 14) && key[14] >= '1' && key[14] <= '9' && !key[15]); }
+
+// The value of line `key` in text (up to the next newline) into out; false when text has no such line.
+static bool cfg_find(const char *text, const char *key, char *out, size_t n)
+{
+	size_t kl = strlen(key);
+	for (const char *p = text; *p; ) {
+		const char *e = strchr(p, '\n');
+		size_t len = e ? (size_t)(e - p) : strlen(p);
+		if (len > kl && !strncmp(p, key, kl) && p[kl] == '=') {
+			size_t vl = len - kl - 1;
+			if (vl >= n) vl = n - 1;
+			memcpy(out, p + kl + 1, vl);
+			out[vl] = 0;
+			return true;
+		}
+		p += len + (e ? 1 : 0);
+	}
+	return false;
+}
+
+// Logs the lines of `now` that differ from `was` (and lines that vanished) as setting rows.
+// The address and header lines can hold a secret: they are logged as set / cleared, never as text.
+static void cfg_audit_diff(AuditSrc src, const char *was, const char *now)
+{
+	char key[48], a[512], b[512];
+	for (int pass = 0; pass < 2; pass++) {
+		const char *t = pass ? was : now;   // pass 1 finds the lines only `was` had
+		for (const char *p = t; *p; ) {
+			const char *e = strchr(p, '\n'), *eq = (const char *)memchr(p, '=', e ? (size_t)(e - p) : strlen(p));
+			if (eq && (size_t)(eq - p) < sizeof(key)) {
+				memcpy(key, p, eq - p); key[eq - p] = 0;
+				bool in_was = cfg_find(was, key, a, sizeof(a)), in_now = cfg_find(now, key, b, sizeof(b));
+				if (!in_was) a[0] = 0;
+				if (!in_now) b[0] = 0;
+				if ((pass == 0 || !in_now) && (in_was != in_now || strcmp(a, b))) {
+					if (cfg_key_secret(key)) {
+						snprintf(a, sizeof(a), "%s", a[0] ? "set" : "cleared");
+						snprintf(b, sizeof(b), "%s", b[0] ? "set" : "cleared");
+						audit_setting_private(src, key, a, b);
+					} else audit_setting(src, key, a, b);
+				}
+			}
+			p += (e ? (size_t)(e - p) + 1 : strlen(p));
+		}
+	}
+}
+
+// The config text, as it is written to the file.
+static void cfg_text(char *txt, size_t cap)
+{
+	size_t n = 0;
+	auto put = [&](const char *fmt, ...) {
+		va_list ap;
+		va_start(ap, fmt);
+		if (n < cap) n += vsnprintf(txt + n, cap - n, fmt, ap);
+		va_end(ap);
+		if (n >= cap) n = cap - 1;
+	};
+	const DriveCfg &k = g_std;   // the standard drive settings (the globals follow the card in use)
+	put("outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\nwebhook_step=%d\n",
+	    g_outdir, k.retries, k.speed, k.eject, k.autostart, g_redump, g_remote, g_webhook_on, g_webhook, k.check, g_webhook_mask, g_webhook_step);
+	if (g_bdcfg.set)
+		put("drive_bd=%d,%d,%d,%d,%d\n", g_bdcfg.retries, g_bdcfg.speed, g_bdcfg.eject, g_bdcfg.autostart, g_bdcfg.check);
+	for (int i = 0; i < 8; i++) if (g_outdir_usb[i][0]) put("outdir_usb%d=%s\n", i, g_outdir_usb[i]);
+	for (int i = 0; i < 8; i++)
+		if (g_usbcfg[i].set)
+			put("drive_usb%d=%d,%d,%d,%d,%d\n", i, g_usbcfg[i].retries, g_usbcfg[i].speed, g_usbcfg[i].eject, g_usbcfg[i].autostart, g_usbcfg[i].check);
+	put("name_pattern=%s\n", g_name_pat);
+	put("webhook_headers_on=%d\n", g_webhook_hdr_on);
+	for (int i = 0; i < WH_HEADERS; i++) put("webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
+	put("audit_mb=%d\n", g_audit_mb);
+}
+
+// At start: the file may have been edited (over FTP) while the app was off. Every setting whose
+// value differs from the last one the audit log knows gets an `app` row, so an undo compares with
+// the real value. A setting the log never saw has nothing to differ from.
+static void cfg_audit_boot()
+{
+	static char keys[96][48], vals[96][192];
+	int n = audit_setting_values(keys, vals, 96);
+	char v[512];
+	for (int i = 0; i < n; i++) {
+		if (!cfg_find(g_cfg_last, keys[i], v, sizeof(v))) v[0] = 0;   // a line that is gone: empty
+		if (cfg_key_secret(keys[i])) {
+			const char *now = v[0] ? "set" : "cleared";
+			if (strcmp(vals[i], now)) audit_setting_private(AU_APP, keys[i], vals[i], now);
+		} else if (strncmp(vals[i], v, sizeof(vals[0]) - 1)) audit_setting(AU_APP, keys[i], vals[i], v);   // the log keeps 191 characters
+	}
+}
+
+// At start, after the config was read: the text the next save is compared with, so that the first
+// real change after a boot is logged too; and the log learns the values the file has now.
+static void cfg_prime()
+{
+	cfg_text(g_cfg_last, sizeof(g_cfg_last));
+	g_cfg_primed = true;
+	cfg_audit_boot();
+}
+
+static void cfg_save_src(AuditSrc src)
 {
 	FILE *f = fopen(CFG_PATH, "w");
 	if (!f) return;
-	const DriveCfg &k = g_std;   // the standard drive settings (the globals follow the card in use)
-	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\nwebhook_step=%d\n",
-	        g_outdir, k.retries, k.speed, k.eject, k.autostart, g_redump, g_remote, g_webhook_on, g_webhook, k.check, g_webhook_mask, g_webhook_step);
-	if (g_bdcfg.set)
-		fprintf(f, "drive_bd=%d,%d,%d,%d,%d\n", g_bdcfg.retries, g_bdcfg.speed, g_bdcfg.eject, g_bdcfg.autostart, g_bdcfg.check);
-	for (int i = 0; i < 8; i++) if (g_outdir_usb[i][0]) fprintf(f, "outdir_usb%d=%s\n", i, g_outdir_usb[i]);
-	for (int i = 0; i < 8; i++)
-		if (g_usbcfg[i].set)
-			fprintf(f, "drive_usb%d=%d,%d,%d,%d,%d\n", i, g_usbcfg[i].retries, g_usbcfg[i].speed, g_usbcfg[i].eject, g_usbcfg[i].autostart, g_usbcfg[i].check);
-	fprintf(f, "name_pattern=%s\n", g_name_pat);
-	fprintf(f, "webhook_headers_on=%d\n", g_webhook_hdr_on);
-	for (int i = 0; i < WH_HEADERS; i++) fprintf(f, "webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
+	char txt[sizeof(g_cfg_last)];
+	cfg_text(txt, sizeof(txt));
+	fputs(txt, f);
 	fclose(f);
+	if (g_cfg_primed) cfg_audit_diff(src, g_cfg_last, txt);
+	snprintf(g_cfg_last, sizeof(g_cfg_last), "%s", txt);
+	g_cfg_primed = true;
+}
+static void cfg_save() { cfg_save_src(g_input_src); }
+
+static void setting_applied(const char *key);   // below: what the screens do besides changing the value
+
+// The audit's undo of a setting row: the value goes through the config parser like a line in the
+// file, and the save records the change as an undo.
+static int set_setting_hook(const char *key, const char *value)
+{
+	if (cfg_key_secret(key)) return -1;   // its row holds only set / cleared: there is no text to put back
+	char line[700];
+	snprintf(line, sizeof(line), "%s=%s", key, value);
+	if (!cfg_apply_line(line)) return -1;
+	setting_applied(key);
+	cfg_save_src(AU_UNDO);
+	return 0;
 }
 
 #define RAW_SIZE   2352
@@ -557,6 +716,7 @@ static void do_flip()
 
 // Shows a dialog and blocks until answered. Returns 1 = OK/YES, 2 = NO/cancel.
 static int own_dialog(const char *msg, int yesno);   // own UI, defined with the other screens
+static void own_dialog_draw(const char *msg, int yesno);   // one frame of it (the UI tests draw it)
 static int ask(int type, const char *msg)
 {
 	return own_dialog(msg, (type & MSG_DIALOG_BTN_TYPE_YESNO) != 0);
@@ -1764,6 +1924,34 @@ static int track_of(uint32_t lba)
 	return t;
 }
 
+// The audit's key of the card's disc: its ID (its title when it has none) and its size in sectors.
+static void disc_key(char *out, size_t n)
+{
+	const Card &k = g_cards[cur_card()];
+	snprintf(out, n, "%s:%u", k.serial[0] ? k.serial : k.title, (unsigned)g_leadout);
+}
+
+// Writes one sector into the image (g_out) and logs it in the audit log with the bytes it replaces.
+// Old bytes that cannot be read count as a failed write: no sector is changed without them in the
+// log (a rip opens its file w+b so they can be read back). Returns 0 when written.
+static int write_sector_audited(uint32_t lba, const uint8_t *sec)
+{
+	uint8_t old[RAW_SIZE];
+	uint64_t pos = (uint64_t)lba * RAW_SIZE;
+	if (vf_seek(g_out, pos) || vf_read(g_out, old, RAW_SIZE) != RAW_SIZE) {
+		logf("sector %u: its old bytes cannot be read, not written", lba);
+		return -1;
+	}
+	if (vf_seek(g_out, pos) || vf_write(g_out, sec, RAW_SIZE) != RAW_SIZE) return -1;
+	uint32_t job = g_cards[cur_card()].audit_job;
+	if (job) {   // 0: not started as a job (headless test mode), nothing to log it under
+		char file[300];
+		snprintf(file, sizeof(file), "%s.bin", g_base);   // a rip's .part becomes this file
+		audit_sector(job, file, lba, old, sec);
+	}
+	return 0;
+}
+
 // a sector written into the image: its track's MD5 must be computed again
 static void note_patched(uint32_t lba)
 {
@@ -1798,7 +1986,7 @@ static int verify_pass()
 				int ok = confirm_read(lba, 0, reads, sec);
 				g_rr_max = 0;
 				if (ok && fnv64(sec, RAW_SIZE) != g_uv_hash[k + j]) {
-					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; g_changed++; note_patched(lba); }
+					if (write_sector_audited(lba, sec) == 0) { patched++; g_changed++; note_patched(lba); }
 					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
 				} else if (ok) {
 					rip_event(0xA8B0C8, STR_EV_FIRST_OK, lba);   // the first read was right
@@ -1842,7 +2030,7 @@ static int second_pass()
 				g_suspect_ok[k - g_nhard] = 1;
 				if (memcmp(sec, g_suspect_data + (k - g_nhard) * RAW_SIZE, RAW_SIZE)) {
 					g_changed++;
-					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; note_patched(lba); }
+					if (write_sector_audited(lba, sec) == 0) { patched++; note_patched(lba); }
 					logf("second pass: sector %u confirmed with different data, image updated", lba);
 					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
 				} else {
@@ -1851,7 +2039,7 @@ static int second_pass()
 			} else {
 				logf("second pass: sector %u could not be confirmed", lba);
 			}
-		} else if (ok && vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) {
+		} else if (ok && write_sector_audited(lba, sec) == 0) {
 			patched++;
 			note_patched(lba);
 			g_hard[k] |= HARD_RESOLVED;
@@ -1954,7 +2142,7 @@ static void rip_thread(void *arg)
 	t_card = (int)(long)arg;
 	char path[300];
 	snprintf(path, sizeof(path), "%s.bin.part", g_base);   // renamed to .bin when complete
-	g_out = vf_open(path, "wb");
+	g_out = vf_open(path, "w+b");   // w+b: the passes after the first read a sector back before writing it again
 	if (!g_out) { logf("cannot create %s", path); g_result = -1; g_finished = 1; sysThreadExit(0); }
 
 	g_bufs[0] = (uint8_t *)memalign(128, CHUNK * SECT_Q);
@@ -2875,7 +3063,9 @@ static int pad_pressed()
 			now |= pad_state[i];
 		}
 	}
-	int pressed = (now & ~last) | __sync_lock_test_and_set(&g_remote_btn, 0);   // and the web page's pad
+	int remote = __sync_lock_test_and_set(&g_remote_btn, 0);
+	int pressed = (now & ~last) | remote;   // and the web page's pad
+	if (pressed) g_input_src = remote ? AU_REMOTE : AU_PAD;
 	// auto-repeat a single held arrow: first after ~0.4 s, then every ~0.1 s (called once per frame)
 	const int arrows = B_UP | B_DOWN | B_LEFT | B_RIGHT;
 	int a = now & arrows;
@@ -3658,15 +3848,485 @@ static void about_screen()
 	}
 }
 
+// ---------------------------------------------------------------- the audit log (Settings → Audit log)
+// Four levels: the domains, then the discs (rips) or the events (settings), a disc's events, an
+// event's rows. X opens, O goes back, triangle undoes the focused item after a question. The lists
+// are read from the log when a level is entered and after an undo, never per frame.
+#define AV_PAGE 9     // rows a page shows
+#define AV_MAX 128    // discs and events a level lists (the newest)
+struct AuditView {
+	int level;               // 0 domains, 1 discs (rips) or events (settings), 2 a disc's events, 3 an event's rows
+	AuditDom dom;
+	char disc[96], disc_name[96];   // the disc of levels 2 and 3
+	AuditRow ev;             // level 3: the event
+	int row, first, n;       // focused entry, first one shown, entries loaded
+	int base, more;          // level 3: index of av_rows[0] in the event; rows follow the loaded ones
+	int empty;               // level 0: nothing in the log yet
+	int back[4];             // the focused entry of each level, for going back
+	int undo_ok;             // the focused disc or job: an undo would undo something (the core's exact answer)
+	int undo_redo;           // and that undo would be a redo (all its changes are undone)
+	AuditReason no_undo;     // and if not, why
+	char why_key[100];       // the last refused undo (its row id or disc) and the reason
+	AuditReason why;
+};
+static char av_keys[AV_MAX][96], av_names[AV_MAX][96];
+static uint32_t av_last[AV_MAX];
+static AuditRow av_rows[AV_MAX];
+static const AuditDom av_doms[] = {AU_RIPS, AU_SETTINGS};
+
+static int av_count(const AuditView &v) { return v.level == 3 ? v.base + v.n : v.n; }
+
+static const AuditRow *audit_focused(const AuditView &v)
+{
+	if (v.level == 0 || (v.level == 1 && v.dom == AU_RIPS)) return NULL;
+	int i = v.level == 3 ? v.row - v.base : v.row;
+	return i >= 0 && i < v.n ? &av_rows[i] : NULL;
+}
+
+// Level 3: the two pages from the one `from` is on, and one row more to know whether others follow
+// (a repair can have thousands; each row shown is checked against the image).
+static void av_page(AuditView &v, int from)
+{
+	v.base = from / AV_PAGE * AV_PAGE;
+	int n = audit_rows(v.ev.job, av_rows, v.base, 2 * AV_PAGE + 1);
+	v.more = n > 2 * AV_PAGE;
+	v.n = v.more ? 2 * AV_PAGE : n;
+}
+
+// Whether undoing the focused disc or job would undo anything, and if not why (the core applies
+// every guard the undo does). Asked when the focus moves, not per frame.
+static void av_probe(AuditView &v)
+{
+	v.undo_ok = v.undo_redo = 0;
+	memset(&v.no_undo, 0, sizeof(v.no_undo));
+	const AuditRow *e = audit_focused(v);
+	if (v.level == 1 && v.dom == AU_RIPS && v.row < v.n) v.undo_ok = audit_disc_reversible(av_keys[v.row], &v.no_undo, &v.undo_redo);
+	else if (v.level == 2 && e && !strcmp(e->kind, "job")) v.undo_ok = audit_job_reversible(e->job, &v.no_undo, &v.undo_redo);
+}
+
+// The focused row on the screen, the right page loaded.
+static void av_fix(AuditView &v)
+{
+	if (v.row < v.first) v.first = v.row;
+	if (v.row >= v.first + AV_PAGE) v.first = v.row - AV_PAGE + 1;
+	if (v.level == 3) {
+		if (v.first < v.base || (v.first + AV_PAGE > v.base + v.n && v.more)) av_page(v, v.first);
+		if (v.row >= v.base + v.n) v.row = v.base + v.n > 0 ? v.base + v.n - 1 : 0;   // the end
+		if (v.first > v.row) v.first = v.row;
+	}
+	av_probe(v);
+}
+
+static void av_load(AuditView &v)
+{
+	if (v.level == 0) {
+		AuditRow one;
+		v.n = 2;
+		v.empty = audit_discs(NULL, NULL, NULL, NULL, 1) == 0 && audit_events(AU_SETTINGS, NULL, &one, 1) == 0;
+	} else if (v.level == 1 && v.dom == AU_RIPS) v.n = audit_discs(av_keys, av_names, NULL, av_last, AV_MAX);
+	else if (v.level < 3) v.n = audit_events(v.dom, v.level == 2 ? v.disc : NULL, av_rows, AV_MAX);
+	else { av_page(v, v.first); return; }
+	if (v.row >= v.n) v.row = v.n ? v.n - 1 : 0;
+}
+
+static void audit_view_init(AuditView &v)
+{
+	memset(&v, 0, sizeof(v));
+	v.dom = AU_RIPS;
+	av_load(v);
+	av_fix(v);
+}
+
+static void audit_nav(AuditView &v, int p)
+{
+	int cnt = av_count(v);
+	if (!cnt) return;
+	if (v.level < 3) {   // the whole list is loaded: up and down go round
+		if (p & B_UP) v.row = (v.row + cnt - 1) % cnt;
+		if (p & B_DOWN) v.row = (v.row + 1) % cnt;
+		if (p & B_R2) v.row = v.row + AV_PAGE < cnt ? v.row + AV_PAGE : cnt - 1;
+	} else {   // an event's rows are read a page at a time: the end is known once it is reached
+		if ((p & B_UP) && v.row > 0) v.row--;
+		if (p & B_DOWN) v.row++;
+		if (p & B_R2) v.row += AV_PAGE;
+	}
+	if (p & B_L2) v.row = v.row >= AV_PAGE ? v.row - AV_PAGE : 0;
+	av_fix(v);
+}
+
+static int av_can_open(const AuditView &v)
+{
+	if (v.level == 0) return !v.empty;
+	if (v.level == 1) return v.dom == AU_RIPS && v.n > 0;
+	const AuditRow *r = audit_focused(v);
+	return v.level == 2 && r && !strcmp(r->kind, "job");
+}
+
+// X: one level down.
+static void audit_open(AuditView &v)
+{
+	if (!av_can_open(v)) return;
+	if (v.level == 0) v.dom = av_doms[v.row];
+	else if (v.level == 1) {
+		snprintf(v.disc, sizeof(v.disc), "%s", av_keys[v.row]);
+		snprintf(v.disc_name, sizeof(v.disc_name), "%s", av_names[v.row]);
+	} else v.ev = *audit_focused(v);
+	v.back[v.level++] = v.row;
+	v.row = v.first = v.base = v.n = v.more = 0;
+	v.why_key[0] = 0;
+	av_load(v);
+	av_fix(v);
+}
+
+// O: one level up; 0 at the top (the screen closes).
+static int audit_back(AuditView &v)
+{
+	if (v.level == 0) return 0;
+	v.row = v.back[--v.level];
+	v.first = 0;
+	v.why_key[0] = 0;
+	av_load(v);
+	av_fix(v);
+	return 1;
+}
+
+// Triangle is offered on: a disc (all its kept changes), a job (its sectors) and a row that can be undone.
+static int audit_can_undo(const AuditView &v)
+{
+	if (v.level == 1 && v.dom == AU_RIPS) return v.n > 0 && v.undo_ok == 1;
+	const AuditRow *r = audit_focused(v);
+	if (!r) return 0;
+	if (v.level == 2 && !strcmp(r->kind, "job")) return v.undo_ok == 1;
+	return r->reversible;
+}
+// The undo would apply undone changes again (a disc or job all undone, or an undo row): △ says Redo.
+static int audit_is_redo(const AuditView &v)
+{
+	if (v.level == 1 && v.dom == AU_RIPS) return v.undo_redo;
+	const AuditRow *r = audit_focused(v);
+	if (!r) return 0;
+	if (v.level == 2 && !strcmp(r->kind, "job")) return v.undo_redo;
+	return r->redo;
+}
+
+static void av_focus_key(const AuditView &v, char *out, size_t n)
+{
+	const AuditRow *r = audit_focused(v);
+	if (v.level == 1 && v.dom == AU_RIPS && v.row < v.n) snprintf(out, n, "%s", av_keys[v.row]);
+	else if (r) snprintf(out, n, "%u", (unsigned)r->id);
+	else out[0] = 0;
+}
+
+static const char *av_src(AuditSrc s)
+{
+	switch (s) {
+	case AU_PAD: return T(STR_AUDIT_SRC_PAD);
+	case AU_REMOTE: return T(STR_AUDIT_SRC_REMOTE);
+	case AU_APP: return T(STR_AUDIT_SRC_APP);
+	case AU_MCP: return "MCP";
+	case AU_UNDO: return T(STR_AUDIT_SRC_UNDO);
+	}
+	return "";
+}
+
+// A config key as the settings name it, and a value as they show it.
+static const char *av_key_label(const char *key)
+{
+	static const struct { const char *key; StrId s; } names[] = {
+		{"speed", STR_L_SPEED}, {"retries", STR_L_RETRIES}, {"check", STR_L_CHECK}, {"eject", STR_L_EJECT},
+		{"autostart", STR_L_AUTOSTART}, {"name_pattern", STR_L_FILENAME}, {"redump", STR_L_REDUMP}, {"remote", STR_L_REMOTE},
+		{"webhook_on", STR_L_WEBHOOK}, {"webhook", STR_WH_ADDRESS}, {"outdir", STR_L_TARGET}, {"audit_mb", STR_L_AUDIT_MB}};
+	for (auto &k : names) if (!strcmp(key, k.key)) return T(k.s);
+	if (!strncmp(key, "webhook_header", 14)) return T(STR_WH_HEADERS);
+	return key;
+}
+static void av_setting_val(const char *key, const char *val, char *out, size_t n)
+{
+	int v = atoi(val);
+	if (!val[0]) out[0] = 0;
+	else if (!strcmp(key, "speed") && v >= 0 && v <= 3) fmt_speed(v, out, n);
+	else if (!strcmp(key, "check") && v >= CHECK_OFF && v <= CHECK_BITPERFECT) fmt_check(v, out, n);
+	else if (!strcmp(key, "eject") || !strcmp(key, "autostart") || !strcmp(key, "remote") || !strcmp(key, "webhook_on") || !strcmp(key, "webhook_headers_on"))
+		fmt_onoff(v, out, n);
+	else if (!strcmp(key, "redump")) snprintf(out, n, "%s", v == RD_ONLINE ? T(STR_RD_ONLINE) : v == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
+	else if (!strcmp(key, "audit_mb")) snprintf(out, n, T(STR_AUDIT_MB_VAL), v);
+	else if (!strcmp(key, "name_pattern")) fn_label(val, out, n);
+	else snprintf(out, n, "%s", val);
+}
+
+// The core's reason as words in the UI's language.
+static void av_reason(const AuditReason &rs, char *out, size_t n)
+{
+	switch (rs.code) {
+	case AW_NONE: out[0] = 0; break;
+	case AW_ALREADY: snprintf(out, n, "%s", T(STR_AW_ALREADY)); break;
+	case AW_RECORD: snprintf(out, n, "%s", T(STR_AW_RECORD)); break;
+	case AW_SECRET: snprintf(out, n, "%s", T(STR_AW_SECRET)); break;
+	case AW_SETTING_CHANGED: snprintf(out, n, T(STR_AW_SETTING_CHANGED), av_key_label(rs.what)); break;
+	case AW_SECTOR_CHANGED: snprintf(out, n, T(STR_AW_SECTOR_CHANGED), (unsigned)rs.lba); break;
+	case AW_DROPPED: snprintf(out, n, "%s", T(STR_AW_DROPPED)); break;
+	case AW_UNFINISHED: snprintf(out, n, "%s", T(STR_AW_UNFINISHED)); break;
+	case AW_RUNNING: case AW_JOB_ON_DISC: snprintf(out, n, "%s", T(STR_AW_RUNNING)); break;
+	case AW_CANNOT_OPEN: snprintf(out, n, T(STR_AW_CANNOT_OPEN), rs.file); break;
+	case AW_CANNOT_WRITE: snprintf(out, n, T(STR_AW_CANNOT_WRITE), rs.file); break;
+	case AW_LOG_WRITE: snprintf(out, n, "%s", T(STR_AW_LOG_WRITE)); break;
+	case AW_NOT_APPLIED: case AW_NO_HOOK: snprintf(out, n, T(STR_AW_NOT_APPLIED), av_key_label(rs.what)); break;
+	case AW_NOTHING: snprintf(out, n, "%s", T(STR_AW_NOTHING)); break;
+	case AW_NO_ROW: case AW_NO_DISC: snprintf(out, n, "%s", T(STR_AW_NOT_FOUND)); break;
+	case AW_REPLACED: snprintf(out, n, "%s", T(STR_AW_REPLACED)); break;
+	case AW_STOPPED: snprintf(out, n, "%s", T(STR_AW_STOPPED)); break;
+	default: snprintf(out, n, "%s", T(STR_AUDIT_NO_UNDO)); break;
+	}
+}
+// A row's own verdict (from the query) as a reason.
+static AuditReason av_row_reason(const AuditRow &r)
+{
+	AuditReason rs;
+	memset(&rs, 0, sizeof(rs));
+	rs.code = r.why;
+	rs.row = r.id; rs.job = r.why_job; rs.lba = r.lba;
+	snprintf(rs.what, sizeof(rs.what), "%.95s", r.key[0] ? r.key : r.what);   // a config key: short (an undo row: its setting)
+	const char *slash = strrchr(r.file, '/');
+	snprintf(rs.file, sizeof(rs.file), "%.95s", slash ? slash + 1 : r.file);
+	return rs;
+}
+
+// What a row did, in words.
+static void av_row_label(const AuditRow &r, char *out, size_t n)
+{
+	if (!strcmp(r.kind, "job"))
+		snprintf(out, n, "%s", T(!strcmp(r.what, "repair") ? STR_HINT_REPAIR : !strcmp(r.what, "check") ? STR_HINT_CHECK : STR_HINT_RIP));
+	else if (!strcmp(r.kind, "sector")) snprintf(out, n, T(STR_AUDIT_SECTOR), (unsigned)r.lba);
+	else if (!strcmp(r.kind, "setting")) {
+		if (r.norev) snprintf(out, n, "%s", av_key_label(r.what));   // a secret: only set / cleared was logged
+		else {
+			char a[96], b[96];
+			av_setting_val(r.what, r.before, a, sizeof(a));
+			av_setting_val(r.what, r.after, b, sizeof(b));
+			snprintf(out, n, "%s: %s → %s", av_key_label(r.what), a, b);
+		}
+	}
+	else if (!strcmp(r.kind, "result"))
+		snprintf(out, n, "%s", T(!strcmp(r.after, "finished") ? STR_TAB_DONE : !strcmp(r.after, "cancelled") ? STR_TAB_CANCELLED :
+		                         !strcmp(r.after, "disc_lost") ? STR_WH_SHORT_10 : STR_TAB_FAILED));
+	else if (!strcmp(r.kind, "redump")) {
+		if (!strncmp(r.after, "verified", 8)) snprintf(out, n, T(STR_RD_CARD_OK), r.after[8] ? r.after + 9 : "");
+		else snprintf(out, n, "%s", T(!strcmp(r.after, "no_match") ? STR_RD_NOMATCH : !strcmp(r.after, "not_found") ? STR_RD_NOTFOUND : STR_RD_UNCHECKED));
+	}
+	else if (!strcmp(r.kind, "undo")) snprintf(out, n, T(STR_AUDIT_UNDO_ROW), r.what);
+	else snprintf(out, n, "%s %.100s", r.kind, r.what);   // a kind this screen does not know yet
+	if (r.undone) {
+		size_t l = strlen(out);
+		snprintf(out + l, n - l, " %s", T(STR_AUDIT_UNDONE));
+	}
+}
+
+// Entry i of the level: its label, and the value at the right (when, and where it came from).
+static void audit_label(const AuditView &v, int i, char *out, size_t n)
+{
+	out[0] = 0;
+	if (v.level == 0) snprintf(out, n, "%s", T(av_doms[i] == AU_RIPS ? STR_AUDIT_DOM_RIPS : STR_AUDIT_DOM_SETTINGS));
+	else if (v.level == 1 && v.dom == AU_RIPS) { if (i < v.n) snprintf(out, n, "%s", av_names[i]); }
+	else {
+		int k = v.level == 3 ? i - v.base : i;
+		if (k >= 0 && k < v.n) av_row_label(av_rows[k], out, n);
+	}
+}
+static void av_value(const AuditView &v, int i, char *out, size_t n)
+{
+	out[0] = 0;
+	if (v.level == 0) return;
+	if (v.level == 1 && v.dom == AU_RIPS) { fmt_local(av_last[i], out, n); return; }
+	int k = v.level == 3 ? i - v.base : i;
+	if (k < 0 || k >= v.n) return;
+	char when[32];
+	fmt_local(av_rows[k].t, when, sizeof(when));
+	snprintf(out, n, "%s · %s", when, av_src(av_rows[k].src));
+}
+
+// The audit screen's undo is running: the recheck of a rip shows a wait screen (recheck_hook; not
+// in the UI tests, which have no screen to flip).
+static int g_check_ui;
+static char g_wait_name[128];
+
+// Undoes the focused item; the list is read again and the focus stays on it. 0 = done, else why[]
+// says why not (English, for the log) and v.why has the reason for the screen.
+static int audit_undo(AuditView &v, char *why, size_t n)
+{
+	const AuditRow *r = audit_focused(v);
+	char key[100];
+	av_focus_key(v, key, sizeof(key));
+	why[0] = 0;
+	int rc = -1;
+	AuditReason rs;
+	memset(&rs, 0, sizeof(rs));
+	if (v.level == 1 && v.dom == AU_RIPS) rc = audit_undo_disc_since(key, 0, why, n, &rs);
+	else if (r && v.level == 2 && !strcmp(r->kind, "job")) rc = audit_undo_job(r->job, why, n, &rs);
+	else if (r) rc = audit_undo_row(r->id, why, n, &rs);
+	if (rc) logf("audit undo of %s refused: %s", key, why);   // the English text, for the log
+	snprintf(v.why_key, sizeof(v.why_key), "%s", rc ? key : "");
+	v.why = rs;
+	av_load(v);
+	if (v.level == 1 || v.level == 2) {   // newer rows come first: find the item again
+		char k2[100];
+		int keep = v.row;
+		for (v.row = 0; v.row < v.n; v.row++) { av_focus_key(v, k2, sizeof(k2)); if (!strcmp(k2, key)) break; }
+		if (v.row >= v.n) v.row = keep < v.n ? keep : 0;
+	}
+	av_fix(v);
+	return rc;
+}
+
+static void audit_draw(const AuditView &v)
+{
+	draw_backdrop();
+	int ls = ui_line(UI_SMALL);
+	char sub[240], lb[160];
+	if (v.level == 0) snprintf(sub, sizeof(sub), "%s", T(STR_L_AUDIT));
+	else if (v.level == 1) snprintf(sub, sizeof(sub), "%s · %s", T(STR_L_AUDIT), T(v.dom == AU_RIPS ? STR_AUDIT_DOM_RIPS : STR_AUDIT_DOM_SETTINGS));
+	else if (v.level == 2) snprintf(sub, sizeof(sub), "%s", v.disc_name);
+	else { av_row_label(v.ev, lb, sizeof(lb)); snprintf(sub, sizeof(sub), "%s · %s", lb, v.disc_name); }
+	int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10;
+	int left = ui_w() / 6, right = ui_w() * 5 / 6;
+	ui_text_fit(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, sub, right - left, UI_CENTER);
+	int cnt = av_count(v);
+	if ((v.level == 0 && v.empty) || !cnt) {
+		ui_text(UI_BODY, ui_w() / 2, ui_h() / 3, 0xC8D0E0, T(STR_AUDIT_EMPTY), UI_CENTER);
+		const char *b[] = {"circle"};
+		const char *l[] = {T(STR_HINT_BACK)};
+		hint_bar(b, l, 1);
+		return;
+	}
+	{   // more rows above / below: arrows at the right edge, as in the settings (L2/R2 jump a page)
+		int asz = ls * 2 / 3, ax = right + ui_w() / 40;
+		if (v.first > 0) ui_icon("up", ax, top + (lh * 3 / 4 - asz) / 2 - lh / 8, asz, 0xC8D0E0);
+		if (v.first + AV_PAGE < cnt || v.more) ui_icon("down", ax, top + (AV_PAGE - 1) * lh + (lh * 3 / 4 - asz) / 2 - lh / 8, asz, 0xC8D0E0);
+	}
+	for (int i = v.first; i < cnt && i < v.first + AV_PAGE; i++) {
+		int y = top + (i - v.first) * lh;
+		char val[96];
+		audit_label(v, i, lb, sizeof(lb));
+		av_value(v, i, val, sizeof(val));
+		if (i == v.row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh, 0x703D6FD9);
+		// when and from where: a detail, small, on the label's baseline
+		int vy = y + ui_line(UI_BODY) - ui_line(UI_SMALL) - ui_line(UI_BODY) / 12;
+		int vw = val[0] ? ui_text(UI_SMALL, right, vy, i == v.row ? 0xFFFFFF : 0xA8B0C8, val, UI_RIGHT) + ui_w() / 40 : 0;
+		ui_text_fit(UI_BODY, left, y, 0xFFFFFF, lb, right - left - vw);   // never over the value
+	}
+	// the focused item's details, small: why it cannot be undone, or the file a sector is in
+	char det[300] = "", key[100];
+	const AuditRow *r = audit_focused(v);
+	av_focus_key(v, key, sizeof(key));
+	char rtx[200];
+	if (v.why_key[0] && !strcmp(v.why_key, key)) { av_reason(v.why, rtx, sizeof(rtx)); snprintf(det, sizeof(det), T(STR_AUDIT_REFUSED), rtx); }
+	else if (!audit_can_undo(v) && (v.level == 1 && v.dom == AU_RIPS ? v.n > 0 : r && !strcmp(r->kind, "job") && v.level == 2))
+		av_reason(v.no_undo, det, sizeof(det));   // a disc or a job: the core's answer
+	else if (r && (!r->undone || r->redo) && !r->reversible) av_reason(av_row_reason(*r), det, sizeof(det));   // an undone row: why no redo
+	else if (r && (!strcmp(r->kind, "sector") || (!strcmp(r->kind, "undo") && r->file[0]))) { const char *s = strrchr(r->file, '/'); snprintf(det, sizeof(det), "%s", s ? s + 1 : r->file); }
+	if (det[0]) footer_note(det);
+	const char *b[5], *l[5];
+	int m = 0;
+	b[m] = "updown"; l[m++] = T(STR_HINT_SELECT);
+	if (cnt > AV_PAGE || v.more) { b[m] = "l2r2"; l[m++] = T(STR_HINT_PAGE); }
+	if (av_can_open(v)) { b[m] = "cross"; l[m++] = T(STR_HINT_OPEN); }
+	if (audit_can_undo(v)) { b[m] = "triangle"; l[m++] = T(audit_is_redo(v) ? STR_HINT_REDO : STR_HINT_UNDO); }
+	b[m] = "circle"; l[m++] = T(STR_HINT_BACK);
+	hint_bar(b, l, m);
+}
+
+// The wait while an undone rip is checked again (it reads the whole image), or while a big undo
+// writes its sectors back (STR_AUDIT_UNDOING): its name and how far.
+static void audit_wait_draw(const char *name, uint32_t mb, StrId what = STR_AUDIT_WAIT)
+{
+	draw_backdrop();
+	ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_L_AUDIT), UI_CENTER);
+	char t[300];
+	snprintf(t, sizeof(t), T(what), name);
+	int y = draw_wrapped(UI_BODY, t, ui_h() / 3, 0xE8E8F0);
+	if (mb) {
+		snprintf(t, sizeof(t), T(STR_AUDIT_MB_VAL), (int)mb);
+		ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_SMALL) / 2, 0xA8B0C8, t, UI_CENTER);
+	}
+}
+static void audit_wait_tick(uint32_t sectors)
+{
+	audit_wait_draw(g_wait_name, (uint32_t)((uint64_t)sectors * RAW_SIZE >> 20));
+	g_drawn = 2;
+	g_backdrop_shown = 0;
+	flip_frame();   // both buffers
+	flip_frame();
+}
+// What the wait of a big undo says: undoing, or redoing (applying undone changes again).
+static StrId audit_wait_what(int redo) { return redo ? STR_AUDIT_REDOING : STR_AUDIT_UNDOING; }
+static int g_wait_redo;   // the audit screen's undo running now is a redo
+
+// The audit's undo of a job or disc, every AUDIT_TICK sectors: the screen says how far (the audit
+// screen only) and the system's callbacks run; closing the app stops the undo.
+static int audit_undo_tick(uint32_t done, uint32_t total)
+{
+	(void)total;
+	if (g_check_ui) {
+		audit_wait_draw(g_wait_name, (uint32_t)((uint64_t)done * RAW_SIZE >> 20), audit_wait_what(g_wait_redo));
+		g_drawn = 2;
+		g_backdrop_shown = 0;
+		flip_frame();
+	} else sysUtilCheckCallback();
+	return exit_requested;
+}
+
+static void audit_screen()
+{
+	AuditView v;
+	audit_view_init(v);
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			audit_draw(v);
+			g_drawn = 2;
+			g_backdrop_shown = 0;
+		}
+		flip_frame();
+		int p = pad_pressed();
+		if (p) g_redraw = 2;
+		if (p & (B_UP | B_DOWN | B_L2 | B_R2)) audit_nav(v, p);
+		if (p & B_CROSS) audit_open(v);
+		if ((p & B_TRIANGLE) && audit_can_undo(v)) {
+			char label[160], q[256];
+			audit_label(v, v.row, label, sizeof(label));
+			int disc = v.level == 1 && v.dom == AU_RIPS, redo = audit_is_redo(v);   // a disc: all of it
+			snprintf(q, sizeof(q), T(redo ? (disc ? STR_AUDIT_REDO_DISC_Q : STR_AUDIT_REDO_Q) : (disc ? STR_AUDIT_UNDO_DISC_Q : STR_AUDIT_UNDO_Q)), label);
+			if (own_dialog(q, 1) == 1) {
+				char why[200];
+				snprintf(g_wait_name, sizeof(g_wait_name), "%s", label);   // a big undo shows it while it writes
+				g_check_ui = 1;
+				g_wait_redo = redo;
+				int rc = audit_undo(v, why, sizeof(why));
+				g_check_ui = g_wait_redo = 0;
+				if (rc != 0) {
+					char m[300], rtx[200];
+					av_reason(v.why, rtx, sizeof(rtx));
+					snprintf(m, sizeof(m), T(STR_AUDIT_REFUSED), rtx);
+					own_dialog(m, 0);
+				}
+			}
+			pad_pressed();
+			g_redraw = 2;
+		}
+		if ((p & B_CIRCLE) && !audit_back(v)) return;
+	}
+}
+
 // Settings (START): the standard for the drives (speed, re-reads, check, eject, rip at once; a
 // drive can have its own values, SELECT on its card), Redump, the Redump copy, remote view, webhooks.
 // One frame of the settings (START): the rows with their values and the buttons of the focused
 // row. (The UI tests on the host draw it.)
 static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, int webhook_on, int rdcount, const char *rdver, time_t rdwhen)
 {
-	const int NROWS = 11;
+	const int NROWS = 13;
 	draw_backdrop();
-	char vals[11][96];
+	char vals[13][96];
 	fn_label(g_name_pat, vals[5], sizeof(vals[5]));
 	fmt_speed(sd.speed, vals[0], sizeof(vals[0]));
 	fmt_int(sd.retries, vals[1], sizeof(vals[1]));
@@ -3697,11 +4357,13 @@ static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, i
 		for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
 		snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
 	}
-	snprintf(vals[10], sizeof(vals[10]), "v%s", APP_VERSION);
-	const char *labels[11] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
-	                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_ABOUT)};
-	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 10);   // the Redump download and About are actions
-	if (row == 10) {   // About: X opens it
+	vals[10][0] = 0;   // the audit log: X opens it
+	snprintf(vals[11], sizeof(vals[11]), T(STR_AUDIT_MB_VAL), g_audit_mb);
+	snprintf(vals[12], sizeof(vals[12]), "v%s", APP_VERSION);
+	const char *labels[13] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
+	                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_AUDIT), T(STR_L_AUDIT_MB), T(STR_L_ABOUT)};
+	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 10 | 1u << 12);   // the Redump download, the audit log and About are actions
+	if (row == 10 || row == 12) {   // the audit log and About: X opens them
 		const char *b[] = {"updown", "l2r2", "cross", "circle"};
 		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_OPEN), T(STR_HINT_BACK)};
 		hint_bar(b, l, 4);
@@ -3719,7 +4381,7 @@ static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, i
 static void settings_screen()
 {
 	int redump = g_redump, remote = g_remote, webhook_on = g_webhook_on, row = 0;
-	const int NROWS = 11;   // the last row opens About
+	const int NROWS = 13;   // the last row opens About
 	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	DriveCfg sd = g_std;
 	char rdver[64] = "";
@@ -3746,8 +4408,15 @@ static void settings_screen()
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 10) {
+		if ((p & B_CROSS) && row == 12) {
 			about_screen();
+			pad_pressed();
+			g_redraw = 2;
+			continue;
+		}
+		if ((p & B_CROSS) && row == 10) {
+			audit_screen();
+			sd = g_std; redump = g_redump; remote = g_remote; webhook_on = g_webhook_on;   // an undo may have changed them
 			pad_pressed();
 			g_redraw = 2;
 			continue;
@@ -3766,7 +4435,7 @@ static void settings_screen()
 			continue;
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (row == 7 || row == 10) d = 0;
+		if (row == 7 || row == 10 || row == 12) d = 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) {
 			reset = own_dialog(T(STR_RESET_Q), 1) == 1;
@@ -3779,6 +4448,7 @@ static void settings_screen()
 				redump = RD_OFF;
 				if (remote) remote_set(0);
 				remote = 0; webhook_on = 0; g_webhook_step = 5;
+				g_audit_mb = 256;
 			}
 		}
 		if (d && !reset) {
@@ -3805,14 +4475,22 @@ static void settings_screen()
 				if (remote) notify_url(STR_REMOTE_HELP, "");
 			} else if (row == 9) {
 				webhook_on = !webhook_on;
+			} else if (row == 11) {   // right = more; no wrap-around: 256 to 1 MB would drop the kept sectors
+				int k = 0, ns = (int)(sizeof(audit_mb_steps) / sizeof(audit_mb_steps[0]));
+				while (k < ns - 1 && audit_mb_steps[k] != g_audit_mb) k++;
+				k += d;
+				if (k < 0) k = 0;
+				if (k > ns - 1) k = ns - 1;
+				g_audit_mb = audit_mb_steps[k];
 			}
 		}
 		if (d || reset) {   // every change is applied and saved immediately
 			g_std = sd; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on;
 			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
 			cfg_save();
-			logf("settings saved: standard speed=%d retries=%d check=%d eject=%d autostart=%d, redump=%d remote=%d webhook=%d",
-			     sd.speed, sd.retries, sd.check, sd.eject, sd.autostart, g_redump, g_remote, g_webhook_on);
+			audit_apply_cap();   // a smaller size drops the oldest kept sectors at once
+			logf("settings saved: standard speed=%d retries=%d check=%d eject=%d autostart=%d, redump=%d remote=%d webhook=%d audit_mb=%d",
+			     sd.speed, sd.retries, sd.check, sd.eject, sd.autostart, g_redump, g_remote, g_webhook_on, g_audit_mb);
 		}
 		if (p & B_CIRCLE) return;
 	}
@@ -3925,16 +4603,60 @@ static int card_list(int *out)
 }
 
 // A destination was chosen for card c: remember it (per USB port for the USB drives) and save.
-static void card_set_outdir(int c, const char *dir)
+static void card_apply_outdir(int c, const char *dir)
 {
 	Card &k = g_cards[c];
-	snprintf(k.outdir, sizeof(k.outdir), "%s", dir);
-	snprintf(k.dest, sizeof(k.dest), "%s", dir);
-	if (c == 0) snprintf(g_outdir, sizeof(g_outdir), "%s", dir);
-	else if (usbodd_port(c - 1) >= 0) snprintf(g_outdir_usb[usbodd_port(c - 1)], sizeof(g_outdir_usb[0]), "%s", dir);
+	// dir may be one of these buffers (the undo passes the global): never copy one onto itself
+	auto put = [dir](char *to, size_t n) { if (to != dir) snprintf(to, n, "%s", dir); };
+	put(k.outdir, sizeof(k.outdir));
+	put(k.dest, sizeof(k.dest));
+	if (c == 0) put(g_outdir, sizeof(g_outdir));
+	else if (usbodd_port(c - 1) >= 0) put(g_outdir_usb[usbodd_port(c - 1)], sizeof(g_outdir_usb[0]));
 	k.recheck = 1;
+}
+static void card_set_outdir(int c, const char *dir)
+{
+	card_apply_outdir(c, dir);
 	cfg_save();
 	logf("card %d: destination %s", c, dir);
+}
+
+enum { CF_OUTDIR = 1, CF_DRIVE = 2 };
+
+// Card c takes its destination (CF_OUTDIR) and drive settings (CF_DRIVE) from the config. A card
+// with a job keeps them until the job ends, as the screens do (they apply to the next job).
+static void card_take_cfg(int c, int what)
+{
+	Card &k = g_cards[c];
+	if (card_busy(c)) { k.pend_cfg |= what; k.recheck = 1; return; }
+	k.pend_cfg &= ~what;
+	int port = c ? usbodd_port(c - 1) : 0;
+	if (c && (port < 0 || port > 7)) return;
+	if (what & CF_DRIVE) card_from(k, c ? g_usbcfg[port] : g_bdcfg);
+	if (what & CF_OUTDIR) card_apply_outdir(c, !c ? g_outdir : g_outdir_usb[port][0] ? g_outdir_usb[port] : HDD_DIR);
+}
+
+// The cards whose job ended take what changed meanwhile (home screen, each round).
+static void cards_take_pending()
+{
+	for (int c = 0; c < NCARDS; c++)
+		if (g_cards[c].pend_cfg && !card_busy(c)) card_take_cfg(c, g_cards[c].pend_cfg);
+}
+
+// After the audit's undo changed a setting: the same follow-ups as the settings screens (the web
+// view, the cards' own copies of the drive settings and destinations, the cards' re-check).
+static void setting_applied(const char *key)
+{
+	if (!strcmp(key, "remote")) remote_set(g_remote);
+	else if (!strcmp(key, "drive_bd")) card_take_cfg(0, CF_DRIVE);
+	else if (!strncmp(key, "drive_usb", 9) && key[9] >= '0' && key[9] <= '7' && !key[10]) {
+		for (int c = 1; c < NCARDS; c++) if (usbodd_port(c - 1) == key[9] - '0') card_take_cfg(c, CF_DRIVE);
+	}
+	else if (!strcmp(key, "outdir")) card_take_cfg(0, CF_OUTDIR);
+	else if (!strncmp(key, "outdir_usb", 10) && key[10] >= '0' && key[10] <= '7' && !key[11]) {
+		for (int c = 1; c < NCARDS; c++) if (usbodd_port(c - 1) == key[10] - '0') card_take_cfg(c, CF_OUTDIR);
+	}
+	for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
 }
 
 // The system reports discs only for its own drive and nothing about USB drives coming and going.
@@ -4359,9 +5081,9 @@ static void draw_page(int c, int y)
 	if (k.pg_scroll < k.pg_max) ui_icon("down", ax, bottom - asz, asz, 0xC8D0E0);
 }
 
-static void rip_job_start(int c, int fresh);
-static void check_job_start(int c);
-static void repair_job_start(int c);
+static void rip_job_start(int c, AuditSrc src, int fresh);
+static void check_job_start(int c, AuditSrc src);
+static void repair_job_start(int c, AuditSrc src);
 
 
 // One frame of the home screen: tabs, the selected drive's page, the general row and the buttons
@@ -4455,6 +5177,7 @@ static int home_screen()
 		if (g_rd_seq != last_rd) { last_rd = g_rd_seq; g_redraw = 2; }
 		// disc events and identification, one drive at a time
 		if (!g_ident_busy && !g_repairing) {
+			cards_take_pending();   // an undo changed a busy card's destination or drive settings
 			for (int i = 0; i < nc; i++) {
 				Card &k = g_cards[list[i]];
 				if (k.job) continue;   // ripping: the rip has the drive
@@ -4498,10 +5221,10 @@ static int home_screen()
 				if (k.job || !std_or(k.autostart, g_std.autostart) || k.state != DISC_READY || !k.fresh) continue;
 				k.fresh = 0;
 				select_card(list[i]);
-				if (!k.prev_rip) { rip_job_start(list[i], 1); continue; }
+				if (!k.prev_rip) { rip_job_start(list[i], AU_APP, 1); continue; }
 				if (k.repair_n) {
 					prev_rip_check();   // the log as it is now
-					if (g_prev_rip && g_repair_n) { logf("auto repair: %d sector(s)", g_repair_n); repair_job_start(list[i]); }
+					if (g_prev_rip && g_repair_n) { logf("auto repair: %d sector(s)", g_repair_n); repair_job_start(list[i], AU_APP); }
 				}
 			}
 		for (int i = 0; i < nc; i++) eta_tick(list[i]);   // every tab's time left, also those not shown
@@ -4568,12 +5291,12 @@ static int home_screen()
 			}
 			int fr = f.fresh;
 			f.fresh = 0;
-			rip_job_start(sel, fr);   // rip, also over an existing rip (X is always a rip); the card shows it
+			rip_job_start(sel, g_input_src, fr);   // rip, also over an existing rip (X is always a rip); the card shows it
 			g_redraw = 2;
 			continue;
 		}
 		if ((p & B_SQUARE) && st == DISC_READY && f.prev_rip && !f.repair_n && f.rd_state < 0 && !f.job) {   // check the file
-			check_job_start(sel);
+			check_job_start(sel, g_input_src);
 			g_redraw = 2;
 			continue;
 		}
@@ -4581,7 +5304,7 @@ static int home_screen()
 			int shown_prev = g_prev_rip;
 			prev_rip_check();
 			if (g_prev_rip != shown_prev || !g_repair_n) { g_redraw = 2; continue; }
-			repair_job_start(sel);   // on its tab, like a rip; the other drives go on
+			repair_job_start(sel, g_input_src);   // on its tab, like a rip; the other drives go on
 			g_redraw = 2;
 			continue;
 		}
@@ -4689,15 +5412,81 @@ static int prepare_disc(int *err, int *code)
 
 // ---------------------------------------------------------------- remote view and webhooks
 
-static const char *rd_result_str()
+static const char *rd_code(int r)
 {
-	switch (g_rd_result) {
+	switch (r) {
 	case 1: return "verified";
 	case 0: return "no_match";
 	case -1: return "unchecked";
 	case -2: return "not_found";
 	default: return "off";
 	}
+}
+static const char *rd_result_str() { return rd_code(g_rd_result); }
+
+// ---------------------------------------------------------------- jobs in the audit log
+
+// The Redump line of a rip's log ("verified Alundra (Europe)"), "unchecked" when there is none.
+static void redump_line_of(const char *base, char *out, size_t n)
+{
+	snprintf(out, n, "unchecked");
+	if (!base[0]) return;
+	char p[320], b[4096];
+	snprintf(p, sizeof(p), "%s.log", base);
+	VFile *f = vf_open(p, "rb");
+	if (!f) return;
+	int got = (int)vf_read(f, b, sizeof(b) - 1);
+	vf_close(f);
+	b[got > 0 ? got : 0] = 0;
+	const char *rd = strstr(b, "redump=");
+	if (!rd) return;
+	rd += 7;
+	int len = (int)strcspn(rd, "\r\n");
+	if (len) snprintf(out, n, "%.*s", len, rd);
+}
+
+// A job on card c begins: its row in the audit log with what started it, the disc key and the
+// rip's name (a rip: the file it makes; a repair or check: the rip it works on).
+static void audit_card_begin(int c, AuditSrc src, const char *what)
+{
+	Card &k = g_cards[c];
+	OnCard o(c);
+	disc_key(k.audit_disc, sizeof(k.audit_disc));
+	const char *slash = strrchr(k.exist, '/');
+	const char *name = !strcmp(what, "rip") || !k.exist[0] ? k.fname : slash ? slash + 1 : k.exist;
+	redump_line_of(k.exist, k.rd_before, sizeof(k.rd_before));
+	k.job_src = src;
+	k.audit_job = audit_job_begin(src, k.audit_disc, name, what);
+}
+
+// Every way out of a job ends it here, or the audit keeps it running and refuses undo on its disc.
+// A finished rip names the image it made: older rows on that file are then no longer undone.
+static void audit_card_end(int c, const char *result, const char *image = NULL)
+{
+	Card &k = g_cards[c];
+	if (k.audit_job) audit_job_end(k.audit_job, result, image);
+	k.audit_job = 0;
+}
+
+// The job's Redump result (g_rd_result) against the rip's line before it.
+static void audit_card_redump(int c)
+{
+	Card &k = g_cards[c];
+	if (!k.audit_job) return;
+	OnCard o(c);
+	char after[RD_NAME + 16];
+	snprintf(after, sizeof(after), "%s%s%s", rd_result_str(), g_rd_result_name[0] ? " " : "", g_rd_result_name);
+	audit_note(k.audit_job, AU_RIPS, k.audit_disc, "redump", "", k.rd_before, after);
+}
+
+// How a rip or a repair ended (card context): ok is what rip_disc / repair_disc returned.
+static const char *rip_result(int ok)
+{
+	return ok ? "finished" : g_disc_lost[cur_card()] ? "disc_lost" : g_abort ? "cancelled" : "failed";
+}
+static const char *repair_result(int ok)
+{
+	return g_disc_lost[cur_card()] ? "disc_lost" : !ok ? "failed" : g_abort ? "cancelled" : "finished";
 }
 
 // Fields shared by the status page and the webhooks (appended to an open JSON object).
@@ -4955,7 +5744,7 @@ static int rip_disc_inner(int fresh, int autorip)
 	}
 
 	char rdinfo[RD_NAME + 80] = "";
-	if (g_redump != RD_OFF) redump_verify(rdinfo, sizeof(rdinfo));
+	if (g_redump != RD_OFF) { redump_verify(rdinfo, sizeof(rdinfo)); audit_card_redump(cur_card()); }
 
 	// Only discs on the known LibCrypt list get an SBI and a LibCrypt line in the dialog.
 	// Other PAL discs are still checked, but a hit is only logged as a hint.
@@ -5062,17 +5851,15 @@ static int rip_disc(int fresh, int autorip)
 
 static void job_reset(int c);
 
-// Checks an earlier rip against Redump from its file, without the disc: MD5 per track (track
-// bounds from its .cue), compared like after a rip; the result goes into its rip log (made if it
-// has none). Runs as the card's job; the tab and the page show its progress.
-static void check_job_thread(void *arg)
+// Checks a rip from its file, without the disc: MD5 per track (track bounds from its .cue), its
+// .md5 written, the track MD5s and the Redump line of its log rewritten (a small log made when it
+// has none). As the card's job (job = 1) it shows its progress, can be cancelled and compares with
+// Redump as set. Otherwise (the audit's undo, on the UI thread) it touches no card's state and
+// compares with the local copy only (none: unchecked). Returns 0 checked, 1 cancelled, -1 no image.
+static void (*g_check_tick)(uint32_t sectors);   // set: called now and then while check_image reads (not as a job)
+static int check_image(const char *base, int job = 0)
 {
-	t_card = (int)(long)arg;
-	Card &k = g_cards[t_card];
-	char base[256], path[320];
-	snprintf(base, sizeof(base), "%s", k.exist);
-	g_phase = 4; g_done = 0; g_total = 0; g_readpos = 0; g_pass2_total = 0;
-	g_rd_result = -1; g_rd_result_name[0] = 0;
+	char path[320];
 	// track starts (sectors) from the cue: INDEX 00 when there is one (the pregap belongs to the track)
 	uint32_t st[MAX_TRACKS + 1];
 	int nt = 0;
@@ -5084,7 +5871,8 @@ static void check_job_thread(void *arg)
 		vf_close(cf);
 		cb[n > 0 ? n : 0] = 0;
 		int i0 = 0;
-		for (char *l = strtok(cb, "\r\n"); l; l = strtok(NULL, "\r\n")) {
+		char *save = NULL;
+		for (char *l = strtok_r(cb, "\r\n", &save); l; l = strtok_r(NULL, "\r\n", &save)) {
 			unsigned idx, m, sec, fr;
 			if (strstr(l, "TRACK ")) { i0 = 0; if (nt < MAX_TRACKS) nt++; continue; }
 			if (nt && sscanf(l, " INDEX %u %u:%u:%u", &idx, &m, &sec, &fr) == 4) {
@@ -5098,70 +5886,248 @@ static void check_job_thread(void *arg)
 	st[0] = 0;
 	snprintf(path, sizeof(path), "%s.bin", base);
 	VFile *f = vf_open(path, "rb");
-	uint64_t size = 0;
-	if (f) {   // size: read to the end once is slow; seek-free estimate from the identification
-		size = (uint64_t)k.mb * 1024 * 1024;
+	if (!f) { if (job) g_total = 1; logf("check %s: no image", base); return -1; }
+	if (job) {   // size: read to the end once is slow; seek-free estimate from the identification
+		uint64_t size = (uint64_t)g_cards[cur_card()].mb * 1024 * 1024;
+		g_total = size ? (uint32_t)(size / RAW_SIZE) : 1;
 	}
-	g_total = size ? (uint32_t)(size / RAW_SIZE) : 1;
 	Md5 md[MAX_TRACKS + 1];
 	for (int t = 0; t < nt; t++) md5_init(&md[t]);
 	uint8_t *buf = (uint8_t *)malloc(512 * RAW_SIZE);
 	uint32_t lba = 0;
 	int t = 0;
-	while (f && buf && !g_abort) {
+	while (buf && !(job && g_abort)) {
 		size_t got = vf_read(f, buf, 512 * RAW_SIZE);
 		uint32_t secs = (uint32_t)(got / RAW_SIZE);
 		for (uint32_t i = 0; i < secs; i++, lba++) {
 			while (t + 1 < nt && lba >= st[t + 1]) t++;
 			md5_update(&md[t], buf + (size_t)i * RAW_SIZE, RAW_SIZE);
 		}
-		g_done = lba;
-		if (lba > g_total) g_total = lba;
+		if (job) { g_done = lba; if (lba > g_total) g_total = lba; }
+		else if (g_check_tick && lba % (16 * 512) == 0) g_check_tick(lba);   // about every 19 MB
 		if (got < 512 * RAW_SIZE) break;
 	}
-	if (f) vf_close(f);
+	vf_close(f);
 	free(buf);
-	if (!f) logf("check %s: no image", base);
-	else if (g_abort) logf("check %s: cancelled", base);
-	else {
+	if (job && g_abort) { logf("check %s: cancelled", base); return 1; }
+	uint8_t bin[MAX_TRACKS + 1][16];
+	char hex[MAX_TRACKS + 1][33];
+	for (int i = 0; i < nt; i++) { md5_final(&md[i], bin[i]); md5_hex(bin[i], hex[i]); }
+	int rd;
+	char rdname[RD_NAME] = "";
+	if (job) {
 		g_total = lba;
 		g_ntracks = nt;
-		for (int i = 0; i < nt; i++) { md5_final(&md[i], g_track_md5bin[i]); md5_hex(g_track_md5bin[i], g_track_md5[i]); }
+		memcpy(g_track_md5bin, bin, sizeof(bin[0]) * nt);
+		memcpy(g_track_md5, hex, sizeof(hex[0]) * nt);
 		g_phase = 3;
 		char info[RD_NAME + 80];
 		redump_verify(info, sizeof(info));
-		logf("check %s: %d track(s), redump %s %s", base, nt, rd_result_str(), g_rd_result_name);
-		// into its log: replace the redump= line, or make a small log
-		snprintf(path, sizeof(path), "%s.log", base);
-		static char lb2[65536];
-		int n = 0;
-		VFile *lf = vf_open(path, "rb");
-		if (lf) { n = (int)vf_read(lf, lb2, sizeof(lb2) - 1); vf_close(lf); }
-		lb2[n > 0 ? n : 0] = 0;
-		char rdl[RD_NAME + 32];
-		snprintf(rdl, sizeof(rdl), "redump=%s%s%s\n", rd_result_str(), g_rd_result_name[0] ? " " : "", g_rd_result_name);
+		rd = g_rd_result;
+		snprintf(rdname, sizeof(rdname), "%s", g_rd_result_name);
+	} else {
+		rd_lock();
+		rd = rd_local_verify(bin, nt, rdname, sizeof(rdname));
+		rd_unlock();
+		if (rd < -2 || rd > 1) rd = -1;
+		if (rd != 1) rdname[0] = 0;
+	}
+	logf("check %s: %d track(s), redump %s %s", base, nt, rd_code(rd), rdname);
+	snprintf(path, sizeof(path), "%s.md5", base);
+	VFile *mf = vf_open(path, "wb");
+	if (mf) { for (int i = 0; i < nt; i++) vf_printf(mf, "%s  track %02d\n", hex[i], i + 1); vf_close(mf); }
+	// its log: the tracks' MD5s and the Redump line replaced, or a small log
+	snprintf(path, sizeof(path), "%s.log", base);
+	char *lb = (char *)malloc(65536);
+	int n = 0;
+	VFile *lf = lb ? vf_open(path, "rb") : NULL;
+	if (lf) { n = (int)vf_read(lf, lb, 65535); vf_close(lf); }
+	if (lb) lb[n > 0 ? n : 0] = 0;
+	char rdl[RD_NAME + 32];
+	snprintf(rdl, sizeof(rdl), "redump=%s%s%s\n", rd_code(rd), rdname[0] ? " " : "", rdname);
+	VFile *of = lb ? vf_open(path, "wb") : NULL;
+	if (of) {
+		if (n > 0) {
+			int put = 0;
+			for (char *l = lb; *l; ) {
+				char *e = strchr(l, '\n');
+				size_t len = e ? (size_t)(e - l + 1) : strlen(l);
+				unsigned tn;
+				const char *mp = NULL;
+				if (!strncmp(l, "track=", 6) && sscanf(l, "track=%u", &tn) == 1 && tn >= 1 && (int)tn <= nt) {
+					mp = strstr(l, " md5=");
+					if (mp && mp >= l + len) mp = NULL;   // on a later line
+				}
+				if (!strncmp(l, "redump=", 7)) { if (!put) { vf_printf(of, "%s", rdl); put = 1; } }
+				else if (mp) {   // the track's MD5 as the image has it now
+					vf_write(of, l, (size_t)(mp + 5 - l));
+					vf_printf(of, "%s\n", hex[tn - 1]);
+				}
+				else vf_write(of, l, len);
+				l += len;
+			}
+			if (!put) vf_printf(of, "%s", rdl);
+		} else {
+			const Card *k = job ? &g_cards[cur_card()] : NULL;
+			const char *slash = strrchr(base, '/');
+			vf_printf(of, "PSX Ripper rip log\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n",
+			          k ? k->title : slash ? slash + 1 : base, k ? k->serial : "");
+			vf_printf(of, "sectors=%u\n", lba);
+			for (int i = 0; i < nt; i++) vf_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], hex[i]);
+			vf_printf(of, "%s", rdl);
+		}
+		vf_close(of);
+	}
+	free(lb);
+	return 0;
+}
+
+// Sectors an undo put back into a rip: each goes into its log again as unreadable (its restored
+// bytes are all zero, as the rip fills a sector it could not read) or bad, unless the log lists it
+// already, and the counts follow; so a later repair reads them again.
+static void riplog_put_back(const char *base, const uint32_t *lbas, const uint8_t *zero, int n)
+{
+	char path[320];
+	snprintf(path, sizeof(path), "%s.log", base);
+	char *lb = (char *)malloc(65536);
+	uint8_t *add = (uint8_t *)malloc(n);
+	if (!lb || !add) { free(lb); free(add); return; }
+	int len = 0;
+	VFile *f = vf_open(path, "rb");
+	if (f) { len = (int)vf_read(f, lb, 65535); vf_close(f); }
+	lb[len > 0 ? len : 0] = 0;
+	int nu = 0, nb = 0;
+	for (int i = 0; i < n; i++) {
+		add[i] = 1;
+		for (int j = 0; j < i; j++) if (add[j] && lbas[j] == lbas[i]) add[i] = 0;   // twice in one undo
+	}
+	for (char *l = lb; *l; ) {   // listed already: unreadable, bad, or uncertain and not confirmed
+		size_t ll = strcspn(l, "\n");
+		char t[96];
+		snprintf(t, sizeof(t), "%.*s", (int)(ll < sizeof(t) - 1 ? ll : sizeof(t) - 1), l);
+		unsigned v;
+		if (sscanf(t, "unreadable=%u", &v) == 1 || sscanf(t, "bad=%u", &v) == 1 || (sscanf(t, "uncertain=%u", &v) == 1 && strstr(t, "unconfirmed")))
+			for (int i = 0; i < n; i++) if (lbas[i] == v) add[i] = 0;
+		l += ll + (l[ll] == '\n');
+	}
+	for (int i = 0; i < n; i++) if (add[i]) { if (zero[i]) nu++; else nb++; }
+	if (nu + nb) {
 		VFile *of = vf_open(path, "wb");
 		if (of) {
-			if (n > 0) {
-				int put = 0;
-				for (char *l = lb2; *l; ) {
-					char *e = strchr(l, '\n');
-					size_t len = e ? (size_t)(e - l + 1) : strlen(l);
-					if (!strncmp(l, "redump=", 7)) { if (!put) { vf_printf(of, "%s", rdl); put = 1; } }
-					else vf_write(of, l, len);
-					l += len;
-				}
-				if (!put) vf_printf(of, "%s", rdl);
-			} else {
-				vf_printf(of, "PSX Ripper rip log\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n", k.title, k.serial);
-				vf_printf(of, "sectors=%u\n", lba);
-				for (int i = 0; i < nt; i++) vf_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], g_track_md5[i]);
-				vf_printf(of, "%s", rdl);
+			int seen_u = 0, seen_b = 0;
+			for (char *l = lb; *l; ) {
+				size_t ll = strcspn(l, "\n");
+				unsigned v;
+				if (sscanf(l, "unreadable_count=%u", &v) == 1) { vf_printf(of, "unreadable_count=%u\n", v + nu); seen_u = 1; }
+				else if (sscanf(l, "bad_count=%u", &v) == 1) { vf_printf(of, "bad_count=%u\n", v + nb); seen_b = 1; }
+				else if (sscanf(l, "fixed_count=%u", &v) == 1) vf_printf(of, "fixed_count=%u\n", v > (unsigned)(nu + nb) ? v - nu - nb : 0);
+				else { vf_write(of, l, ll); vf_write(of, "\n", 1); }
+				l += ll + (l[ll] == '\n');
+			}
+			if (!seen_u) vf_printf(of, "unreadable_count=%d\n", nu);
+			if (!seen_b) vf_printf(of, "bad_count=%d\n", nb);
+			for (int i = 0; i < n; i++) if (add[i]) vf_printf(of, "%s=%u\n", zero[i] ? "unreadable" : "bad", lbas[i]);
+			vf_close(of);
+			logf("undo: %d unreadable and %d bad sector(s) back in %s", nu, nb, path);
+		}
+	}
+	free(add);
+	free(lb);
+}
+
+// Sectors a redo wrote the repaired bytes into again (the inverse of riplog_put_back): their
+// unreadable= / bad= lines leave the log and the counts follow.
+static void riplog_take_out(const char *base, const uint32_t *lbas, int n)
+{
+	char path[320];
+	snprintf(path, sizeof(path), "%s.log", base);
+	char *lb = (char *)malloc(65536);
+	if (!lb) return;
+	int len = 0;
+	VFile *f = vf_open(path, "rb");
+	if (f) { len = (int)vf_read(f, lb, 65535); vf_close(f); }
+	lb[len > 0 ? len : 0] = 0;
+	auto listed = [&](const char *l, int *bad) {   // an unreadable= / bad= line of one of the sectors
+		unsigned v;
+		int u = sscanf(l, "unreadable=%u", &v) == 1, b = !u && sscanf(l, "bad=%u", &v) == 1;
+		if (!u && !b) return false;
+		for (int i = 0; i < n; i++) if (lbas[i] == v) { *bad = b; return true; }
+		return false;
+	};
+	int nu = 0, nb = 0;
+	for (char *l = lb; *l; ) {
+		size_t ll = strcspn(l, "\n");
+		int b;
+		if (listed(l, &b)) { if (b) nb++; else nu++; }
+		l += ll + (l[ll] == '\n');
+	}
+	if (nu + nb) {
+		VFile *of = vf_open(path, "wb");
+		if (of) {
+			for (char *l = lb; *l; ) {
+				size_t ll = strcspn(l, "\n");
+				unsigned v;
+				int b;
+				if (listed(l, &b)) {}
+				else if (sscanf(l, "unreadable_count=%u", &v) == 1) vf_printf(of, "unreadable_count=%u\n", v > (unsigned)nu ? v - nu : 0);
+				else if (sscanf(l, "bad_count=%u", &v) == 1) vf_printf(of, "bad_count=%u\n", v > (unsigned)nb ? v - nb : 0);
+				else if (sscanf(l, "fixed_count=%u", &v) == 1) vf_printf(of, "fixed_count=%u\n", v + nu + nb);
+				else { vf_write(of, l, ll); vf_write(of, "\n", 1); }
+				l += ll + (l[ll] == '\n');
 			}
 			vf_close(of);
+			logf("redo: %d unreadable and %d bad sector(s) out of %s", nu, nb, path);
 		}
+	}
+	free(lb);
+}
+
+// The audit's recheck after an undo wrote sectors back into `file` (the image, .bin): the sectors
+// go back into its log (a redo: out of it again), then the image is checked again.
+static void recheck_hook(const char *file, const uint32_t *lbas, const uint8_t *zero, int n, int redo)
+{
+	char base[320];
+	snprintf(base, sizeof(base), "%s", file);
+	size_t len = strlen(base);
+	if (len > 4 && !strcmp(base + len - 4, ".bin")) base[len - 4] = 0;
+	if (n > 0 && lbas && zero) {
+		if (redo) riplog_take_out(base, lbas, n);
+		else riplog_put_back(base, lbas, zero, n);
+	}
+	if (g_check_ui) {   // the audit screen's undo: reading the whole image takes a while, the screen says so
+		const char *slash = strrchr(base, '/');
+		snprintf(g_wait_name, sizeof(g_wait_name), "%s", slash ? slash + 1 : base);
+		audit_wait_tick(0);
+		g_check_tick = audit_wait_tick;
+	}
+	check_image(base);
+	g_check_tick = NULL;
+	// a drive's card showing this rip: its Redump state and known errors follow the log at once
+	for (int c = 0; c < NCARDS; c++) {
+		Card &k = g_cards[c];
+		if (strcmp(k.exist, base) && strcmp(k.base, base)) continue;
+		if (k.state == DISC_READY && !card_busy(c)) { OnCard o(c); prev_rip_check(); }
+		else k.recheck = 1;   // busy: the home screen looks again when it is idle
+	}
+	g_redraw = 2;   // the tabs' Redump icons follow the log
+}
+
+// Checks an earlier rip against Redump from its file, without the disc (check_image). Runs as the
+// card's job; the tab and the page show its progress.
+static void check_job_thread(void *arg)
+{
+	t_card = (int)(long)arg;
+	Card &k = g_cards[t_card];
+	char base[256];
+	snprintf(base, sizeof(base), "%s", k.exist);
+	g_phase = 4; g_done = 0; g_total = 0; g_readpos = 0; g_pass2_total = 0;
+	g_rd_result = -1; g_rd_result_name[0] = 0;
+	int r = check_image(base, 1);
+	if (r == 0) {
+		audit_card_redump(t_card);
 		fire_event("check_finished");
 	}
+	audit_card_end(t_card, r == 0 ? "finished" : r == 1 ? "cancelled" : "failed");
 	prev_rip_check();   // the icon and the status follow the log
 	g_state = ST_HOME;
 	g_phase = 0;
@@ -5171,7 +6137,7 @@ static void check_job_thread(void *arg)
 	sysThreadExit(0);
 }
 
-static void check_job_start(int c)
+static void check_job_start(int c, AuditSrc src)
 {
 	Card &k = g_cards[c];
 	if (k.job || !k.exist[0]) return;
@@ -5182,8 +6148,9 @@ static void check_job_start(int c)
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy (status, deploy); the drive is not used
 	g_abort = 0; g_finished = 0; g_skip = 0;
+	audit_card_begin(c, src, "check");
 	sys_ppu_thread_t t;
-	if (sysThreadCreate(&t, check_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxcheck")) { k.job = 0; g_state = ST_HOME; }
+	if (sysThreadCreate(&t, check_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxcheck")) { audit_card_end(c, "failed"); k.job = 0; g_state = ST_HOME; }
 }
 
 // A rip in the background, for one card: the home screen keeps running and shows it in the card.
@@ -5200,7 +6167,10 @@ static void rip_job_thread(void *arg)
 	if (fresh) usleep(2000 * 1000);   // give the drive a moment to spin up
 	g_done = 0; g_total = 0; g_readpos = 0; g_phase = 0; g_pass2_total = 0;
 	logf("start rip (%s)", fresh ? "disc inserted" : "disc already in drive");
-	rip_disc(fresh, 1);
+	int ok = rip_disc(fresh, 1);
+	char image[300];
+	snprintf(image, sizeof(image), "%s.bin", g_base);   // the name its sector rows use
+	audit_card_end(t_card, rip_result(ok), image);
 	g_state = ST_HOME;     // also after an early failure
 	k.state = DISC_NONE;   // ejected or ripped: identify again
 	k.tried = 0;
@@ -5225,7 +6195,7 @@ static void job_reset(int c)
 	g_md5_total[c] = 0; g_md5_done[c] = 0;
 }
 
-static void rip_job_start(int c, int fresh)
+static void rip_job_start(int c, AuditSrc src, int fresh)
 {
 	Card &k = g_cards[c];
 	if (k.job) return;
@@ -5235,8 +6205,10 @@ static void rip_job_start(int c, int fresh)
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy from now on (status, the poll thread, deploy)
 	g_abort = 0; g_finished = 0; g_skip = 0;
+	audit_card_begin(c, src, "rip");
 	sys_ppu_thread_t t;
 	if (sysThreadCreate(&t, rip_job_thread, (void *)(long)(fresh | c << 8), 1000, 0x10000, 0, (char *)"psxjob")) {
+		audit_card_end(c, "failed");
 		k.job = 0; g_state = ST_HOME;
 	}
 }
@@ -5297,7 +6269,8 @@ static void repair_job_thread(void *arg)
 	t_card = (int)(long)arg;
 	Card &k = g_cards[t_card];
 	logf("start repair");
-	repair_disc();
+	int ok = repair_disc();
+	audit_card_end(t_card, repair_result(ok));
 	g_state = ST_HOME;
 	k.state = DISC_NONE;   // identify again: the log changed
 	k.tried = 0;
@@ -5308,7 +6281,7 @@ static void repair_job_thread(void *arg)
 	sysThreadExit(0);
 }
 
-static void repair_job_start(int c)
+static void repair_job_start(int c, AuditSrc src)
 {
 	Card &k = g_cards[c];
 	if (k.job) return;
@@ -5322,8 +6295,9 @@ static void repair_job_start(int c)
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy (status, the poll thread, deploy)
 	g_abort = 0; g_finished = 0; g_skip = 0;
+	audit_card_begin(c, src, "repair");
 	sys_ppu_thread_t t;
-	if (sysThreadCreate(&t, repair_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxrepairjob")) { k.job = 0; k.repairing = 0; g_state = ST_HOME; }
+	if (sysThreadCreate(&t, repair_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxrepairjob")) { audit_card_end(c, "failed"); k.job = 0; k.repairing = 0; g_state = ST_HOME; }
 }
 
 static int repair_disc_inner()
@@ -5447,7 +6421,7 @@ static int repair_disc_inner()
 	if (g_use == SRC_BD) lv1_storage_unpatch();
 	for (int t = 0; t < g_ntracks; t++) md5_hex(g_track_md5bin[t], g_track_md5[t]);   // fresh when patched
 	char rdinfo[RD_NAME + 80] = "";
-	if (g_redump != RD_OFF) redump_verify(rdinfo, sizeof(rdinfo));
+	if (g_redump != RD_OFF) { redump_verify(rdinfo, sizeof(rdinfo)); audit_card_redump(cur_card()); }
 	// results, the .md5 file and the log as after a rip
 	g_nres = 0;
 	snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", g_name, g_serial);
@@ -5525,6 +6499,20 @@ static int draw_wrapped(UiFont f, const char *text, int y, uint32_t col)
 }
 
 // Message (X OK) or question (X Yes, O No) in the app's own style. Returns 1 = OK/yes, 2 = no.
+static void own_dialog_draw(const char *msg, int yesno)
+{
+	draw_backdrop();
+	draw_wrapped(UI_BODY, msg, ui_h() / 3, 0xE8E8F0);
+	if (yesno) {
+		const char *b[] = {"cross", "circle"};
+		const char *l[] = {T(STR_HINT_YES), T(STR_HINT_NO)};
+		hint_bar(b, l, 2);
+	} else {
+		const char *b[] = {"cross"};
+		const char *l[] = {T(STR_HINT_OK)};
+		hint_bar(b, l, 1);
+	}
+}
 static int own_dialog(const char *msg, int yesno)
 {
 	pad_pressed();
@@ -5532,17 +6520,7 @@ static int own_dialog(const char *msg, int yesno)
 	while (!exit_requested) {
 		if (g_redraw > 0) {
 			g_redraw = 0;
-			draw_backdrop();
-			draw_wrapped(UI_BODY, msg, ui_h() / 3, 0xE8E8F0);
-			if (yesno) {
-				const char *b[] = {"cross", "circle"};
-				const char *l[] = {T(STR_HINT_YES), T(STR_HINT_NO)};
-				hint_bar(b, l, 2);
-			} else {
-				const char *b[] = {"cross"};
-				const char *l[] = {T(STR_HINT_OK)};
-				hint_bar(b, l, 1);
-			}
+			own_dialog_draw(msg, yesno);
 			g_drawn = 2;
 			g_backdrop_shown = 0;
 		}
@@ -5632,7 +6610,12 @@ int main(int argc, char *argv[])
 	netInitialize();
 	// start-up checks: config, lv1 state after an earlier crash, USB file systems
 	char warn[400] = "";
+	audit_init("/dev_hdd0/tmp/psxrip_audit", &vf_io);
+	audit_set_hooks(set_setting_hook, recheck_hook);
+	audit_set_progress(audit_undo_tick);
 	int had_cfg = cfg_load();
+	audit_apply_cap();   // also without a config file (the default size)
+	cfg_prime();   // so the first change after the boot is logged
 	card_defaults(g_cards[0]);
 	if (g_bdcfg.set) card_from(g_cards[0], g_bdcfg);
 	if (!had_cfg) { mkdir("/dev_hdd0/tmp", 0777); cfg_save(); logf("startup: no config, defaults written"); }   // editable over FTP

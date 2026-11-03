@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdarg.h>
 #include <unistd.h>
+#include <sys/stat.h>
 #include "ppu-types.h"
 #include "io/pad.h"
 #include "sys/thread.h"
@@ -119,16 +120,32 @@ int usbodd_ready(int, int) { return -1; }
 int usbodd_eject(int) { return 0; }
 int usbodd_scsi(int, const uint8_t *, int, uint8_t *, int, int, int *, int *, char *log, int logn) { if (log) snprintf(log, logn, "host\n"); return -1; }
 
-// files: nothing exists unless a test says so
-int vf_exists(const char *) { return 0; }
-VFile *vf_open(const char *, const char *) { return 0; }
-size_t vf_write(VFile *, const void *, size_t) { return 0; }
-size_t vf_read(VFile *, void *, size_t) { return 0; }
-int vf_seek(VFile *, uint64_t) { return -1; }
-int vf_printf(VFile *, const char *, ...) { return 0; }
-int vf_close(VFile *) { return 0; }
-int vf_unlink(const char *) { return 0; }
-int vf_rename(const char *, const char *) { return 0; }
+// files: real files through stdio, so image writes and checks can be tested on the host; the app's
+// paths (/dev_hdd0/...) do not exist here, so the screens see no files, as on an empty console
+struct VFile { FILE *f; };
+int vf_exists(const char *path) { struct stat st; return stat(path, &st) == 0; }
+VFile *vf_open(const char *path, const char *mode)
+{
+	FILE *f = fopen(path, mode);
+	if (!f) return 0;
+	VFile *v = (VFile *)malloc(sizeof(VFile));
+	v->f = f;
+	return v;
+}
+size_t vf_write(VFile *f, const void *p, size_t n) { return fwrite(p, 1, n, f->f); }
+size_t vf_read(VFile *f, void *p, size_t n) { return fread(p, 1, n, f->f); }
+int vf_seek(VFile *f, uint64_t pos) { return fseeko(f->f, (off_t)pos, SEEK_SET); }
+int vf_printf(VFile *f, const char *fmt, ...)
+{
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vfprintf(f->f, fmt, ap);
+	va_end(ap);
+	return n;
+}
+int vf_close(VFile *f) { int r = fclose(f->f); free(f); return r; }
+int vf_unlink(const char *path) { return unlink(path); }
+int vf_rename(const char *from, const char *to) { return rename(from, to); }
 int vf_mkdir(const char *) { return 0; }
 int vf_scan(VfVolume *, int) { return 0; }
 int vf_free_mb(const char *, uint64_t *mb) { *mb = 338 * 1024; return 0; }   // a hard disk with room

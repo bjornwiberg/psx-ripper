@@ -25,6 +25,7 @@ app writes the whole file again.
 | `webhook_header1` … `3` | `Name: value` | Extra headers (e.g. authentication) |
 | `webhook_events` | bit mask, bit n = event n below | Events that are sent |
 | `webhook_step` | 1, 2, 5, 10, 15, 25, 50 | Progress every N percent |
+| `audit_mb` | 1, 2, 4, 8, 16, 32, 64, 128, 256 | Size limit in MB of the audit log's sector copies (default 256) |
 
 Webhook event bits: 0 `disc_identified`, 1 `rip_started`, 2 `rip_progress`, 3 `rip_finished`,
 4 `rip_cancelled`, 5 `rip_failed`, 6 `repair_finished`, 7 `disc_ejected`,
@@ -34,6 +35,18 @@ Webhook event bits: 0 `disc_identified`, 1 `rip_started`, 2 `rip_progress`, 3 `r
 because the disc left the drive without O being pressed (a USB SuperDrive pushes out a disc it
 cannot read; the drive then answers "medium not present"). A rip removes its unfinished file; a
 repair keeps the sectors it already wrote.
+
+## Audit log files
+
+The audit log is in `/dev_hdd0/tmp/psxrip_audit/`:
+
+| File | Contents |
+|---|---|
+| `audit.log` | One text row per change: time, source, disc, what, before and after. Settings that are secret (webhook address and headers) only say set or cleared |
+| `job<N>.bin` | The old and new bytes (2 x 2352) of every sector job N changed; this is what a sector undo reads |
+
+The `job<N>.bin` files together stay under `audit_mb`; past it the oldest are deleted (never
+one of a running job), and their rows can no longer be undone.
 
 ## Remote view and webhooks
 

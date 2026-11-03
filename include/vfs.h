@@ -8,7 +8,7 @@
 
 struct VFile;
 
-VFile *vf_open(const char *path, const char *mode);   // "wb", "rb" or "r+b"
+VFile *vf_open(const char *path, const char *mode);   // "wb", "w+b", "rb" or "r+b"
 size_t vf_write(VFile *f, const void *p, size_t n);
 size_t vf_read(VFile *f, void *p, size_t n);
 int vf_seek(VFile *f, uint64_t pos);
