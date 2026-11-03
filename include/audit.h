@@ -29,7 +29,8 @@ enum AuditWhy {
 	AW_NOT_APPLIED,       // the setting could not be applied (row, what = key)
 	AW_NO_HOOK,           // settings cannot be changed here (row)
 	AW_NOTHING,           // a job or disc with nothing (left) to undo
-	AW_NO_DISC            // no disc given
+	AW_NO_DISC,           // no disc given
+	AW_REPLACED           // the file was ripped again since: the row's bytes belong to an older image (row, file)
 };
 struct AuditReason {
 	AuditWhy code;
@@ -64,7 +65,9 @@ struct AuditRow {
 void audit_init(const char *dir, const AuditIo *io);
 // Starts a job (`what` = rip | repair | check, `name` = display name, kept in the row's `before`).
 uint32_t audit_job_begin(AuditSrc src, const char *disc, const char *name, const char *what);
-void audit_job_end(uint32_t job, const char *result);
+// A finished rip names the image it made (`image`, kept in its result row): rows of older jobs on
+// that file are then never undone, their bytes belong to the image it replaced.
+void audit_job_end(uint32_t job, const char *result, const char *image = NULL);
 void audit_note(uint32_t job, AuditDom dom, const char *disc, const char *kind,
                 const char *what, const char *before, const char *after);
 // Logs one changed sector: old and new bytes go to job<N>.bin (4704 bytes per row).

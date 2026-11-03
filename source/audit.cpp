@@ -38,6 +38,8 @@ static uint32_t g_running[16];
 // undone when it finished
 static std::map<uint32_t, std::string> g_results;
 static std::map<uint32_t, bool> g_rips;
+// image file -> the newest finished rip that made it: older jobs' rows on it name a replaced image
+static std::map<std::string, uint32_t> g_made;
 static uint64_t g_cap = 256ull << 20, g_blob_total;   // the audit_mb setting; all job<N>.bin together
 static int (*g_set_setting)(const char *key, const char *value);
 static void (*g_recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n);
@@ -237,6 +239,14 @@ static void prune()
 	g_blob_total = total;
 }
 
+// A rip ended: when it finished, it made `image` (renamed over any earlier one). Caller holds the lock.
+static void note_made(uint32_t job, const char *result, const char *image)
+{
+	if (!image || !*image || !g_rips.count(job) || strcmp(result, "finished")) return;
+	uint32_t &k = g_made[image];
+	if (job > k) k = job;
+}
+
 void audit_init(const char *dir, const AuditIo *io)
 {
 	if (!g_mx_made) {
@@ -254,6 +264,7 @@ void audit_init(const char *dir, const AuditIo *io)
 	memset(g_running, 0, sizeof g_running);
 	g_results.clear();
 	g_rips.clear();
+	g_made.clear();
 	char p[256], t[260];
 	path_log(p, sizeof p);
 	snprintf(t, sizeof t, "%s.tmp", p);
@@ -264,8 +275,8 @@ void audit_init(const char *dir, const AuditIo *io)
 	long good = scan_log([](const AuditRow &r) {
 		if (r.id >= g_next_id) g_next_id = r.id + 1;
 		if (r.job >= g_next_job) g_next_job = r.job + 1;
-		if (!strcmp(r.kind, "result")) g_results[r.job] = r.after;
 		if (!strcmp(r.kind, "job") && !strcmp(r.what, "rip")) g_rips[r.job] = true;
+		if (!strcmp(r.kind, "result")) { g_results[r.job] = r.after; note_made(r.job, r.after, r.file); }
 	});
 	// Drop a half line so the next row does not glue onto it. If that fails, keep the original and
 	// end the half line with a newline; it has no end marker, so it is never read as a row.
@@ -312,11 +323,11 @@ static uint32_t write_row(uint32_t job, AuditSrc src, AuditDom dom, const char *
 		n += (size_t)snprintf(line + n, sizeof line - n, "\t%s=", x.k);
 		n = put_esc(line, n, sizeof line - 24, x.v, x.max);
 	}
-	if (sector) {
+	if (sector || file) {   // a sector row's image, or the image a rip made (its result row)
 		n += (size_t)snprintf(line + n, sizeof line - n, "\tfile=");
 		n = put_esc(line, n, sizeof line - 24, file, 255);
-		n += (size_t)snprintf(line + n, sizeof line - n, "\tlba=%u\tblob=%u", (unsigned)lba, (unsigned)blob);
 	}
+	if (sector) n += (size_t)snprintf(line + n, sizeof line - n, "\tlba=%u\tblob=%u", (unsigned)lba, (unsigned)blob);
 	if (norev) n += (size_t)snprintf(line + n, sizeof line - n, "\trev=0");
 	n += (size_t)snprintf(line + n, sizeof line - n, "\tend=1\n");
 	char p[256];
@@ -346,13 +357,15 @@ uint32_t audit_job_begin(AuditSrc src, const char *disc, const char *name, const
 	return job;
 }
 
-void audit_job_end(uint32_t job, const char *result)
+void audit_job_end(uint32_t job, const char *result, const char *image)
 {
 	lock();
 	JobSlot *s = slot_of(job);
 	for (uint32_t &r : g_running) if (r == job) r = 0;
 	g_results[job] = result ? result : "";
-	write_row(job, s->src, AU_RIPS, s->disc, "result", "", "", result, NULL, false, 0, 0);
+	const char *img = image && *image && g_rips.count(job) ? image : NULL;
+	write_row(job, s->src, AU_RIPS, s->disc, "result", "", "", result, img, false, 0, 0);
+	note_made(job, g_results[job].c_str(), img);
 	unlock();
 }
 
@@ -487,6 +500,14 @@ static const char *sector_block(const AuditRow &r, char *msg, size_t n, bool *re
 		reason(rs, AW_UNFINISHED, r);
 		if (rs) copyn(rs->what, sizeof rs->what, res == g_results.end() ? "" : res->second.c_str());
 		snprintf(msg, n, "the rip was not finished (%s)", res == g_results.end() ? "no result" : res->second.c_str());
+		return msg;
+	}
+	// A newer rip replaced the file: the sector may hold the row's new bytes again, but the old ones
+	// belong to the image that is gone.
+	auto made = g_made.find(r.file);
+	if (made != g_made.end() && made->second > r.job) {
+		reason(rs, AW_REPLACED, r, made->second);
+		snprintf(msg, n, "%s was ripped again since (job %u)", base_name(r.file), (unsigned)made->second);
 		return msg;
 	}
 	char p[256];

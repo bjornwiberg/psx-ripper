@@ -797,6 +797,48 @@ static void reversible_queries(int &bad)
 	audit_set_hooks(NULL, NULL);
 }
 
+// I1: the disc ripped again to the same file replaces the image by a rename (no logged change); an
+// older job's rows on that file hold bytes of the image it replaced, even when the new image's
+// sector happens to equal the row's new bytes. Their undo is refused; the new rip's own rows are not.
+static void undo_refused_after_rerip(int &bad)
+{
+	fresh();
+	hooks_reset();
+	img_make(4);
+	AuditReason rs;
+	AuditRow r;
+	char why[160];
+	uint32_t rep = audit_job_begin(AU_PAD, "U:4", "U", "repair");
+	repair_write(rep, 1, 0x11, 0x22);
+	audit_job_end(rep, "finished");
+	uint32_t id = sector_id(rep, 0);
+	// a cancelled rip of the same file made no image: the repair stays reversible
+	uint32_t can = audit_job_begin(AU_PAD, "U:4", "U", "rip");
+	audit_job_end(can, "cancelled", IMG);
+	CHECK(row_of(rep, id, &r) && r.reversible == 1);
+	// a finished rip of the same file; its sector 1 holds 0x22 as well (a good rip)
+	uint32_t rip = audit_job_begin(AU_PAD, "U:4", "U", "rip");
+	audit_job_end(rip, "finished", IMG);
+	CHECK(row_of(rep, id, &r) && r.reversible == 0 && r.why == AW_REPLACED);
+	CHECK(audit_undo_row(id, why, sizeof why, &rs) == -1 && rs.code == AW_REPLACED && strstr(why, "ripped again"));
+	CHECK(audit_undo_job(rep, why, sizeof why, &rs) == -1 && rs.code == AW_REPLACED);
+	CHECK(audit_job_reversible(rep, &rs) == 0 && rs.code == AW_REPLACED);
+	CHECK(audit_disc_reversible("U:4", &rs) == 0 && rs.code == AW_REPLACED);
+	CHECK(audit_undo_disc_since("U:4", 0, why, sizeof why, &rs) == -1 && rs.code == AW_REPLACED);
+	CHECK(img_is(1, 0x22) && undo_rows_naming(rep, id) == 0 && g_recheck_calls == 0);
+	audit_init(DIR, &IO);   // the image the rip made is in the log
+	CHECK(audit_undo_row(id, why, sizeof why, &rs) == -1 && rs.code == AW_REPLACED && img_is(1, 0x22));
+	// the newer rip's own corrections stay reversible; a rip of another file changes nothing
+	uint32_t rip2 = audit_job_begin(AU_PAD, "U:4", "U", "rip");
+	repair_write(rip2, 2, 0x11, 0x33);
+	audit_job_end(rip2, "finished", IMG);
+	uint32_t other = audit_job_begin(AU_PAD, "W:4", "W", "rip");
+	audit_job_end(other, "finished", "./out/other.bin");
+	CHECK(row_of(rip2, sector_id(rip2, 0), &r) && r.reversible == 1);
+	CHECK(audit_undo_job(rip2, why, sizeof why) == 0 && img_is(2, 0x11));
+	audit_set_hooks(NULL, NULL);
+}
+
 int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
@@ -812,6 +854,7 @@ int main()
 		{"undo_refused_while_disc_busy", undo_refused_while_disc_busy}, {"undo_row_lost", undo_row_lost},
 		{"cap_keeps_running_job", cap_keeps_running_job}, {"cap_lowered_prunes_now", cap_lowered_prunes_now},
 		{"reason_codes", reason_codes}, {"reversible_queries", reversible_queries},
+		{"undo_refused_after_rerip", undo_refused_after_rerip},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {

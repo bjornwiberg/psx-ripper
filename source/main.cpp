@@ -4021,6 +4021,7 @@ static void av_reason(const AuditReason &rs, char *out, size_t n)
 	case AW_NOT_APPLIED: case AW_NO_HOOK: snprintf(out, n, T(STR_AW_NOT_APPLIED), av_key_label(rs.what)); break;
 	case AW_NOTHING: snprintf(out, n, "%s", T(STR_AW_NOTHING)); break;
 	case AW_NO_ROW: case AW_NO_DISC: snprintf(out, n, "%s", T(STR_AW_NOT_FOUND)); break;
+	case AW_REPLACED: snprintf(out, n, "%s", T(STR_AW_REPLACED)); break;
 	default: snprintf(out, n, "%s", T(STR_AUDIT_NO_UNDO)); break;
 	}
 }
@@ -5361,10 +5362,11 @@ static void audit_card_begin(int c, AuditSrc src, const char *what)
 }
 
 // Every way out of a job ends it here, or the audit keeps it running and refuses undo on its disc.
-static void audit_card_end(int c, const char *result)
+// A finished rip names the image it made: older rows on that file are then no longer undone.
+static void audit_card_end(int c, const char *result, const char *image = NULL)
 {
 	Card &k = g_cards[c];
-	if (k.audit_job) audit_job_end(k.audit_job, result);
+	if (k.audit_job) audit_job_end(k.audit_job, result, image);
 	k.audit_job = 0;
 }
 
@@ -6018,7 +6020,9 @@ static void rip_job_thread(void *arg)
 	g_done = 0; g_total = 0; g_readpos = 0; g_phase = 0; g_pass2_total = 0;
 	logf("start rip (%s)", fresh ? "disc inserted" : "disc already in drive");
 	int ok = rip_disc(fresh, 1);
-	audit_card_end(t_card, rip_result(ok));
+	char image[300];
+	snprintf(image, sizeof(image), "%s.bin", g_base);   // the name its sector rows use
+	audit_card_end(t_card, rip_result(ok), image);
 	g_state = ST_HOME;     // also after an early failure
 	k.state = DISC_NONE;   // ejected or ripped: identify again
 	k.tried = 0;

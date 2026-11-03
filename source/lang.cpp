@@ -322,6 +322,7 @@ static const char *en[STR_COUNT] = {
 	"%s could not be set",
 	"Nothing to undo",
 	"Not in the log",
+	"The file was ripped again since",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -640,6 +641,7 @@ static const char *sv[STR_COUNT] = {
 	"%s kunde inte ställas in",
 	"Inget att ångra",
 	"Finns inte i loggen",
+	"Filen har rippats om sedan dess",
 };
 
 static const char **table = en;
