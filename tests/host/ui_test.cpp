@@ -193,6 +193,12 @@ int main()
 	g_cards[0].pg_scroll = 100000; frame("ripping-scrolled-bottom", 0);
 	g_cards[0].pg_scroll = 0;
 	frame("ripping-plain", 1);
+	{   // a repair recomputing its MD5s: the page says so, with the percentage
+		Card &k = g_cards[1]; k.repairing = 1;
+		OnCard o(1); g_phase = 3; g_md5_total[1] = 11906; g_md5_done[1] = 5000;
+		frame("repair-md5", 1);
+		g_md5_total[1] = 0; g_phase = 0; k.repairing = 0;
+	}
 	{   // /status.json for the same drives: valid JSON (checked by python) with every drive
 		static char js[8192];
 		status_json(js, sizeof(js));
