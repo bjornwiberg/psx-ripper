@@ -2,8 +2,12 @@
 # Conventional Commit: release-please reads it to pick the next version and write the changelog.
 name: PR title
 
+# pull_request, not pull_request_target: GitHub does not start pull_request_target for a pull
+# request that release-please opens with the workflow token, so the required check never came and
+# the release pull request stayed blocked. The check only reads the title, which the read-only
+# token of pull_request (also for forks) is enough for.
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, synchronize, reopened]
 
 permissions:
