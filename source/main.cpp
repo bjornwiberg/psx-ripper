@@ -116,6 +116,7 @@ struct Card {
 	int res_bad;                     // the last rip left unreadable or bad sectors (it needs a repair)
 	int res_rd;                      // the last rip against Redump: 1 matches, 0 does not, -1 not checked, -2 no line (off, failed)
 	char res_disc[160];               // which disc the last rip was ("Motorhead (SLUS_007.17)")
+	char res_key[160];                // that disc's ID (its title when it has none): is it the one in the drive?
 	int res_failed;                   // it was cancelled or failed: an earlier rip there is untouched
 	char rd_done[160];                // Redump result as text (verified / no match), for the log and webhooks
 	uint32_t rd_done_col;
@@ -4224,8 +4225,11 @@ static int draw_page_body(int c, int y)
 		ui_text_fit(UI_SMALL, L, y, 0xF0C060, T(STR_USB_NORESP_TIP), R - L);
 		y += ls + ls / 3;
 	}
-	if (k.res[0] && (st == DISC_READY || st == DISC_NONE)) {   // the last rip on this drive
-		char last[420];   // which disc it was too: after an eject the page shows another disc, or none
+	// the last rip on this drive: with no disc in it, or with that same disc; another disc's page
+	// does not show it (it would read as if it were about the disc in the drive)
+	int same = st == DISC_READY && !strcmp(k.res_key, k.serial[0] ? k.serial : k.title);
+	if (k.res[0] && (st == DISC_NONE || same)) {
+		char last[420];   // which disc it was too: after an eject the page shows none
 		snprintf(last, sizeof(last), T(STR_LAST_RIP), k.res_disc, k.res);
 		ui_text_fit(UI_SMALL, L, y, k.res_col, last, R - L);
 		y += ls + ls / 3;
@@ -5102,6 +5106,7 @@ static void rip_job_thread(void *arg)
 	Card &k = g_cards[t_card];
 	k.res[0] = 0; k.res_rd = -2;
 	snprintf(k.res_disc, sizeof(k.res_disc), "%s (%s)", k.rd_name[0] ? k.rd_name : k.title, k.serial);
+	snprintf(k.res_key, sizeof(k.res_key), "%s", k.serial[0] ? k.serial : k.title);
 	k.rd_done[0] = 0;
 	k.eta_t0 = 0;
 	if (fresh) usleep(2000 * 1000);   // give the drive a moment to spin up
@@ -5223,6 +5228,7 @@ static void repair_job_start(int c)
 	k.repairing = 1;
 	k.res[0] = 0; k.res_rd = -2;
 	snprintf(k.res_disc, sizeof(k.res_disc), "%s (%s)", k.rd_name[0] ? k.rd_name : k.title, k.serial);
+	snprintf(k.res_key, sizeof(k.res_key), "%s", k.serial[0] ? k.serial : k.title);
 	k.eta_t0 = 0;
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy (status, the poll thread, deploy)
