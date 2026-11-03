@@ -1005,6 +1005,12 @@ static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, 
 			uint8_t c[12] = {0xBE, (uint8_t)(audio ? 0x04 : 0), (uint8_t)(l >> 24), (uint8_t)(l >> 16), (uint8_t)(l >> 8), (uint8_t)l,
 			                 (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n, 0xF8, sub, 0};
 			int r = usbodd_cmd(g_usb, c, 12, buf + (size_t)done * blk, n * blk, 1);
+			// the disc is gone (taken out, or the SuperDrive pushed out a disc it could not read):
+			// stop the job instead of "re-reading" a thousand sectors that all fail at once
+			if (((uint32_t)r & 0xFF000000u) == 0x8D000000u && (r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A && !g_abort) {
+				g_abort = 1;
+				logf("read %u: no disc in the drive (medium not present), stopping", l);
+			}
 			if (r) return r;
 			if (usbodd_last_got(g_usb) != (int)(n * blk)) return -1;   // fewer sectors than asked for
 			done += n;
