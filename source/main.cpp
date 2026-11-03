@@ -959,18 +959,50 @@ static int read_toc()
 // Reads `count` raw sectors, each 2352 bytes followed by 16 bytes formatted Q,
 // the same way IRISMAN does (syscall 604, one ATAPI block per sector, DMA).
 
+// The first audio track after the data track: where its pregap starts (INDEX 00) and INDEX 01.
+// 0 when the disc has no audio track after a data track.
+static uint32_t audio_pregap(uint32_t *index1)
+{
+	for (int t = 1; t < g_ntracks; t++)
+		if (!(g_tracks[t].ctrl & 0x4) && (g_tracks[t - 1].ctrl & 0x4)) { *index1 = g_tracks[t].lba; return g_tstart[t]; }
+	return 0;
+}
+
+static int sector_zero(const uint8_t *p)
+{
+	for (int i = 0; i < RAW_SIZE; i++) if (p[i]) return 0;
+	return 1;
+}
+
 // READ CD with a chosen subchannel selection: 0 = none, 1 = raw P-W (96 bytes), 2 = formatted Q (16 bytes)
 static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, uint32_t blk)
 {
 	if (g_use == SRC_USB) {   // one USB command moves at most USBODD_MAX bytes: split the read
+		// The 2 s pregap between the data track and the first audio track: a SuperDrive refuses every
+		// sector there when asked for "any sector type" (the subchannel says audio, the drive does not
+		// agree), so a rip spent an hour re-reading 150 sectors and filled them with silence. Asked
+		// for CD-DA it reads them. Audio sectors are read as CD-DA from that pregap on; a read never
+		// spans the boundary, so data sectors are never read as audio.
+		uint32_t idx1 = 0, ap = audio_pregap(&idx1);
 		uint32_t per = USBODD_MAX / blk;
 		for (uint32_t done = 0; done < count; ) {
 			uint32_t n = count - done < per ? count - done : per, l = lba + done;
-			uint8_t c[12] = {0xBE, 0, (uint8_t)(l >> 24), (uint8_t)(l >> 16), (uint8_t)(l >> 8), (uint8_t)l,
+			int audio = ap && l >= ap;
+			if (ap && l < ap && l + n > ap) n = ap - l;
+			uint8_t c[12] = {0xBE, (uint8_t)(audio ? 0x04 : 0), (uint8_t)(l >> 24), (uint8_t)(l >> 16), (uint8_t)(l >> 8), (uint8_t)l,
 			                 (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n, 0xF8, sub, 0};
-			int r = usbodd_cmd(g_usb, c, 12, buf + (size_t)done * blk, n * blk, 1);
+			uint8_t *dst = buf + (size_t)done * blk;
+			int r = usbodd_cmd(g_usb, c, 12, dst, n * blk, 1);
 			if (r) return r;
 			if (usbodd_last_got(g_usb) != (int)(n * blk)) return -1;   // fewer sectors than asked for
+			// A pregap sector that is not silence: the SuperDrive hands out the last data sector's
+			// bytes for a sector it cannot really read as audio. Such a sector counts as unreadable.
+			for (uint32_t i = 0; audio && i < n && l + i < idx1; i++) {
+				if (sector_zero(dst + (size_t)i * blk)) continue;
+				uint8_t prev[RAW_SIZE] __attribute__((aligned(16)));
+				uint8_t pc[12] = {0xBE, 0x04, (uint8_t)((ap - 1) >> 24), (uint8_t)((ap - 1) >> 16), (uint8_t)((ap - 1) >> 8), (uint8_t)(ap - 1), 0, 0, 1, 0xF8, 0, 0};
+				if (usbodd_cmd(g_usb, pc, 12, prev, RAW_SIZE, 1) || !memcmp(prev, dst + (size_t)i * blk, RAW_SIZE)) return -1;
+			}
 			done += n;
 		}
 		return 0;
