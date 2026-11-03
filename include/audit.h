@@ -55,7 +55,11 @@ struct AuditRow {
 	AuditSrc src;
 	AuditDom dom;
 	char disc[96], kind[12], what[160], before[192], after[192], file[256];
+	// an undo row, as the queries fill it: key = the setting its chain goes back to, or lba and
+	// file = that sector's
+	char key[48];
 	int undone, reversible;
+	int redo;    // an undo row whose change is undone now: undoing it applies the change again
 	int norev;   // the row was written with rev=0: its value is not in the log, it can never be undone
 	AuditWhy why;       // not reversible: why (AW_NONE when it is)
 	uint32_t why_job;   // for AW_RUNNING / AW_JOB_ON_DISC / AW_UNFINISHED / AW_DROPPED: the job meant
@@ -92,24 +96,32 @@ int audit_rows(uint32_t job, AuditRow *out, int first, int max);
 // Undo. Reversible are `sector` rows (their bytes still kept in job<N>.bin, the image's sector still
 // equal to the row's new bytes, the job not running) and `setting` rows (the setting still has the
 // row's `after`). Rows go newest first and stop at the first one that cannot be undone; rows undone
-// before that stay undone. Each undone row gets an `undo` row (`what` = its id). Returns 0 when done,
-// -1 when refused; why[] then names the row and the reason.
+// before that stay undone. Each undone row gets an `undo` row (`what` = its id).
+// An `undo` row can itself be undone (a redo): the change it reversed is applied again, under the
+// same guards (a sector: the image still has the bytes the undo put back; a setting: it still has
+// the value the undo set), and a new `undo` row names it, so the chain goes on. A row is undone
+// after an odd number of undos in its chain; an undo row is undone once a newer one follows it.
+// A job or disc whose sector rows are all undone is redone by its undo: oldest row first, stopping
+// at the first refusal the same way.
+// Returns 0 when done, -1 when refused; why[] then names the row and the reason.
 // rs (may be NULL) gets the reason as a code (AW_NONE when done).
 int audit_undo_row(uint32_t id, char *why, size_t n, AuditReason *rs = NULL);
 int audit_undo_job(uint32_t job, char *why, size_t n, AuditReason *rs = NULL);
 // every reversible row of a disc from time since_t on
 int audit_undo_disc_since(const char *disc, uint32_t since_t, char *why, size_t n, AuditReason *rs = NULL);
-// 1 when undoing the job / all of the disc would undo at least one row (the same guards as the
-// undo: its newest row not undone yet must be undoable now), else 0 and rs says why.
-int audit_job_reversible(uint32_t job, AuditReason *rs = NULL);
-int audit_disc_reversible(const char *disc, AuditReason *rs = NULL);
+// 1 when undoing the job / all of the disc would undo (or redo) at least one row (the same guards
+// as the undo: the first row it would take must be undoable now), else 0 and rs says why.
+// redo (may be NULL) = 1 when that undo would be a redo (every sector row undone).
+int audit_job_reversible(uint32_t job, AuditReason *rs = NULL, int *redo = NULL);
+int audit_disc_reversible(const char *disc, AuditReason *rs = NULL, int *redo = NULL);
 // set_setting applies a config key/value the way the app does (0 = applied); recheck checks a rip
-// again from its file, called once per file after its sectors were undone, with the n sectors put
-// back (lbas) and for each whether its restored bytes are all zero (zero[i] = 1: a sector the rip
-// could not read). Both are called without the audit's lock held, so they may write audit rows.
+// again from its file, called once per file after its sectors were undone or redone, with the n
+// sectors written (lbas), for each whether the row's old bytes are all zero (zero[i] = 1: a sector
+// the rip could not read), and redo = 1 when they got the row's new bytes again (0: the old ones
+// back). Both are called without the audit's lock held, so they may write audit rows.
 // NULL = none (a setting is then not undone).
 void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
-                     void (*recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n));
+                     void (*recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n, int redo));
 // Called by a job or disc undo before every AUDIT_TICK sectors (done of total), without the lock:
 // the app keeps its screen and the system's callbacks going. Nonzero stops the undo there (rows
 // undone so far stay undone, the recheck still runs). NULL = none.

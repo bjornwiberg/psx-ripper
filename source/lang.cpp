@@ -325,6 +325,9 @@ static const char *en[STR_COUNT] = {
 	"The file was ripped again since",
 	"The undo was stopped",
 	"Undoing %s, please wait",
+	"Redo",
+	"Redo %s?",
+	"Redo all changes to %s?",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -646,6 +649,9 @@ static const char *sv[STR_COUNT] = {
 	"Filen har rippats om sedan dess",
 	"Ångringen avbröts",
 	"Ångrar %s, vänta",
+	"Gör om",
+	"Gör om %s?",
+	"Gör om alla ändringar på %s?",
 };
 
 static const char **table = en;

@@ -253,9 +253,32 @@ static void audit_scenarios()
 		if (!vf_exists("out/t5/alundra.md5")) { printf("FAIL the rip was not checked again after the undo\n"); bad++; }
 		if (k.rd_state != -1 || strcmp(k.exist, "out/t5/alundra")) { printf("FAIL the card after the undo: redump state %d, exist \"%s\"\n", k.rd_state, k.exist); bad++; }
 		aframe("audit-rows-undone", v);
+		if (has_text(T(STR_HINT_REDO))) { printf("FAIL an undone sector row offers a redo\n"); bad++; }
 		reset_all();
 	}
-	audit_back(v); audit_back(v);   // the discs
+	{   // the whole repair undone: its undo is now a redo, and says so; then redone from the screen
+		audit_back(v);   // Alundra's events, the repair focused
+		char why[200];
+		if (v.level != 2 || !audit_can_undo(v) || audit_undo(v, why, sizeof why) != 0) { printf("FAIL undo of the repair from the screen: %s\n", why); bad++; }
+		const AuditRow *e = audit_focused(v);
+		if (!e || strcmp(e->kind, "job") || !audit_can_undo(v) || !v.undo_redo) { printf("FAIL the undone repair does not offer a redo (%d)\n", v.undo_redo); bad++; }
+		aframe("audit-events-redo", v);
+		if (!has_text(T(STR_HINT_REDO)) || has_text(T(STR_HINT_UNDO))) { printf("FAIL the undone repair's hint is not \"%s\"\n", T(STR_HINT_REDO)); bad++; }
+		if (g_sfx_sv && !has_text("Gör om")) { printf("FAIL the Swedish redo hint\n"); bad++; }
+		{
+			char q[256], label[160], nm[64];
+			audit_label(v, v.row, label, sizeof label);
+			snprintf(q, sizeof q, T(STR_AUDIT_REDO_Q), label);
+			snprintf(nm, sizeof nm, "audit-redo-dialog%s", g_sfx_sv ? "-sv" : "");
+			g_boxes.clear(); own_dialog_draw(q, 1); save(nm); size_t b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+		}
+		if (audit_undo(v, why, sizeof why) != 0) { printf("FAIL redo of the repair from the screen: %s\n", why); bad++; }
+		FILE *f = fopen("out/t5/alundra.bin", "rb");
+		uint8_t got[RAW_SIZE] = {0};
+		if (f) { fseek(f, 515L * RAW_SIZE, SEEK_SET); if (fread(got, 1, RAW_SIZE, f) != RAW_SIZE) got[0] ^= 1; fclose(f); }
+		if (memcmp(got, img.data() + 515 * RAW_SIZE, RAW_SIZE) || v.undo_redo || !audit_can_undo(v)) { printf("FAIL after the redo: bytes again %d, redo %d\n", !memcmp(got, img.data() + 515 * RAW_SIZE, RAW_SIZE), v.undo_redo); bad++; }
+	}
+	audit_back(v);   // the discs
 	audit_nav(v, B_DOWN);
 	audit_open(v);   // Final Fantasy IX: the cancelled rip first; its sector cannot be undone
 	if (v.level != 2 || v.n != 3 || strcmp(av_rows[0].what, "rip") || audit_can_undo(v))
@@ -304,6 +327,15 @@ static void audit_scenarios()
 		if (spd < 0 || !audit_can_undo(v) || audit_undo(v, why, sizeof why) != 0 || g_std.speed != 1) { printf("FAIL undo of the speed from the screen (speed %d)\n", g_std.speed); bad++; }
 		if (v.n != 7) { printf("FAIL the settings after the undo: %d event(s), want 7\n", v.n); bad++; }   // + the undo's own rows
 		aframe("audit-settings-undone", v);
+		// the undo's own row: undoing it sets the speed again
+		int u = -1;
+		for (int i = 0; i < v.n; i++) if (!strcmp(av_rows[i].kind, "undo")) u = i;
+		v.row = u;
+		if (u < 0 || !audit_can_undo(v) || !av_rows[u].redo) { printf("FAIL the speed's undo row offers no redo\n"); bad++; }
+		aframe("audit-settings-redo", v);
+		if (!has_text(T(STR_HINT_REDO))) { printf("FAIL the undo row's hint is not \"%s\"\n", T(STR_HINT_REDO)); bad++; }
+		if (u < 0 || audit_undo(v, why, sizeof why) != 0 || g_std.speed != 2) { printf("FAIL redo of the speed from the screen (speed %d): %s\n", g_std.speed, why); bad++; }
+		if (v.n != 9) { printf("FAIL the settings after the redo: %d event(s), want 9\n", v.n); bad++; }
 	}
 	{   // sector reasons: one changed since, then all kept bytes dropped by the size cap
 		FILE *f = fopen("out/t5/alundra.bin", "r+b");
@@ -810,7 +842,7 @@ int main()
 				{ printf("FAIL check_image log:\n%s", s.c_str()); bad++; }
 			// the audit's recheck hook takes the image's path
 			remove("out/t4/two.md5");
-			recheck_hook("out/t4/two.bin", NULL, NULL, 0);
+			recheck_hook("out/t4/two.bin", NULL, NULL, 0, 0);
 			if (!get_file("out/t4/two.md5", s) || s != exp) { printf("FAIL recheck hook\n"); bad++; }
 			if (check_image("out/t4/none") == 0) { printf("FAIL check_image without an image\n"); bad++; }
 		}
@@ -852,11 +884,25 @@ int main()
 			// already listed: not added twice, counts unchanged
 			uint32_t l2[2] = {1, 2};
 			uint8_t z2[2] = {1, 0};
-			recheck_hook("out/t4/rep.bin", l2, z2, 2);
+			recheck_hook("out/t4/rep.bin", l2, z2, 2, 0);
 			get_file("out/t4/rep.log", s);
 			size_t a = s.find("unreadable=1\n"), b = s.find("bad=2\n");
 			if (a == std::string::npos || s.find("unreadable=1\n", a + 1) != std::string::npos || s.find("bad=2\n", b + 1) != std::string::npos || !has("unreadable_count=1\n") || !has("bad_count=1\n"))
 				{ printf("FAIL the log after a second recheck:\n%s", s.c_str()); bad++; }
+			// undoing the undo (a redo): the repaired bytes again, the sectors out of the log again
+			if (audit_undo_job(job, why, sizeof why) != 0) { printf("FAIL redo of the repair: %s\n", why); bad++; }
+			get_file("out/t4/rep.bin", s);
+			if (s.size() != sizeof rep || memcmp(s.data() + RAW_SIZE, good, RAW_SIZE) || memcmp(s.data() + 2 * RAW_SIZE, good, RAW_SIZE)) { printf("FAIL the image after the redo\n"); bad++; }
+			get_file("out/t4/rep.log", s);
+			if (has("unreadable=1\n") || has("bad=2\n") || !has("unreadable_count=0\n") || !has("bad_count=0\n") || !has("fixed_count=2\n") || !has("uncertain=3 unconfirmed\n"))
+				{ printf("FAIL the log after the redo:\n%s", s.c_str()); bad++; }
+			snprintf(g_base, sizeof(g_base), "out/t4/rep");
+			if ((open = riplog_open_count()) != 1) { printf("FAIL riplog_open_count after the redo: %d, want 1\n", open); bad++; }
+			// and undone again: back in the log once more
+			if (audit_undo_job(job, why, sizeof why) != 0) { printf("FAIL second undo of the repair: %s\n", why); bad++; }
+			get_file("out/t4/rep.log", s);
+			if (!has("\nunreadable=1\n") || !has("\nbad=2\n") || !has("unreadable_count=1\n") || !has("bad_count=1\n") || !has("fixed_count=0\n"))
+				{ printf("FAIL the log after the second undo:\n%s", s.c_str()); bad++; }
 		}
 		audit_set_hooks(set_setting_hook, NULL);
 		system("rm -rf out/audit");

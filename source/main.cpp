@@ -3841,6 +3841,7 @@ struct AuditView {
 	int empty;               // level 0: nothing in the log yet
 	int back[4];             // the focused entry of each level, for going back
 	int undo_ok;             // the focused disc or job: an undo would undo something (the core's exact answer)
+	int undo_redo;           // and that undo would be a redo (all its changes are undone)
 	AuditReason no_undo;     // and if not, why
 	char why_key[100];       // the last refused undo (its row id or disc) and the reason
 	AuditReason why;
@@ -3873,11 +3874,11 @@ static void av_page(AuditView &v, int from)
 // every guard the undo does). Asked when the focus moves, not per frame.
 static void av_probe(AuditView &v)
 {
-	v.undo_ok = 0;
+	v.undo_ok = v.undo_redo = 0;
 	memset(&v.no_undo, 0, sizeof(v.no_undo));
 	const AuditRow *e = audit_focused(v);
-	if (v.level == 1 && v.dom == AU_RIPS && v.row < v.n) v.undo_ok = audit_disc_reversible(av_keys[v.row], &v.no_undo);
-	else if (v.level == 2 && e && !strcmp(e->kind, "job")) v.undo_ok = audit_job_reversible(e->job, &v.no_undo);
+	if (v.level == 1 && v.dom == AU_RIPS && v.row < v.n) v.undo_ok = audit_disc_reversible(av_keys[v.row], &v.no_undo, &v.undo_redo);
+	else if (v.level == 2 && e && !strcmp(e->kind, "job")) v.undo_ok = audit_job_reversible(e->job, &v.no_undo, &v.undo_redo);
 }
 
 // The focused row on the screen, the right page loaded.
@@ -3975,6 +3976,15 @@ static int audit_can_undo(const AuditView &v)
 	if (v.level == 2 && !strcmp(r->kind, "job")) return v.undo_ok == 1;
 	return r->reversible;
 }
+// The undo would apply undone changes again (a disc or job all undone, or an undo row): △ says Redo.
+static int audit_is_redo(const AuditView &v)
+{
+	if (v.level == 1 && v.dom == AU_RIPS) return v.undo_redo;
+	const AuditRow *r = audit_focused(v);
+	if (!r) return 0;
+	if (v.level == 2 && !strcmp(r->kind, "job")) return v.undo_redo;
+	return r->redo;
+}
 
 static void av_focus_key(const AuditView &v, char *out, size_t n)
 {
@@ -4052,7 +4062,7 @@ static AuditReason av_row_reason(const AuditRow &r)
 	memset(&rs, 0, sizeof(rs));
 	rs.code = r.why;
 	rs.row = r.id; rs.job = r.why_job; rs.lba = r.lba;
-	snprintf(rs.what, sizeof(rs.what), "%.95s", r.what);   // a config key: short
+	snprintf(rs.what, sizeof(rs.what), "%.95s", r.key[0] ? r.key : r.what);   // a config key: short (an undo row: its setting)
 	const char *slash = strrchr(r.file, '/');
 	snprintf(rs.file, sizeof(rs.file), "%.95s", slash ? slash + 1 : r.file);
 	return rs;
@@ -4189,14 +4199,14 @@ static void audit_draw(const AuditView &v)
 	else if (!audit_can_undo(v) && (v.level == 1 && v.dom == AU_RIPS ? v.n > 0 : r && !strcmp(r->kind, "job") && v.level == 2))
 		av_reason(v.no_undo, det, sizeof(det));   // a disc or a job: the core's answer
 	else if (r && !r->undone && !r->reversible) av_reason(av_row_reason(*r), det, sizeof(det));
-	else if (r && !strcmp(r->kind, "sector")) { const char *s = strrchr(r->file, '/'); snprintf(det, sizeof(det), "%s", s ? s + 1 : r->file); }
+	else if (r && (!strcmp(r->kind, "sector") || (!strcmp(r->kind, "undo") && r->file[0]))) { const char *s = strrchr(r->file, '/'); snprintf(det, sizeof(det), "%s", s ? s + 1 : r->file); }
 	if (det[0]) footer_note(det);
 	const char *b[5], *l[5];
 	int m = 0;
 	b[m] = "updown"; l[m++] = T(STR_HINT_SELECT);
 	if (cnt > AV_PAGE || v.more) { b[m] = "l2r2"; l[m++] = T(STR_HINT_PAGE); }
 	if (av_can_open(v)) { b[m] = "cross"; l[m++] = T(STR_HINT_OPEN); }
-	if (audit_can_undo(v)) { b[m] = "triangle"; l[m++] = T(STR_HINT_UNDO); }
+	if (audit_can_undo(v)) { b[m] = "triangle"; l[m++] = T(audit_is_redo(v) ? STR_HINT_REDO : STR_HINT_UNDO); }
 	b[m] = "circle"; l[m++] = T(STR_HINT_BACK);
 	hint_bar(b, l, m);
 }
@@ -4258,7 +4268,8 @@ static void audit_screen()
 		if ((p & B_TRIANGLE) && audit_can_undo(v)) {
 			char label[160], q[256];
 			audit_label(v, v.row, label, sizeof(label));
-			snprintf(q, sizeof(q), T(v.level == 1 && v.dom == AU_RIPS ? STR_AUDIT_UNDO_DISC_Q : STR_AUDIT_UNDO_Q), label);   // a disc: all of it
+			int disc = v.level == 1 && v.dom == AU_RIPS, redo = audit_is_redo(v);   // a disc: all of it
+			snprintf(q, sizeof(q), T(redo ? (disc ? STR_AUDIT_REDO_DISC_Q : STR_AUDIT_REDO_Q) : (disc ? STR_AUDIT_UNDO_DISC_Q : STR_AUDIT_UNDO_Q)), label);
 			if (own_dialog(q, 1) == 1) {
 				char why[200];
 				snprintf(g_wait_name, sizeof(g_wait_name), "%s", label);   // a big undo shows it while it writes
@@ -5996,15 +6007,65 @@ static void riplog_put_back(const char *base, const uint32_t *lbas, const uint8_
 	free(lb);
 }
 
+// Sectors a redo wrote the repaired bytes into again (the inverse of riplog_put_back): their
+// unreadable= / bad= lines leave the log and the counts follow.
+static void riplog_take_out(const char *base, const uint32_t *lbas, int n)
+{
+	char path[320];
+	snprintf(path, sizeof(path), "%s.log", base);
+	char *lb = (char *)malloc(65536);
+	if (!lb) return;
+	int len = 0;
+	VFile *f = vf_open(path, "rb");
+	if (f) { len = (int)vf_read(f, lb, 65535); vf_close(f); }
+	lb[len > 0 ? len : 0] = 0;
+	auto listed = [&](const char *l, int *bad) {   // an unreadable= / bad= line of one of the sectors
+		unsigned v;
+		int u = sscanf(l, "unreadable=%u", &v) == 1, b = !u && sscanf(l, "bad=%u", &v) == 1;
+		if (!u && !b) return false;
+		for (int i = 0; i < n; i++) if (lbas[i] == v) { *bad = b; return true; }
+		return false;
+	};
+	int nu = 0, nb = 0;
+	for (char *l = lb; *l; ) {
+		size_t ll = strcspn(l, "\n");
+		int b;
+		if (listed(l, &b)) { if (b) nb++; else nu++; }
+		l += ll + (l[ll] == '\n');
+	}
+	if (nu + nb) {
+		VFile *of = vf_open(path, "wb");
+		if (of) {
+			for (char *l = lb; *l; ) {
+				size_t ll = strcspn(l, "\n");
+				unsigned v;
+				int b;
+				if (listed(l, &b)) {}
+				else if (sscanf(l, "unreadable_count=%u", &v) == 1) vf_printf(of, "unreadable_count=%u\n", v > (unsigned)nu ? v - nu : 0);
+				else if (sscanf(l, "bad_count=%u", &v) == 1) vf_printf(of, "bad_count=%u\n", v > (unsigned)nb ? v - nb : 0);
+				else if (sscanf(l, "fixed_count=%u", &v) == 1) vf_printf(of, "fixed_count=%u\n", v + nu + nb);
+				else { vf_write(of, l, ll); vf_write(of, "\n", 1); }
+				l += ll + (l[ll] == '\n');
+			}
+			vf_close(of);
+			logf("redo: %d unreadable and %d bad sector(s) out of %s", nu, nb, path);
+		}
+	}
+	free(lb);
+}
+
 // The audit's recheck after an undo wrote sectors back into `file` (the image, .bin): the sectors
-// go back into its log, then the image is checked again.
-static void recheck_hook(const char *file, const uint32_t *lbas, const uint8_t *zero, int n)
+// go back into its log (a redo: out of it again), then the image is checked again.
+static void recheck_hook(const char *file, const uint32_t *lbas, const uint8_t *zero, int n, int redo)
 {
 	char base[320];
 	snprintf(base, sizeof(base), "%s", file);
 	size_t len = strlen(base);
 	if (len > 4 && !strcmp(base + len - 4, ".bin")) base[len - 4] = 0;
-	if (n > 0 && lbas && zero) riplog_put_back(base, lbas, zero, n);
+	if (n > 0 && lbas && zero) {
+		if (redo) riplog_take_out(base, lbas, n);
+		else riplog_put_back(base, lbas, zero, n);
+	}
 	if (g_check_ui) {   // the audit screen's undo: reading the whole image takes a while, the screen says so
 		const char *slash = strrchr(base, '/');
 		snprintf(g_wait_name, sizeof(g_wait_name), "%s", slash ? slash + 1 : base);

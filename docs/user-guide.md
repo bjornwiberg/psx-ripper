@@ -185,7 +185,8 @@ cleared, never the value.
 
 **Using the screen**: four levels, ✕ opens and ○ goes back. First the kind (*Rips*, *Settings*),
 then the discs or the settings changes, then a disc's jobs, then one job's rows. △ undoes the
-selected item after a question: one row, one job, or everything on a disc.
+selected item after a question: one row, one job, or everything on a disc (or redoes it, see
+below).
 
 **What can be undone**
 
@@ -204,9 +205,18 @@ selected item after a question: one row, one job, or everything on a disc.
   belonged to.
 
 If something cannot be undone the screen says why. Undoing goes from the newest row backwards
-and stops at the first row that cannot be undone; the rows undone before stay undone. Every
-undo is itself logged. A large undo shows how far it got; closing the app stops it, and what was
-undone until then stays undone.
+and stops at the first row that cannot be undone; the rows undone before stay undone. A large
+undo shows how far it got; closing the app stops it, and what was undone until then stays
+undone.
+
+**Redo**: every undo is itself logged, as its own row, and can be undone too: that applies the
+change again (△ then says *Redo*, *Gör om* in Swedish). A setting gets the value the change gave
+it, as long as it still has the value the undo put back. A sector gets the repaired bytes again,
+as long as the image still has the bytes the undo put back, and leaves the rip's `.log` again;
+the rip is checked again. The rules above apply here too (a running job, a file ripped again
+since, a removed copy). A job or disc whose changes are all undone is redone the same way, oldest
+row first, stopping at the first row that cannot be redone. The redo is logged as well, so it
+can be undone again, and so on.
 
 The sector copies are the only large part. They are limited by *Audit log sector data*; when
 the limit is passed the oldest copies are removed. Their rows stay in the log, but can no longer

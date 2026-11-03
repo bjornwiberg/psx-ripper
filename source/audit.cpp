@@ -44,7 +44,7 @@ static std::map<uint32_t, bool> g_rips;
 static std::map<std::string, uint32_t> g_made;
 static uint64_t g_cap = 256ull << 20, g_blob_total;   // the audit_mb setting; all job<N>.bin together
 static int (*g_set_setting)(const char *key, const char *value);
-static void (*g_recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n);
+static void (*g_recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n, int redo);
 static int (*g_tick)(uint32_t done, uint32_t total);
 
 static void lock() { sysMutexLock(g_mx, 0); }
@@ -436,29 +436,72 @@ void audit_setting_private(AuditSrc src, const char *key, const char *before, co
 // ---- undo state ----
 
 // What the log says about undo: which rows were undone, and the value each setting has now.
+// Undo rows form chains: an undo row names the row it undid, which may be an undo row itself (a
+// redo). Every chain starts at its root (a sector or setting row); each undo in it flips the root,
+// so the root is undone after an odd number of them, and each undo row but the newest is undone.
 struct UndoState {
+	struct Chain { uint32_t tip; int k; };    // its newest undo row, how many undos so far
+	struct Link { uint32_t root; int k; };     // an undo row: its chain's root, its place (1 = first)
+	struct Setting { std::string key, before, after; bool norev; };
 	std::vector<uint32_t> undone;   // sorted
 	std::map<std::string, std::string> cur;
+	std::map<uint32_t, Chain> chains;     // by root
+	std::map<uint32_t, Link> links;       // by undo row
+	std::map<uint32_t, Setting> sets;     // every setting row
+	std::map<uint32_t, AuditRow> roots;   // sector roots fetched for the rows at hand (fetch_roots)
 	bool is_undone(uint32_t id) const { return std::binary_search(undone.begin(), undone.end(), id); }
+	// the chain an undo row is in, or NULL
+	const Link *link(uint32_t id) const { auto it = links.find(id); return it == links.end() ? NULL : &it->second; }
+	// the newest undo row of a root's chain, 0 when none
+	uint32_t tip(uint32_t root) const { auto it = chains.find(root); return it == chains.end() ? 0 : it->second.tip; }
 };
 
 // Caller holds the lock.
 static void build_state(UndoState &s)
 {
-	std::map<uint32_t, std::pair<std::string, std::string> > sets;   // setting row -> key, before
+	std::vector<uint32_t> superseded;
 	scan_log([&](const AuditRow &r) {
 		if (!strcmp(r.kind, "setting")) {
 			s.cur[r.what] = r.after;
-			sets[r.id] = std::make_pair(std::string(r.what), std::string(r.before));
+			UndoState::Setting &x = s.sets[r.id];
+			x.key = r.what; x.before = r.before; x.after = r.after; x.norev = r.norev != 0;
 		} else if (!strcmp(r.kind, "undo")) {
 			uint32_t id = (uint32_t)strtoul(r.what, NULL, 10);
 			if (!id) return;
-			s.undone.push_back(id);
-			auto it = sets.find(id);
-			if (it != sets.end()) s.cur[it->second.first] = it->second.second;
+			auto l = s.links.find(id);
+			uint32_t root = l == s.links.end() ? id : l->second.root;
+			UndoState::Chain &c = s.chains[root];
+			if (c.tip) superseded.push_back(c.tip);   // the undo before is reversed by this one
+			if (id != root) superseded.push_back(id);
+			c.tip = r.id;
+			c.k++;
+			UndoState::Link &k = s.links[r.id];
+			k.root = root; k.k = c.k;
+			auto it = s.sets.find(root);
+			if (it != s.sets.end()) s.cur[it->second.key] = c.k % 2 ? it->second.before : it->second.after;
 		}
 	});
+	for (auto &c : s.chains) if (c.second.k % 2) s.undone.push_back(c.first);
+	s.undone.insert(s.undone.end(), superseded.begin(), superseded.end());
 	std::sort(s.undone.begin(), s.undone.end());
+	s.undone.erase(std::unique(s.undone.begin(), s.undone.end()), s.undone.end());
+}
+
+// Reads the sector rows the undo rows among `rows` go back to into s.roots (one pass over the log,
+// only when one is missing). Caller holds the lock.
+static void fetch_roots(UndoState &s, const AuditRow *rows, int n)
+{
+	std::vector<uint32_t> want;
+	for (int i = 0; i < n; i++) {
+		if (strcmp(rows[i].kind, "undo")) continue;
+		const UndoState::Link *l = s.link(rows[i].id);
+		if (l && !s.sets.count(l->root) && !s.roots.count(l->root)) want.push_back(l->root);
+	}
+	if (want.empty()) return;
+	std::sort(want.begin(), want.end());
+	scan_log([&](const AuditRow &r) {
+		if (std::binary_search(want.begin(), want.end(), r.id)) s.roots[r.id] = r;
+	});
 }
 
 static const char *base_name(const char *path)
@@ -482,10 +525,11 @@ static void reason(AuditReason *rs, AuditWhy c, const AuditRow &r, uint32_t job 
 	copyn(rs->what, sizeof rs->what, r.what);
 }
 
-// Why a sector row cannot be undone now, or NULL; then g_blob_buf holds its old and new bytes and
-// *restored says the image already has the old bytes (an undo whose log row was lost: only the row
-// is missing). Caller holds the lock.
-static const char *sector_block(const AuditRow &r, char *msg, size_t n, bool *restored, AuditReason *rs = NULL)
+// Why a sector row cannot be undone now (redo: applied again), or NULL; then g_blob_buf holds its
+// old and new bytes and *restored says the image already has the bytes the undo would write (an undo
+// whose log row was lost: only the row is missing). r.id is the row named in the reason. Caller
+// holds the lock.
+static const char *sector_block(const AuditRow &r, char *msg, size_t n, bool *restored, AuditReason *rs = NULL, bool redo = false)
 {
 	*restored = false;
 	if (is_running(r.job)) { reason(rs, AW_RUNNING, r); snprintf(msg, n, "job %u is still running", (unsigned)r.job); return msg; }
@@ -527,12 +571,49 @@ static const char *sector_block(const AuditRow &r, char *msg, size_t n, bool *re
 	void *img = g_io.open ? g_io.open(r.file, "rb") : NULL;
 	if (!img) { reason(rs, AW_CANNOT_OPEN, r); snprintf(msg, n, "cannot open %s", base_name(r.file)); return msg; }
 	bool got = g_io.seek(img, (uint64_t)r.lba * SECTOR) == 0 && g_io.read(img, g_sec_buf, SECTOR) == SECTOR;
-	bool same = got && !memcmp(g_sec_buf, g_blob_buf + SECTOR, SECTOR);
-	if (got && !same && !memcmp(g_sec_buf, g_blob_buf, SECTOR)) *restored = true, same = true;
+	const uint8_t *now = redo ? g_blob_buf : g_blob_buf + SECTOR, *then = redo ? g_blob_buf + SECTOR : g_blob_buf;
+	bool same = got && !memcmp(g_sec_buf, now, SECTOR);
+	if (got && !same && !memcmp(g_sec_buf, then, SECTOR)) *restored = true, same = true;
 	g_io.close(img);
 	if (!same) { reason(rs, AW_SECTOR_CHANGED, r); snprintf(msg, n, "sector %u of %s changed since", (unsigned)r.lba, base_name(r.file)); return msg; }
 	reason(rs, AW_NONE, r);
 	return NULL;
+}
+
+// The setting row an undo row's chain goes back to, or NULL.
+static const UndoState::Setting *chain_setting(const UndoState &s, const UndoState::Link *l)
+{
+	if (!l) return NULL;
+	auto it = s.sets.find(l->root);
+	return it == s.sets.end() ? NULL : &it->second;
+}
+
+// Why the setting `key` cannot be set from `now` (the value it must still have) now, or NULL.
+static const char *setting_block(const AuditRow &r, const UndoState &s, const char *key, const std::string &now,
+                                 char *msg, size_t n, AuditReason *rs)
+{
+	auto it = s.cur.find(key);
+	if (it == s.cur.end() || it->second != now) {
+		reason(rs, AW_SETTING_CHANGED, r);
+		if (rs) copyn(rs->what, sizeof rs->what, key);
+		snprintf(msg, n, "setting %.100s changed since", key);
+		return msg;
+	}
+	reason(rs, AW_NONE, r);
+	return NULL;
+}
+
+// The sector row an undo row's chain goes back to, as the row to check (its id the undo row's),
+// or false. s.roots must hold it (fetch_roots).
+static bool chain_sector(const AuditRow &u, const UndoState &s, AuditRow &out)
+{
+	const UndoState::Link *l = s.link(u.id);
+	if (!l) return false;
+	auto it = s.roots.find(l->root);
+	if (it == s.roots.end() || strcmp(it->second.kind, "sector")) return false;
+	out = it->second;
+	out.id = u.id;
+	return true;
 }
 
 // Why a row cannot be undone now, or NULL. Caller holds the lock.
@@ -542,17 +623,25 @@ static const char *row_block(const AuditRow &r, const UndoState &s, char *msg, s
 	if (!strcmp(r.kind, "sector")) { bool restored; return sector_block(r, msg, n, &restored, rs); }
 	if (!strcmp(r.kind, "setting")) {
 		if (r.norev) { reason(rs, AW_SECRET, r); snprintf(msg, n, "the value is not kept in the log"); return msg; }
-		auto it = s.cur.find(r.what);
-		if (it == s.cur.end() || it->second != r.after) { reason(rs, AW_SETTING_CHANGED, r); snprintf(msg, n, "setting %.100s changed since", r.what); return msg; }
-		reason(rs, AW_NONE, r);
-		return NULL;
+		return setting_block(r, s, r.what, r.after, msg, n, rs);
+	}
+	if (!strcmp(r.kind, "undo")) {   // the newest undo of its chain: undoing it flips the root again
+		const UndoState::Link *l = s.link(r.id);
+		bool redo = l && l->k % 2;
+		if (const UndoState::Setting *x = chain_setting(s, l)) {
+			if (x->norev) { reason(rs, AW_SECRET, r); snprintf(msg, n, "the value is not kept in the log"); return msg; }
+			return setting_block(r, s, x->key.c_str(), redo ? x->before : x->after, msg, n, rs);
+		}
+		AuditRow sec;
+		if (chain_sector(r, s, sec)) { bool restored; return sector_block(sec, msg, n, &restored, rs, redo); }
 	}
 	reason(rs, AW_RECORD, r);
 	snprintf(msg, n, "a %s row cannot be undone", r.kind);
 	return msg;
 }
 
-// Fills the computed fields of a row for the queries. Caller holds the lock.
+// Fills the computed fields of a row for the queries; s.roots must hold the sector rows of undo
+// rows (fetch_roots). Caller holds the lock.
 static void mark(AuditRow &r, const UndoState &s)
 {
 	char msg[96];
@@ -561,6 +650,13 @@ static void mark(AuditRow &r, const UndoState &s)
 	r.reversible = !row_block(r, s, msg, sizeof msg, &rs);
 	r.why = rs.code;
 	r.why_job = rs.code == AW_RUNNING || rs.code == AW_JOB_ON_DISC || rs.code == AW_UNFINISHED || rs.code == AW_DROPPED ? rs.job : 0;
+	r.redo = 0;
+	if (strcmp(r.kind, "undo")) return;
+	const UndoState::Link *l = s.link(r.id);
+	r.redo = l && !r.undone && l->k % 2;
+	AuditRow sec;
+	if (const UndoState::Setting *x = chain_setting(s, l)) copyn(r.key, sizeof r.key, x->key.c_str());
+	else if (chain_sector(r, s, sec)) { r.lba = sec.lba; copyn(r.file, sizeof r.file, sec.file); }
 }
 
 // ---- queries ----
@@ -633,10 +729,9 @@ int audit_events(AuditDom dom, const char *disc, AuditRow *out, int max)
 		total++;
 	});
 	int n = total < max ? total : max;
-	for (int i = 0; i < n; i++) {
-		out[i] = ring[(total - 1 - i) % max];
-		mark(out[i], st);
-	}
+	for (int i = 0; i < n; i++) out[i] = ring[(total - 1 - i) % max];
+	fetch_roots(st, out, n);
+	for (int i = 0; i < n; i++) mark(out[i], st);
 	unlock();
 	return n;
 }
@@ -652,6 +747,7 @@ int audit_rows(uint32_t job, AuditRow *out, int first, int max)
 		if (seen++ < first) return;
 		out[n++] = r;
 	});
+	fetch_roots(st, out, n);
 	for (int i = 0; i < n; i++) mark(out[i], st);   // reads the image for sector rows: one page only
 	unlock();
 	return n;
@@ -665,6 +761,7 @@ static void say(char *why, size_t n, const char *fmt, uint32_t id, const char *m
 }
 
 // A sector row to undo, kept small (a job can have thousands): file and disc index into lists.
+// id is the row the undo row names: the sector row, or for a redo the newest undo row of its chain.
 struct Target { uint32_t id, job, lba, blob; int file, disc; };
 
 static int index_of(std::vector<std::string> &v, const char *s)
@@ -674,20 +771,26 @@ static int index_of(std::vector<std::string> &v, const char *s)
 	return (int)v.size() - 1;
 }
 
-// The sector rows `want` picks that are not undone yet, newest first.
+// The sector rows `want` picks that are not undone yet, newest first. When there are none but some
+// are undone, those instead, oldest first, each named by its chain's newest undo row: the undo is
+// then a redo (*redo = true).
 template <class F> static void collect(F want, std::vector<Target> &ts, std::vector<std::string> &files,
-                                       std::vector<std::string> &discs)
+                                       std::vector<std::string> &discs, bool *redo)
 {
+	std::vector<Target> back;
 	UndoState st;
 	lock();
 	build_state(st);
 	scan_log([&](const AuditRow &r) {
-		if (strcmp(r.kind, "sector") || !want(r) || st.is_undone(r.id)) return;
-		Target t = {r.id, r.job, r.lba, r.blob, index_of(files, r.file), index_of(discs, r.disc)};
-		ts.push_back(t);
+		if (strcmp(r.kind, "sector") || !want(r)) return;
+		bool u = st.is_undone(r.id);
+		Target t = {u ? st.tip(r.id) : r.id, r.job, r.lba, r.blob, index_of(files, r.file), index_of(discs, r.disc)};
+		(u ? back : ts).push_back(t);
 	});
 	unlock();
-	std::reverse(ts.begin(), ts.end());
+	*redo = ts.empty() && !back.empty();
+	if (*redo) ts.swap(back);
+	else std::reverse(ts.begin(), ts.end());
 }
 
 // The row a target stands for (enough for sector_block and the undo row).
@@ -700,12 +803,13 @@ static void target_row(const Target &t, const std::vector<std::string> &files, c
 	copyn(r.disc, sizeof r.disc, discs[t.disc].c_str());
 }
 
-// Writes each sector's old bytes back, newest first, and stops at the first refusal. Then every
-// file that got a sector back is checked again (outside the lock: the check writes rows).
+// Writes each sector's old bytes back (redo: its new bytes again) in the targets' order and stops
+// at the first refusal. Then every file that got a sector is checked again (outside the lock: the
+// check writes rows).
 static int undo_sectors(const std::vector<Target> &ts, const std::vector<std::string> &files,
-                        const std::vector<std::string> &discs, char *why, size_t n, AuditReason *rs)
+                        const std::vector<std::string> &discs, bool redo, char *why, size_t n, AuditReason *rs)
 {
-	std::vector<std::vector<uint32_t> > lbas(files.size());   // per file: the sectors put back
+	std::vector<std::vector<uint32_t> > lbas(files.size());   // per file: the sectors written
 	std::vector<std::vector<uint8_t> > zero(files.size());   // and whether their old bytes are all zero
 	int rc = 0;
 	char msg[160];
@@ -722,15 +826,15 @@ static int undo_sectors(const std::vector<Target> &ts, const std::vector<std::st
 		}
 		lock();
 		bool restored;
-		const char *e = sector_block(r, msg, sizeof msg, &restored, rs);
+		const char *e = sector_block(r, msg, sizeof msg, &restored, rs, redo);
 		bool written = false;
 		bool zeros = true;   // the old bytes, still in g_blob_buf
 		if (!e) for (int i = 0; i < SECTOR && zeros; i++) zeros = !g_blob_buf[i];
 		if (!e && !restored) {
-			// A failed close may still have written the sector; the next undo then finds the old
-			// bytes and only adds the row.
+			// A failed close may still have written the sector; the next undo then finds the bytes
+			// it would write and only adds the row.
 			void *img = g_io.open(r.file, "r+b");
-			bool ok = img && g_io.seek(img, (uint64_t)r.lba * SECTOR) == 0 && g_io.write(img, g_blob_buf, SECTOR) == SECTOR;
+			bool ok = img && g_io.seek(img, (uint64_t)r.lba * SECTOR) == 0 && g_io.write(img, redo ? g_blob_buf + SECTOR : g_blob_buf, SECTOR) == SECTOR;
 			if (img && g_io.close(img) != 0) ok = false;
 			if (!ok) { reason(rs, AW_CANNOT_WRITE, r); snprintf(msg, sizeof msg, "cannot write %s", base_name(r.file)); e = msg; }
 			written = ok;
@@ -749,15 +853,16 @@ static int undo_sectors(const std::vector<Target> &ts, const std::vector<std::st
 		if (e) { say(why, n, "row %u: %s", t.id, e); rc = -1; break; }
 	}
 	if (!rc && rs) memset(rs, 0, sizeof *rs);
-	void (*recheck)(const char *, const uint32_t *, const uint8_t *, int) = g_recheck;
+	void (*recheck)(const char *, const uint32_t *, const uint8_t *, int, int) = g_recheck;
 	if (recheck)
 		for (size_t i = 0; i < files.size(); i++)
-			if (!lbas[i].empty()) recheck(files[i].c_str(), lbas[i].data(), zero[i].data(), (int)lbas[i].size());
+			if (!lbas[i].empty()) recheck(files[i].c_str(), lbas[i].data(), zero[i].data(), (int)lbas[i].size(), redo ? 1 : 0);
 	return rc;
 }
 
 // Sets a setting back to the row's `before` through the app's hook (outside the lock: the app
-// records the change itself).
+// records the change itself). An undo row of a setting: the value its undo replaced (a redo) or
+// set again, the same way.
 static int undo_setting_row(const AuditRow &r, char *why, size_t n, AuditReason *rs)
 {
 	int (*set)(const char *, const char *) = g_set_setting;
@@ -767,13 +872,29 @@ static int undo_setting_row(const AuditRow &r, char *why, size_t n, AuditReason 
 	lock();
 	build_state(st);
 	const char *e = row_block(r, st, msg, sizeof msg, rs);
+	std::string key = r.what, from = r.after, to = r.before;
+	if (!strcmp(r.kind, "undo")) {
+		const UndoState::Link *l = st.link(r.id);
+		const UndoState::Setting *x = chain_setting(st, l);
+		if (x) {
+			bool redo = l->k % 2;
+			key = x->key;
+			from = redo ? x->before : x->after;
+			to = redo ? x->after : x->before;
+		}
+	}
 	unlock();
 	if (e) { say(why, n, "row %u: %s", r.id, e); return -1; }
-	if (set(r.what, r.before) != 0) { reason(rs, AW_NOT_APPLIED, r); say(why, n, "row %u: setting %s could not be applied", r.id, r.what); return -1; }
+	if (set(key.c_str(), to.c_str()) != 0) {
+		reason(rs, AW_NOT_APPLIED, r);
+		if (rs) copyn(rs->what, sizeof rs->what, key.c_str());
+		say(why, n, "row %u: setting %s could not be applied", r.id, key.c_str());
+		return -1;
+	}
 	char id[16];
 	snprintf(id, sizeof id, "%u", (unsigned)r.id);
 	lock();
-	uint32_t ok = write_row(0, AU_UNDO, AU_SETTINGS, "", "undo", id, r.after, r.before, NULL, false, 0, 0);
+	uint32_t ok = write_row(0, AU_UNDO, AU_SETTINGS, "", "undo", id, from.c_str(), to.c_str(), NULL, false, 0, 0);
 	unlock();
 	if (!ok) { reason(rs, AW_LOG_WRITE, r); say(why, n, "row %u: %s", r.id, "undone, but the log row could not be written"); return -1; }
 	if (rs) memset(rs, 0, sizeof *rs);
@@ -784,25 +905,37 @@ int audit_undo_row(uint32_t id, char *why, size_t n, AuditReason *rs)
 {
 	AuditRow row;
 	memset(&row, 0, sizeof row);
-	bool found = false, undone = false;
+	bool found = false, undone = false, setting = false;
 	if (why && n) why[0] = 0;
 	if (rs) memset(rs, 0, sizeof *rs);
 	UndoState st;
+	AuditRow sec;   // an undo row of a sector: that sector row
+	bool has_sec = false, redo = false;
 	lock();
 	build_state(st);
 	scan_log([&](const AuditRow &r) { if (r.id == id) { row = r; found = true; } });
 	undone = found && st.is_undone(id);
+	if (found && !undone && !strcmp(row.kind, "undo")) {
+		const UndoState::Link *l = st.link(id);
+		setting = chain_setting(st, l) != NULL;
+		redo = l && l->k % 2;
+		if (!setting) {
+			fetch_roots(st, &row, 1);
+			has_sec = chain_sector(row, st, sec);
+		}
+	}
 	unlock();
 	row.id = id;
 	if (!found) { reason(rs, AW_NO_ROW, row); say(why, n, "row %u: %s", id, "no such row"); return -1; }
 	if (undone) { reason(rs, AW_ALREADY, row); say(why, n, "row %u: %s", id, "already undone"); return -1; }
-	if (!strcmp(row.kind, "setting")) return undo_setting_row(row, why, n, rs);
-	if (strcmp(row.kind, "sector")) { reason(rs, AW_RECORD, row); say(why, n, "row %u: a %s row cannot be undone", id, row.kind); return -1; }
+	if (!strcmp(row.kind, "setting") || setting) return undo_setting_row(row, why, n, rs);
+	const AuditRow &r = has_sec ? sec : row;
+	if (strcmp(r.kind, "sector")) { reason(rs, AW_RECORD, row); say(why, n, "row %u: a %s row cannot be undone", id, row.kind); return -1; }
 	std::vector<Target> ts;
 	std::vector<std::string> files, discs;
-	Target t = {row.id, row.job, row.lba, row.blob, index_of(files, row.file), index_of(discs, row.disc)};
+	Target t = {id, r.job, r.lba, r.blob, index_of(files, r.file), index_of(discs, r.disc)};
 	ts.push_back(t);
-	return undo_sectors(ts, files, discs, why, n, rs);
+	return undo_sectors(ts, files, discs, redo, why, n, rs);
 }
 
 int audit_undo_job(uint32_t job, char *why, size_t n, AuditReason *rs)
@@ -811,8 +944,9 @@ int audit_undo_job(uint32_t job, char *why, size_t n, AuditReason *rs)
 	if (rs) memset(rs, 0, sizeof *rs);
 	std::vector<Target> ts;
 	std::vector<std::string> files, discs;
-	collect([job](const AuditRow &r) { return r.job == job; }, ts, files, discs);
-	return undo_sectors(ts, files, discs, why, n, rs);
+	bool redo;
+	collect([job](const AuditRow &r) { return r.job == job; }, ts, files, discs, &redo);
+	return undo_sectors(ts, files, discs, redo, why, n, rs);
 }
 
 int audit_undo_disc_since(const char *disc, uint32_t since_t, char *why, size_t n, AuditReason *rs)
@@ -822,46 +956,51 @@ int audit_undo_disc_since(const char *disc, uint32_t since_t, char *why, size_t 
 	if (!disc || !*disc) { if (rs) rs->code = AW_NO_DISC; if (why && n) snprintf(why, n, "no disc given"); return -1; }
 	std::vector<Target> ts;
 	std::vector<std::string> files, discs;
-	collect([disc, since_t](const AuditRow &r) { return r.t >= since_t && !strcmp(r.disc, disc); }, ts, files, discs);
-	return undo_sectors(ts, files, discs, why, n, rs);
+	bool redo;
+	collect([disc, since_t](const AuditRow &r) { return r.t >= since_t && !strcmp(r.disc, disc); }, ts, files, discs, &redo);
+	return undo_sectors(ts, files, discs, redo, why, n, rs);
 }
 
-// Would an undo of these targets undo at least one row? The undo goes newest first and stops at
-// the first refusal, so that is the newest one's verdict.
+// Would an undo of these targets undo (or redo) at least one row? It goes in the targets' order and
+// stops at the first refusal, so that is the first one's verdict.
 static int targets_reversible(const std::vector<Target> &ts, const std::vector<std::string> &files,
-                              const std::vector<std::string> &discs, AuditReason *rs)
+                              const std::vector<std::string> &discs, bool redo, AuditReason *rs, int *redo_out)
 {
 	if (rs) { memset(rs, 0, sizeof *rs); rs->code = AW_NOTHING; }
+	if (redo_out) *redo_out = redo ? 1 : 0;
 	if (ts.empty()) return 0;
 	AuditRow r;
 	target_row(ts[0], files, discs, r);
 	char msg[160];
 	bool restored;
 	lock();
-	const char *e = sector_block(r, msg, sizeof msg, &restored, rs);
+	const char *e = sector_block(r, msg, sizeof msg, &restored, rs, redo);
 	unlock();
 	return e ? 0 : 1;
 }
 
-int audit_job_reversible(uint32_t job, AuditReason *rs)
+int audit_job_reversible(uint32_t job, AuditReason *rs, int *redo)
 {
 	std::vector<Target> ts;
 	std::vector<std::string> files, discs;
-	collect([job](const AuditRow &r) { return r.job == job; }, ts, files, discs);
-	return targets_reversible(ts, files, discs, rs);
+	bool rd;
+	collect([job](const AuditRow &r) { return r.job == job; }, ts, files, discs, &rd);
+	return targets_reversible(ts, files, discs, rd, rs, redo);
 }
 
-int audit_disc_reversible(const char *disc, AuditReason *rs)
+int audit_disc_reversible(const char *disc, AuditReason *rs, int *redo)
 {
+	if (redo) *redo = 0;
 	if (!disc || !*disc) { if (rs) { memset(rs, 0, sizeof *rs); rs->code = AW_NO_DISC; } return 0; }
 	std::vector<Target> ts;
 	std::vector<std::string> files, discs;
-	collect([disc](const AuditRow &r) { return !strcmp(r.disc, disc); }, ts, files, discs);
-	return targets_reversible(ts, files, discs, rs);
+	bool rd;
+	collect([disc](const AuditRow &r) { return !strcmp(r.disc, disc); }, ts, files, discs, &rd);
+	return targets_reversible(ts, files, discs, rd, rs, redo);
 }
 
 void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
-                     void (*recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n))
+                     void (*recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n, int redo))
 {
 	g_set_setting = set_setting;
 	g_recheck = recheck;
