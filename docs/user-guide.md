@@ -183,7 +183,7 @@ cleared, never the value.
 
 **Using the screen**: four levels, ✕ opens and ○ goes back. First the kind (*Rips*, *Settings*),
 then the discs or the settings changes, then a disc's jobs, then one job's rows. △ undoes the
-selected item after a question: one row, one job, or everything on a disc from a point in time.
+selected item after a question: one row, one job, or everything on a disc.
 
 **What can be undone**
 
