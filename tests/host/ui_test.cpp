@@ -148,6 +148,22 @@ int main()
 		else printf("ok   self-test (the checks find planted problems)\n");
 	}
 
+	{   // the disc ID out of SYSTEM.CNF, also when the disc writes it in lower case
+		struct { const char *cnf, *want; } c[] = {
+			{"BOOT = cdrom:\\SLUS_005.53;1\r\nTCB = 4\r\n", "SLUS_005.53"},
+			{"BOOT = cdrom:\\scus_943.51;1\r\nTCB = 4\r\n", "SCUS_943.51"},
+			{"BOOT=cdrom:\\SLES_029.65;1", "SLES_029.65"},
+			{"BOOT = cdrom:\\PSX.EXE;1\r\n", ""},
+		};
+		int bad = 0;
+		for (auto &t : c) {
+			char out[16];
+			serial_from_cnf(t.cnf, out);
+			if (strcmp(out, t.want)) { printf("FAIL serial from \"%s\": got \"%s\", want \"%s\"\n", t.cnf, out, t.want); bad++; }
+		}
+		if (bad) g_fail += bad; else printf("ok   disc ID from SYSTEM.CNF (upper and lower case)\n");
+	}
+
 	{   // every text in both languages: a StrId without an entry in a table would be null
 		int missing = 0;
 		for (int lang : {PS3_LANG_SWEDISH, PS3_LANG_ENGLISH_US}) {

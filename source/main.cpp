@@ -958,18 +958,50 @@ static int read_toc()
 // Reads `count` raw sectors, each 2352 bytes followed by 16 bytes formatted Q,
 // the same way IRISMAN does (syscall 604, one ATAPI block per sector, DMA).
 
+// The first audio track after the data track: where its pregap starts (INDEX 00) and INDEX 01.
+// 0 when the disc has no audio track after a data track.
+static uint32_t audio_pregap(uint32_t *index1)
+{
+	for (int t = 1; t < g_ntracks; t++)
+		if (!(g_tracks[t].ctrl & 0x4) && (g_tracks[t - 1].ctrl & 0x4)) { *index1 = g_tracks[t].lba; return g_tstart[t]; }
+	return 0;
+}
+
+static int sector_zero(const uint8_t *p)
+{
+	for (int i = 0; i < RAW_SIZE; i++) if (p[i]) return 0;
+	return 1;
+}
+
 // READ CD with a chosen subchannel selection: 0 = none, 1 = raw P-W (96 bytes), 2 = formatted Q (16 bytes)
 static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, uint32_t blk)
 {
 	if (g_use == SRC_USB) {   // one USB command moves at most USBODD_MAX bytes: split the read
+		// The 2 s pregap between the data track and the first audio track: a SuperDrive refuses every
+		// sector there when asked for "any sector type" (the subchannel says audio, the drive does not
+		// agree), so a rip spent an hour re-reading 150 sectors and filled them with silence. Asked
+		// for CD-DA it reads them. Audio sectors are read as CD-DA from that pregap on; a read never
+		// spans the boundary, so data sectors are never read as audio.
+		uint32_t idx1 = 0, ap = audio_pregap(&idx1);
 		uint32_t per = USBODD_MAX / blk;
 		for (uint32_t done = 0; done < count; ) {
 			uint32_t n = count - done < per ? count - done : per, l = lba + done;
-			uint8_t c[12] = {0xBE, 0, (uint8_t)(l >> 24), (uint8_t)(l >> 16), (uint8_t)(l >> 8), (uint8_t)l,
+			int audio = ap && l >= ap;
+			if (ap && l < ap && l + n > ap) n = ap - l;
+			uint8_t c[12] = {0xBE, (uint8_t)(audio ? 0x04 : 0), (uint8_t)(l >> 24), (uint8_t)(l >> 16), (uint8_t)(l >> 8), (uint8_t)l,
 			                 (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n, 0xF8, sub, 0};
-			int r = usbodd_cmd(g_usb, c, 12, buf + (size_t)done * blk, n * blk, 1);
+			uint8_t *dst = buf + (size_t)done * blk;
+			int r = usbodd_cmd(g_usb, c, 12, dst, n * blk, 1);
 			if (r) return r;
 			if (usbodd_last_got(g_usb) != (int)(n * blk)) return -1;   // fewer sectors than asked for
+			// A pregap sector that is not silence: the SuperDrive hands out the last data sector's
+			// bytes for a sector it cannot really read as audio. Such a sector counts as unreadable.
+			for (uint32_t i = 0; audio && i < n && l + i < idx1; i++) {
+				if (sector_zero(dst + (size_t)i * blk)) continue;
+				uint8_t prev[RAW_SIZE] __attribute__((aligned(16)));
+				uint8_t pc[12] = {0xBE, 0x04, (uint8_t)((ap - 1) >> 24), (uint8_t)((ap - 1) >> 16), (uint8_t)((ap - 1) >> 8), (uint8_t)(ap - 1), 0, 0, 1, 0xF8, 0, 0};
+				if (usbodd_cmd(g_usb, pc, 12, prev, RAW_SIZE, 1) || !memcmp(prev, dst + (size_t)i * blk, RAW_SIZE)) return -1;
+			}
 			done += n;
 		}
 		return 0;
@@ -1108,6 +1140,28 @@ static int find_file(const uint8_t *dir, uint32_t dirlen, const char *name, uint
 }
 
 
+// The disc ID out of SYSTEM.CNF: "BOOT = cdrom:\\SLUS_005.53;1" -> "SLUS_005.53". Some discs write
+// it in lower case ("cdrom:\\scus_943.51;1", Wipeout XL): matched either way, stored in upper case.
+// Empty when there is none.
+static void serial_from_cnf(const char *cnf, char *out)
+{
+	out[0] = 0;
+	for (const char *p = cnf; *p; p++) {
+		int ok = 1;
+		for (int i = 0; i < 11 && ok; i++) {
+			char c = p[i];
+			if (i < 4) ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+			else if (i == 4) ok = c == '_';
+			else if (i == 8) ok = c == '.';
+			else ok = c >= '0' && c <= '9';
+		}
+		if (!ok) continue;
+		for (int i = 0; i < 11; i++) out[i] = (p[i] >= 'a' && p[i] <= 'z') ? p[i] - 32 : p[i];
+		out[11] = 0;
+		return;
+	}
+}
+
 static void detect_disc_id()
 {
 	uint8_t pvd[2048], dir[2048], cnf[2048];
@@ -1128,14 +1182,7 @@ static void detect_disc_id()
 		return;
 	}
 	cnf[2047] = 0;
-	// BOOT = cdrom:\SLUS_005.53;1
-	for (char *p = (char *)cnf; *p; p++) {
-		if ((p[0] >= 'A' && p[0] <= 'Z') && p[4] == '_' && p[8] == '.' && p[1] >= 'A' && p[3] >= 'A') {
-			memcpy(g_serial, p, 11);
-			g_serial[11] = 0;
-			break;
-		}
-	}
+	serial_from_cnf((const char *)cnf, g_serial);
 	logf("volume=%s serial=%s", g_volid, g_serial);
 }
 
@@ -2792,22 +2839,45 @@ static void fmt_dur(char *out, size_t n, long secs)
 }
 
 // "Time 2:14 · about 1:35 left · 2.6 MB/s": speed over the last ~20 s (the drive is faster on the
-// outer part of the disc and slow in damaged areas), remaining time from that speed.
-struct Eta { uint64_t t0, tw; uint32_t pw; double rate; };
-static void eta_start(Eta *e) { e->t0 = e->tw = now_ms(); e->pw = 0; e->rate = 0; }
-static void eta_line(Eta *e, uint32_t pos, uint32_t total, char *out, size_t n)
+// outer part of the disc and slow in damaged areas), remaining time from that speed. Runs in the
+// card's context (OnCard): the main read, or the pass after it (verify, re-reads, repair).
+static void eta_pos(uint32_t *pos, uint32_t *total)
 {
+	if (g_pass2_total && g_phase) { *pos = g_pass2_done; *total = g_pass2_total; return; }
+	*pos = g_readpos > g_done ? g_readpos : g_done;
+	*total = g_total;
+}
+
+// Sampled every frame for every ripping card, not only the one on screen: a tab opened later
+// would otherwise start from nothing (no time counted, "1 second left").
+static void eta_tick(int c)
+{
+	Card &k = g_cards[c];
+	if (!k.job) return;
+	OnCard o(c);
+	uint32_t pos, total;
+	eta_pos(&pos, &total);
 	uint64_t t = now_ms();
-	if (t - e->tw >= 2000) {   // sample every 2 s, smooth over ~20 s
-		double r = (double)(pos - e->pw) * 1000.0 / (double)(t - e->tw);
-		e->rate = e->rate > 0 ? e->rate * 0.9 + r * 0.1 : r;
-		e->tw = t; e->pw = pos;
+	if (!k.eta_t0 || g_phase != k.eta_phase) {   // a new job or a new pass: start measuring here
+		k.eta_t0 = k.eta_tw = t; k.eta_pw = pos; k.eta_rate = 0; k.eta_phase = g_phase;
+		return;
 	}
+	if (t - k.eta_tw >= 2000) {   // sample every 2 s, smooth over ~20 s
+		double r = pos >= k.eta_pw ? (double)(pos - k.eta_pw) * 1000.0 / (double)(t - k.eta_tw) : 0;
+		k.eta_rate = k.eta_rate > 0 ? k.eta_rate * 0.9 + r * 0.1 : r;
+		k.eta_tw = t; k.eta_pw = pos;
+	}
+}
+
+static void eta_text(const Card &k, char *out, size_t n)
+{
+	uint32_t pos, total;
+	eta_pos(&pos, &total);
 	char el[16], left[16];
-	fmt_dur(el, sizeof(el), (long)((t - e->t0) / 1000));
-	if (e->rate > 1 && t - e->t0 > 6000) {
-		fmt_dur(left, sizeof(left), (long)((total - pos) / e->rate));
-		unsigned kbs = (unsigned)(e->rate * RAW_SIZE / 1024);
+	fmt_dur(el, sizeof(el), g_rip_t0 ? (long)(time(NULL) - g_rip_t0) : 0);   // since the job started
+	if (k.eta_rate > 1 && now_ms() - k.eta_t0 > 6000 && total > pos) {
+		fmt_dur(left, sizeof(left), (long)((total - pos) / k.eta_rate));
+		unsigned kbs = (unsigned)(k.eta_rate * RAW_SIZE / 1024);
 		if (g_phase) snprintf(out, n, T(STR_TIME_LEFT), el, left);   // later passes: no meaningful speed
 		else snprintf(out, n, T(STR_TIME_ETA), el, left, kbs / 1024, (kbs % 1024) * 10 / 1024);
 	} else {
@@ -3957,12 +4027,8 @@ static int draw_page_body(int c, int y)
 		ui_rect(L, y, R - L, bh, 0x50FFFFFF);
 		ui_rect(L, y, (int)((uint64_t)(R - L) * (pct > 100 ? 100 : pct) / 100), bh, 0xFFC8E05A);
 		y += bh + ls / 2;
-		Eta e = {k.eta_t0, k.eta_tw, k.eta_pw, k.eta_rate};
-		if (!k.eta_t0 || g_phase != k.eta_phase) { uint64_t t0 = k.eta_t0; eta_start(&e); if (t0) e.t0 = t0; k.eta_phase = g_phase; }
 		char tl[96], pc[140];
-		if (g_pass2_total && g_phase) eta_line(&e, g_pass2_done, g_pass2_total, tl, sizeof(tl));
-		else eta_line(&e, pos, g_total, tl, sizeof(tl));
-		k.eta_t0 = e.t0; k.eta_tw = e.tw; k.eta_pw = e.pw; k.eta_rate = e.rate;
+		eta_text(k, tl, sizeof(tl));
 		// percentage and time on the right of the phase line (the tab shows the percentage too)
 		snprintf(pc, sizeof(pc), "%u %%  ·  %s", pct, tl);
 		int pcw = ui_text_width(UI_BODY, pc);
@@ -4234,6 +4300,7 @@ static int home_screen()
 					if (g_prev_rip && g_repair_n) { logf("auto repair: %d sector(s)", g_repair_n); repair_job_start(list[i]); }
 				}
 			}
+		for (int i = 0; i < nc; i++) eta_tick(list[i]);   // every tab's time left, also those not shown
 		Card &f = g_cards[sel];
 		int st = f.state;
 		g_backdrop_shown = 0;   // a dialog opened later must redraw its backdrop
