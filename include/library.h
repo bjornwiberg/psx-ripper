@@ -10,8 +10,8 @@
 enum GameFmt { GF_UNKNOWN, GF_2352, GF_2048 };
 // Worst first: a group's status is the lowest of its discs'.
 enum GameStatus { GS_BROKEN, GS_RERIP, GS_ERRORS, GS_UNCHECKED, GS_NOMATCH, GS_VERIFIED };
-// The list's filter: criteria that all have to match (0 = any). A multi-disc row matches a
-// criterion when any of its discs does. The trash is not a filter: it is its own scan (.trash).
+// The list's filter: criteria that all have to match (0 = any). A multi-disc row matches when
+// one of its discs matches all of them. The trash is not a filter: it is its own scan (.trash).
 struct GameFilter { int fmt;     /* 0 any, 1 only 2352, 2 only 2048 */
                     int redump;  /* 0 any, 1 verified, 2 not checked, 3 no match (no_match/not_found), 4 not verified (= 2 or 3) */
                     int errors;  /* 0 any, 1 with errors, 2 without errors */
@@ -46,8 +46,10 @@ struct LibIo { int (*list)(const char *dir, void (*cb)(const char *, void *), vo
 // The sets of one folder, unsorted; up to max. Returns how many, -1 when the folder cannot be read.
 // dup is -1 in each: lib_mark_dups() over all the scanned sources sets it.
 int lib_scan(const char *dir, const LibIo *io, GameDisc *discs, int max);
-// Sorts the discs into rows (groups contiguous, by disc number; dup indices follow the move) and
-// fills games, sorted by name (case-insensitive, ASCII before the rest). Returns the rows (<= max).
+// Sorts the discs into rows and fills games, sorted by name (case-insensitive, ASCII before the
+// rest). A group: discs in one folder whose title and region/language groups match apart from
+// "(Disc N)", each number once; contiguous, by disc number. dup indices follow the move.
+// Returns the rows (<= max).
 int lib_group(GameDisc *discs, int n, Game *games, int max);
 // Same disc ID and image size, or the same Redump name: each gets the other's index in dup.
 void lib_mark_dups(GameDisc *discs, int n);

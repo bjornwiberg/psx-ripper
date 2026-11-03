@@ -41,10 +41,12 @@ static int lc_list(const char *id) { return !strcmp(id, "SLES_012.26") || !strcm
 static const LibIo IO = {io_list, io_stat_size, io_read, io_exists, lc_list, "./out/library/sbi"};
 
 static const char *DIR_ = "./out/library/PSXISO";
+static const char *leaf_name(const char *p) { const char *s = strrchr(p, '/'); return s ? s + 1 : p; }
 
 static void fresh()
 {
-	if (system("rm -rf ./out/library && mkdir -p ./out/library/PSXISO ./out/library/sbi")) {}
+	DIR_ = "./out/library/PSXISO";
+	if (system("rm -rf ./out/library && mkdir -p ./out/library/PSXISO ./out/library/USB/PSXISO ./out/library/sbi")) {}
 }
 static void put(const char *name, const char *text)
 {
@@ -404,7 +406,9 @@ static void filters(int &bad)
 	CHECK(names({0, 0, 2, 2}, "Good|Good copy"));
 	CHECK(names({0, 0, 0, 1}, "Broken"));
 	CHECK(names({0, 0, 0, 3}, "Ape"));
-	CHECK(names({1, 2, 2, 0}, "Ape|Broken|Mix|Plain"));   // Mix: each criterion by one of its discs
+	CHECK(names({1, 2, 2, 0}, "Ape|Broken|Plain"));   // Mix: no disc of it is both 2352 and not checked
+	CHECK(names({2, 1, 0, 0}, ""));                   // Mix: its 2048 disc is not the verified one
+	CHECK(names({2, 2, 2, 0}, "Mix|Old2048"));         // Mix: disc 2 alone matches all three
 }
 
 static void summary_counts(int &bad)
@@ -466,6 +470,66 @@ static void long_names_cut(int &bad)
 	CHECK(g_d[0].files_cut == 1 && g_d[0].tracks == 60 && g_d[0].size == 2352ull * 60 && g_d[0].st != GS_BROKEN);
 }
 
+// two releases of a multi-disc game, and one disc number twice: separate rows
+static void regions_stay_apart(int &bad)
+{
+	fresh();
+	rip("Final Fantasy VII (Disc 1) (Europe) [SCES_008.67]", 10, NULL);
+	rip("Final Fantasy VII (Disc 2) (Europe) [SCES_108.67]", 10, NULL);
+	rip("Final Fantasy VII (Disc 1) (USA) [SCUS_941.63]", 10, NULL);
+	rip("Final Fantasy VII (Disc 2) (USA) [SCUS_941.64]", 10, NULL);
+	// the same with logs whose titles carry the region in another place
+	rip("Parasite Eve (Disc 1) [SLUS_006.62]", 10, "title=Parasite Eve (USA) (Disc 1)\n");
+	rip("Parasite Eve (Disc 2) [SLUS_006.68]", 10, NULL);   // region from its ID
+	rip("Parasite Eve (Disc 1) (Japan) [SLPS_012.30]", 10, NULL);
+	// disc 1 twice in one folder: the second copy is its own row
+	rip("Riven (Disc 1) (Europe) [SLES_000.01]", 10, NULL);
+	rip("Riven (Disc 1) (Europe) [SLES_000.01] copy", 10, NULL);
+	rip("Riven (Disc 2) (Europe) [SLES_000.02]", 10, NULL);
+	int n = scan();
+	int rows = lib_group(g_d, n, g_g, 600);
+	char got[2048] = "";
+	for (int r = 0; r < rows; r++) snprintf(got + strlen(got), sizeof got - strlen(got), "%s%s=%d", r ? "|" : "", g_g[r].name, g_g[r].ndiscs);
+	const char *want = "Final Fantasy VII (Europe)=2|Final Fantasy VII (USA)=2|Parasite Eve=2|"
+	                   "Parasite Eve (Disc 1) (Japan)=1|Riven (Disc 1) (Europe) copy=1|Riven (Europe)=2";
+	if (strcmp(got, want)) printf("  rows: %s\n", got);
+	CHECK(!strcmp(got, want));
+}
+
+// the same set on two sources (hard disk and USB, "All"): two rows, each the other's duplicate
+static void same_set_two_folders(int &bad)
+{
+	fresh();
+	rip("Final Fantasy IX (Disc 1) (Europe) [SLES_002.12]", 10, NULL);
+	rip("Final Fantasy IX (Disc 2) (Europe) [SLES_102.12]", 10, NULL);
+	int n = scan();
+	DIR_ = "./out/library/USB/PSXISO";
+	rip("Final Fantasy IX (Disc 1) (Europe) [SLES_002.12]", 10, NULL);
+	rip("Final Fantasy IX (Disc 2) (Europe) [SLES_102.12]", 10, NULL);
+	n += lib_scan(DIR_, &IO, g_d + n, 600 - n);
+	CHECK(n == 4);
+	lib_mark_dups(g_d, n);
+	int rows = lib_group(g_d, n, g_g, 600);
+	CHECK(rows == 2 && g_g[0].ndiscs == 2 && g_g[1].ndiscs == 2);
+	for (int i = 0; i < n; i++) {
+		CHECK(g_d[i].dup >= 0);
+		if (g_d[i].dup < 0) continue;
+		const GameDisc &o = g_d[g_d[i].dup];
+		CHECK(!strcmp(leaf_name(o.base), leaf_name(g_d[i].base)) && strcmp(o.base, g_d[i].base));
+	}
+}
+
+static void empty_image_broken(int &bad)
+{
+	fresh();
+	put_size("Empty.iso", 0);
+	rip("Zero", 0, NULL);
+	int n = scan(), i;
+	CHECK(n == 2);
+	CHECK((i = find(n, "Empty")) >= 0 && g_d[i].st == GS_BROKEN);
+	CHECK((i = find(n, "Zero")) >= 0 && g_d[i].st == GS_BROKEN);
+}
+
 // the folder goes away between listing and reading (a USB stick pulled): no crash, nothing claimed
 static int gone_stat(const char *, uint64_t *) { return -1; }
 static int gone_read(const char *, char *, int) { return -1; }
@@ -479,7 +543,7 @@ static void folder_gone_midway(int &bad)
 	int n = lib_scan(DIR_, &gone, g_d, 600), i;
 	CHECK(n == 2);
 	CHECK((i = find(n, "A [SLES_012.26]")) >= 0 && g_d[i].st == GS_BROKEN && g_d[i].size == 0 && g_d[i].title[0]);
-	CHECK((i = find(n, "B")) >= 0 && g_d[i].size == 0 && g_d[i].fmt == GF_UNKNOWN && g_d[i].st != GS_VERIFIED);
+	CHECK((i = find(n, "B")) >= 0 && g_d[i].size == 0 && g_d[i].fmt == GF_UNKNOWN && g_d[i].st == GS_BROKEN);
 }
 
 int main()
@@ -491,7 +555,8 @@ int main()
 		{"duplicates", duplicates}, {"libcrypt_marks", libcrypt_marks}, {"sorting", sorting},
 		{"jump_by_letter", jump_by_letter}, {"filters", filters}, {"summary_counts", summary_counts},
 		{"many_sets_bounded", many_sets_bounded}, {"long_names_cut", long_names_cut},
-		{"folder_gone_midway", folder_gone_midway},
+		{"folder_gone_midway", folder_gone_midway}, {"regions_stay_apart", regions_stay_apart},
+		{"same_set_two_folders", same_set_two_folders}, {"empty_image_broken", empty_image_broken},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {

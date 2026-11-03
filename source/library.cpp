@@ -18,7 +18,7 @@ enum Kind { K_NONE, K_BIN, K_CUE, K_LOG, K_MD5, K_JPG, K_ISO, K_IMG, K_SBI, K_PA
 struct Name { std::string s; Kind k; size_t blen; int owner; };
 
 struct Extra {   // what the scan knows about a set beyond GameDisc
-	int cue = 0, cue_files = 0, cue_missing = 0, cue_unread = 0, has2048 = 0, has2352 = 0, part = 0, image_kind = 0;
+	int cue = 0, cue_files = 0, cue_missing = 0, cue_unread = 0, has2048 = 0, has2352 = 0, part = 0, image_kind = 0, image_bad = 0;
 	std::vector<std::string> images;   // all of them, also when the file names did not fit
 };
 
@@ -140,23 +140,42 @@ int is_region_group(const char *a, const char *b)
 	return 1;
 }
 
-// What makes discs one game: the title without [..], "(Disc N)", regions; lower case (ASCII).
-void group_key(const char *title, char *out, size_t n)
+// The region and language groups of a text ("(Europe)(En,Fr)"), lower case; *rest = the text
+// without them, without [..] and "(Disc N)", lower case.
+void split_regions(const char *text, std::string *regions, std::string *rest)
 {
 	char t[256];
-	without_brackets(title, t, sizeof t);
+	without_brackets(text, t, sizeof t);
 	cut_disc(t);
-	size_t o = 0;
-	for (const char *p = t; *p && o < n - 1; p++) {
+	for (const char *p = t; *p; p++) {
 		if (*p == '(') {
 			const char *e = strchr(p, ')');
-			if (e && is_region_group(p + 1, e)) { p = e; continue; }
+			if (e && is_region_group(p + 1, e)) {
+				for (const char *q = p; q <= e; q++) if (*q != ' ') *regions += (char)lc((unsigned char)*q);
+				p = e;
+				continue;
+			}
 		}
-		out[o++] = (char)lc((unsigned char)*p);
+		*rest += (char)lc((unsigned char)*p);
 	}
-	out[o] = 0;
-	squeeze(out);
 }
+
+// What makes discs one game: the title without [..], "(Disc N)" and regions, plus its regions
+// (from the title, else the file name, else the disc ID's prefix), so two releases stay apart.
+std::string group_key(const char *title, const char *leaf, const char *id)
+{
+	std::string reg, rest, unused;
+	split_regions(title, &reg, &rest);
+	if (reg.empty()) split_regions(leaf, &reg, &unused);
+	if (reg.empty() && strlen(id) >= 4)
+		reg = id[2] == 'E' ? "(europe)" : id[2] == 'U' ? "(usa)" : id[2] == 'P' || (id[0] == 'S' && id[1] == 'I') ? "(japan)" : "";
+	char r[256];
+	snprintf(r, sizeof r, "%s", rest.c_str());
+	squeeze(r);
+	return std::string(r) + "|" + reg;
+}
+
+std::string folder_of(const char *base) { return std::string(base, (size_t)(leaf_of(base) - base)); }
 
 // Alphabetical, case-insensitive (ASCII), bytes of other scripts after ASCII.
 int name_cmp(const char *a, const char *b)
@@ -337,7 +356,8 @@ int lib_scan(const char *dir, const LibIo *io, GameDisc *discs, int max)
 			snprintf(path, sizeof path, "%s/%s", dir, img.c_str());
 			if (!d.image[0]) snprintf(d.image, sizeof d.image, "%s", path);
 			uint64_t sz = 0;
-			if (!io->stat_size(path, &sz)) d.size += sz;
+			if (!io->stat_size(path, &sz) && sz) d.size += sz;
+			else x.image_bad = 1;   // gone or empty
 		}
 		if (!x.cue) d.tracks = x.images.empty() ? 0 : 1;
 		if (d.size) {
@@ -354,7 +374,7 @@ int lib_scan(const char *dir, const LibIo *io, GameDisc *discs, int max)
 		const char *leaf = leaf_of(d.base);
 		if (!d.id[0]) id_from_name(leaf, d.id, sizeof d.id);
 		if (!d.title[0]) without_brackets(leaf, d.title, sizeof d.title);
-		int broken = x.part || x.images.empty() || (x.cue && (x.cue_unread || x.cue_missing || !x.cue_files))
+		int broken = x.part || x.image_bad || x.images.empty() || (x.cue && (x.cue_unread || x.cue_missing || !x.cue_files))
 		             || (!x.cue && x.image_kind == K_BIN);
 		d.st = broken ? GS_BROKEN : d.fmt == GF_2048 ? GS_RERIP : d.errors ? GS_ERRORS
 		     : d.rd == 1 ? GS_VERIFIED : d.rd == 0 ? GS_NOMATCH : GS_UNCHECKED;
@@ -397,12 +417,17 @@ int lib_group(GameDisc *d, int n, Game *games, int max)
 		const char *leaf = leaf_of(d[i].base);
 		dnum[i] = disc_number(d[i].title);
 		if (!dnum[i]) dnum[i] = disc_number(leaf);
-		char k[256];
-		group_key(d[i].title, k, sizeof k);
-		keys[i] = k;
+		// one game: the same title and regions, in the same folder, and each disc number once
+		keys[i] = folder_of(d[i].base) + "|" + group_key(d[i].title, leaf, d[i].id);
 		int r = -1;
 		if (dnum[i])
-			for (int j = 0; j < i && r < 0; j++) if (dnum[j] && keys[j] == keys[i]) r = row_of[j];
+			for (size_t c = 0; c < rows.size() && r < 0; c++) {
+				const Row &row = rows[c];
+				if (!dnum[row.discs[0]] || keys[row.discs[0]] != keys[i]) continue;
+				int taken = 0;
+				for (int j : row.discs) if (dnum[j] == dnum[i]) taken = 1;
+				if (!taken) r = (int)c;
+			}
 		if (r < 0) { r = (int)rows.size(); rows.push_back(Row()); }
 		row_of[i] = r;
 		rows[r].discs.push_back(i);
@@ -449,17 +474,18 @@ int lib_filter(const Game *g, int n, const GameDisc *d, const GameFilter *f, int
 {
 	int k = 0;
 	for (int r = 0; r < n; r++) {
-		int fmt = 0, rd = 0, err = 0, oth = 0;
-		for (int i = g[r].first; i < g[r].first + g[r].ndiscs; i++) {
+		int hit = 0;   // one of its discs matches every criterion
+		for (int i = g[r].first; i < g[r].first + g[r].ndiscs && !hit; i++) {
 			const GameDisc &x = d[i];
-			if (!f || !f->fmt || (f->fmt == 1 && x.fmt == GF_2352) || (f->fmt == 2 && x.fmt == GF_2048)) fmt = 1;
-			if (!f || !f->redump || (f->redump == 1 && x.rd == 1) || (f->redump == 2 && x.rd == -1)
-			    || (f->redump == 3 && x.rd == 0) || (f->redump == 4 && x.rd != 1)) rd = 1;
-			if (!f || !f->errors || (f->errors == 1 && x.errors > 0) || (f->errors == 2 && !x.errors)) err = 1;
-			if (!f || !f->other || (f->other == 1 && x.st == GS_BROKEN) || (f->other == 2 && x.dup >= 0)
-			    || (f->other == 3 && x.libcrypt == -1)) oth = 1;
+			int fmt = !f || !f->fmt || (f->fmt == 1 && x.fmt == GF_2352) || (f->fmt == 2 && x.fmt == GF_2048);
+			int rd = !f || !f->redump || (f->redump == 1 && x.rd == 1) || (f->redump == 2 && x.rd == -1)
+			         || (f->redump == 3 && x.rd == 0) || (f->redump == 4 && x.rd != 1);
+			int err = !f || !f->errors || (f->errors == 1 && x.errors > 0) || (f->errors == 2 && !x.errors);
+			int oth = !f || !f->other || (f->other == 1 && x.st == GS_BROKEN) || (f->other == 2 && x.dup >= 0)
+			          || (f->other == 3 && x.libcrypt == -1);
+			hit = fmt && rd && err && oth;
 		}
-		if (fmt && rd && err && oth) out[k++] = r;
+		if (hit) out[k++] = r;
 	}
 	return k;
 }
