@@ -1007,6 +1007,11 @@ static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, 
 			int r = usbodd_cmd(g_usb, c, 12, buf + (size_t)done * blk, n * blk, 1);
 			// the disc is gone (taken out, or the SuperDrive pushed out a disc it could not read):
 			// stop the job instead of "re-reading" a thousand sectors that all fail at once
+			if (r) {   // what the drive said about a failed read: when it changes, and every 100th
+				static int last[NCARDS], cnt[NCARDS];
+				int c = cur_card();
+				if (r != last[c] || ++cnt[c] % 100 == 0) { logf("read %u x%u failed: 0x%x", l, n, r); last[c] = r; cnt[c] = 0; }
+			}
 			if (((uint32_t)r & 0xFF000000u) == 0x8D000000u && (r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A && !g_abort) {
 				g_abort = 1;
 				logf("read %u: no disc in the drive (medium not present), stopping", l);
@@ -3841,6 +3846,7 @@ static void eject_disc()
 {
 	while (g_ident_busy) usleep(10000);
 	if (g_use == SRC_USB) {
+		logf("eject: card %d -> usb drive %d (port %d)", cur_card(), g_usb, usbodd_port(g_usb));
 		usbodd_eject(g_usb);
 		fire_event("disc_ejected");
 		g_disc_state = DISC_NONE;
@@ -3916,7 +3922,18 @@ static void usb_presence_thread(void *arg)
 				if (was[i] != -1 || k.present) { k.present = 0; k.inserted = 0; was[i] = -1; g_redraw = 2; }
 				continue;
 			}
-			if (card_busy(1 + i)) { was[i] = -1; continue; }   // in use: its own commands tell
+			if (card_busy(1 + i)) {   // in use: its own commands tell. Every 10 s, for the log only:
+				// is the disc still in it (a SuperDrive has pushed out a disc during a repair)
+				static int tick[USBODD_DRIVES], seen[USBODD_DRIVES];
+				if (++tick[i] % 5 == 0) {
+					const uint8_t tur[6] = {0};
+					int r = usbodd_cmd(i, tur, 6, NULL, 0, 0);
+					int gone = r != -1 && (r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A;
+					if (gone != seen[i]) { seen[i] = gone; logf("usb drive %d (port %d) during a job: %s (0x%x)", i, usbodd_port(i), gone ? "NO DISC" : "disc in it", r); }
+				}
+				was[i] = -1;
+				continue;
+			}
 			if (!usbodd_name(i)[0]) {   // just connected: model, port and the destination chosen for that port
 				usbodd_identify(i);
 				int port = usbodd_port(i);
@@ -3945,9 +3962,9 @@ static void usb_presence_thread(void *arg)
 			// was already in it: part of the start, not an insert. The SuperDrive only takes a disc
 			// when it is unlocked, which the app does, so any disc that appears after an empty answer
 			// was put in, and starts a rip when the drive's settings say so.
-			if (was[i] == 0 && now) { k.present = 1; k.inserted = 1; logf("usb drive %d: disc inserted", i); }
-			if (was[i] == 1 && !now) { k.present = 0; k.inserted = 0; logf("usb drive %d: disc removed", i); }
-			if (was[i] == -1) { k.present = now; logf("usb drive %d: %s", i, now ? "a disc is in it" : "empty"); }
+			if (was[i] == 0 && now) { k.present = 1; k.inserted = 1; logf("usb drive %d (port %d): disc inserted", i, usbodd_port(i)); }
+			if (was[i] == 1 && !now) { k.present = 0; k.inserted = 0; logf("usb drive %d (port %d): disc removed", i, usbodd_port(i)); }
+			if (was[i] == -1) { k.present = now; logf("usb drive %d (port %d): %s", i, usbodd_port(i), now ? "a disc is in it" : "empty"); }
 			if (was[i] != now) g_redraw = 2;
 			was[i] = now;
 		}
@@ -4528,6 +4545,7 @@ static int home_screen()
 		}
 		if ((p & B_TRIANGLE) && !f.job && (st == DISC_READY || st == DISC_ERROR || sel > 0)) {   // a USB drive: also when it has not seen a disc
 			while (g_ident_busy && g_ident_card == sel) usleep(10000);
+			logf("eject pressed on tab %d (%s)", sel, sel ? "USB" : "internal");
 			select_card(sel);
 			eject_disc();   // the last rip's line stays: with auto-eject it is the only trace of how it went
 			g_redraw = 2;
