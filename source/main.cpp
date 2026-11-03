@@ -1109,6 +1109,28 @@ static int find_file(const uint8_t *dir, uint32_t dirlen, const char *name, uint
 }
 
 
+// The disc ID out of SYSTEM.CNF: "BOOT = cdrom:\\SLUS_005.53;1" -> "SLUS_005.53". Some discs write
+// it in lower case ("cdrom:\\scus_943.51;1", Wipeout XL): matched either way, stored in upper case.
+// Empty when there is none.
+static void serial_from_cnf(const char *cnf, char *out)
+{
+	out[0] = 0;
+	for (const char *p = cnf; *p; p++) {
+		int ok = 1;
+		for (int i = 0; i < 11 && ok; i++) {
+			char c = p[i];
+			if (i < 4) ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+			else if (i == 4) ok = c == '_';
+			else if (i == 8) ok = c == '.';
+			else ok = c >= '0' && c <= '9';
+		}
+		if (!ok) continue;
+		for (int i = 0; i < 11; i++) out[i] = (p[i] >= 'a' && p[i] <= 'z') ? p[i] - 32 : p[i];
+		out[11] = 0;
+		return;
+	}
+}
+
 static void detect_disc_id()
 {
 	uint8_t pvd[2048], dir[2048], cnf[2048];
@@ -1129,14 +1151,7 @@ static void detect_disc_id()
 		return;
 	}
 	cnf[2047] = 0;
-	// BOOT = cdrom:\SLUS_005.53;1
-	for (char *p = (char *)cnf; *p; p++) {
-		if ((p[0] >= 'A' && p[0] <= 'Z') && p[4] == '_' && p[8] == '.' && p[1] >= 'A' && p[3] >= 'A') {
-			memcpy(g_serial, p, 11);
-			g_serial[11] = 0;
-			break;
-		}
-	}
+	serial_from_cnf((const char *)cnf, g_serial);
 	logf("volume=%s serial=%s", g_volid, g_serial);
 }
 
