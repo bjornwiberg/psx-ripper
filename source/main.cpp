@@ -983,6 +983,7 @@ static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, 
 		// for CD-DA it reads them. Audio sectors are read as CD-DA from that pregap on; a read never
 		// spans the boundary, so data sectors are never read as audio.
 		uint32_t idx1 = 0, ap = audio_pregap(&idx1);
+		(void)idx1;
 		uint32_t per = USBODD_MAX / blk;
 		for (uint32_t done = 0; done < count; ) {
 			uint32_t n = count - done < per ? count - done : per, l = lba + done;
@@ -990,18 +991,9 @@ static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, 
 			if (ap && l < ap && l + n > ap) n = ap - l;
 			uint8_t c[12] = {0xBE, (uint8_t)(audio ? 0x04 : 0), (uint8_t)(l >> 24), (uint8_t)(l >> 16), (uint8_t)(l >> 8), (uint8_t)l,
 			                 (uint8_t)(n >> 16), (uint8_t)(n >> 8), (uint8_t)n, 0xF8, sub, 0};
-			uint8_t *dst = buf + (size_t)done * blk;
-			int r = usbodd_cmd(g_usb, c, 12, dst, n * blk, 1);
+			int r = usbodd_cmd(g_usb, c, 12, buf + (size_t)done * blk, n * blk, 1);
 			if (r) return r;
 			if (usbodd_last_got(g_usb) != (int)(n * blk)) return -1;   // fewer sectors than asked for
-			// A pregap sector that is not silence: the SuperDrive hands out the last data sector's
-			// bytes for a sector it cannot really read as audio. Such a sector counts as unreadable.
-			for (uint32_t i = 0; audio && i < n && l + i < idx1; i++) {
-				if (sector_zero(dst + (size_t)i * blk)) continue;
-				uint8_t prev[RAW_SIZE] __attribute__((aligned(16)));
-				uint8_t pc[12] = {0xBE, 0x04, (uint8_t)((ap - 1) >> 24), (uint8_t)((ap - 1) >> 16), (uint8_t)((ap - 1) >> 8), (uint8_t)(ap - 1), 0, 0, 1, 0xF8, 0, 0};
-				if (usbodd_cmd(g_usb, pc, 12, prev, RAW_SIZE, 1) || !memcmp(prev, dst + (size_t)i * blk, RAW_SIZE)) return -1;
-			}
 			done += n;
 		}
 		return 0;
@@ -1027,8 +1019,39 @@ static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, 
 	return ret;
 }
 
+// The first sector of the first audio track's pregap, right after the data track: both the PS3's
+// drive and a SuperDrive hand out junk for it (a few hundred stray bytes, different per drive), while
+// the disc has silence there, as in Redump (Tomba! 2: zeroing it gives Redump's track MD5). When the
+// sector after it is silent, it is stored as silence. A pregap with real sound in it is left alone.
+// `buf` holds `count` sectors of 2352 + 16 (Q) bytes starting at `lba`.
+static void pregap_transition(uint32_t lba, uint32_t count, uint8_t *buf)
+{
+	uint32_t idx1 = 0, ap = audio_pregap(&idx1);
+	if (!ap || ap < lba || ap >= lba + count || ap + 1 >= idx1) return;
+	uint8_t *s0 = buf + (size_t)(ap - lba) * SECT_Q;
+	if (sector_zero(s0)) return;
+	int next_silent;
+	if (ap + 1 < lba + count) next_silent = sector_zero(s0 + SECT_Q);
+	else {
+		uint8_t *nb = (uint8_t *)memalign(128, SECT_Q);
+		next_silent = nb && read_cd_sub(ap + 1, 1, nb, 0x02, SECT_Q) == 0 && sector_zero(nb);
+		free(nb);
+	}
+	if (!next_silent) return;
+	memset(s0, 0, RAW_SIZE);
+	logf("sector %u: first pregap sector of the first audio track read as junk, stored as silence", ap);
+}
+
 static int q_needed(uint32_t lba, uint32_t count);
+static int read_cd_q(uint32_t lba, uint32_t count, uint8_t *buf);
 static int read_cd(uint32_t lba, uint32_t count, uint8_t *buf)
+{
+	int r = read_cd_q(lba, count, buf);
+	if (r == 0 && g_ntracks > 1) pregap_transition(lba, count, buf);
+	return r;
+}
+
+static int read_cd_q(uint32_t lba, uint32_t count, uint8_t *buf)
 {
 	// A USB SuperDrive reads Q at about 2x but without it at 5-8x: read Q only where the ripper looks
 	// at it, elsewhere the Q bytes are left zero (counted as "no Q", like a drive that gives none)
