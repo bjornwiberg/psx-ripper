@@ -1,5 +1,5 @@
-// Remote view simulator: the app's own screens and the real web server (source/remote.cpp) on
-// this computer, so the remote view can be tried without a console.
+// Remote control simulator: the app's own screens and the real web server (source/remote.cpp) on
+// this computer, so the remote view and MCP can be tried without a console.
 //   make -C tests/host remote      then open http://<this computer>:8090 (a phone on the same network works)
 // Two drives with discs; the buttons on the page (or the keyboard) move through the app's screens.
 // Nothing reads discs here: identify, rips and USB are the stubs of the UI tests.
@@ -36,13 +36,14 @@ int main(int argc, char **argv)
 	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
 	select_card(0);
 
-	g_remote = 1;
+	g_remote = g_mcp = g_status_json = 1;   // every switch on (Settings → Remote control turns them off)
 	static const RemoteHooks hooks = {status_json, NULL, remote_press};
 	remote_init(&hooks);
-	remote_set(1);
+	mcp_init(&g_mcp_hooks, APP_VERSION);
+	remote_apply();
 	char ip[32];
 	remote_ip(ip, sizeof(ip));
-	printf("remote view: http://%s:%d   (Ctrl-C ends)\n", ip, REMOTE_PORT);
+	printf("remote view: http://%s:%d   MCP: http://%s:%d/mcp   (Ctrl-C ends)\n", ip, REMOTE_PORT, ip, REMOTE_PORT);
 	fflush(stdout);
 	while (!exit_requested) {
 		int a = home_screen();

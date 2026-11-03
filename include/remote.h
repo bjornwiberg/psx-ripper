@@ -1,5 +1,6 @@
-// Remote view: a small web server on port 8090 with an MJPEG stream of the app's screen and a
-// status page in JSON, and a pad in the web page whose buttons press the console's. Switched on in the settings.
+// Remote control: a small web server on port 8090. Its paths each have a switch in the settings
+// (Settings → Remote control): the remote view (an MJPEG stream of the app's screen and a page with
+// a pad whose buttons press the console's), MCP (POST /mcp, see mcp.h) and /status.json.
 #ifndef PSXRIP_REMOTE_H
 #define PSXRIP_REMOTE_H
 
@@ -12,7 +13,8 @@ struct RemoteHooks {
 };
 
 void remote_init(const RemoteHooks *hooks);
-void remote_set(int on);                          // start or stop the server
+enum { REMOTE_VIEW = 1, REMOTE_MCP = 2, REMOTE_STATUS = 4 };
+void remote_set(int paths);                       // the paths that answer (REMOTE_*); the server runs while any does
 int remote_ip(char *out, int n);                  // the console's IP address, 0 on success
 
 #endif

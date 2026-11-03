@@ -387,6 +387,57 @@ static void audit_scenarios()
 	if (bad) g_fail += bad; else printf("ok   the audit log screen (levels, paging, undo, sources)%s\n", g_sfx_sv ? " (sv)" : "");
 }
 
+// ---------------------------------------------------------------- remote control and the [MCP] indicator
+static void remote_scenarios()
+{
+	const char *sfx = g_sfx_sv ? "-sv" : "";
+	auto shot = [&](const char *name) {
+		char nm[96];
+		snprintf(nm, sizeof nm, "%s%s", name, sfx);
+		save(nm);
+		size_t b0 = g_fail;
+		check(nm);
+		printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+	};
+	auto need = [&](bool ok, const char *what) { if (!ok) { printf("FAIL %s%s\n", what, sfx); g_fail++; } };
+	int keep[3] = {g_remote, g_mcp, g_status_json};
+	DriveCfg sd = g_std;
+	const time_t when = 1793530800;
+	// the settings: "Remote control", X opens its menu; MCP off: no indicator
+	g_remote = 1; g_mcp = 0; g_status_json = 1;
+	g_boxes.clear(); settings_draw(8, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); shot("settings-remote-control");
+	need(has_text(g_sfx_sv ? "Fjärrstyrning" : "Remote control"), "the settings row is called Remote control");
+	need(!has_text("[MCP]"), "[MCP] shows while MCP is off");
+	// the menu: three switches, the focused one says where it answers
+	g_boxes.clear(); remote_control_draw(0); shot("remote-control-view");
+	need(has_text(g_sfx_sv ? "Fjärrvisning" : "Remote view") && has_text("MCP") && has_text("status.json"), "the menu's three rows");
+	need(has_text(":8090/"), "the remote view row says its address");
+	g_mcp = 1;
+	g_boxes.clear(); remote_control_draw(1); shot("remote-control-mcp-on");
+	need(has_text("[MCP]"), "no [MCP] on the menu while MCP is on");
+	need(has_text(":8090/mcp"), "the MCP row says its address");
+	g_remote = 0; g_status_json = 0;
+	g_boxes.clear(); remote_control_draw(2); shot("remote-control-status-off");
+	need(has_text(":8090/status.json"), "the status.json row says its address");
+	// the indicator on the other screens
+	g_boxes.clear(); settings_draw(0, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); shot("settings-mcp-indicator");
+	need(has_text("[MCP]"), "no [MCP] on the settings while MCP is on");
+	reset_all(); usb(0, 0);
+	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577); ripped(0, 1, 0);
+	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
+	int list[NCARDS], nc = card_list(list);
+	g_boxes.clear(); home_draw(list, nc, 0); shot("home-mcp-indicator");
+	need(has_text("[MCP]"), "no [MCP] on the home screen while MCP is on");
+	g_mcp = 0;
+	g_boxes.clear(); home_draw(list, nc, 0);
+	need(!has_text("[MCP]"), "[MCP] on the home screen while MCP is off");
+	g_boxes.clear(); about_draw(); need(!has_text("[MCP]"), "[MCP] on About while MCP is off");
+	g_mcp = 1;
+	g_boxes.clear(); about_draw(); need(has_text("[MCP]"), "no [MCP] on About while MCP is on");
+	g_remote = keep[0]; g_mcp = keep[1]; g_status_json = keep[2];
+	reset_all();
+}
+
 int main()
 {
 	system("mkdir -p out");
@@ -940,8 +991,44 @@ int main()
 	// the audit log screen, in both languages
 	host_lang = PS3_LANG_SWEDISH; lang_init(); g_sfx_sv = 1;
 	audit_scenarios();
+	remote_scenarios();
 	host_lang = PS3_LANG_ENGLISH_US; lang_init(); g_sfx_sv = 0;
 	audit_scenarios();
+	remote_scenarios();
+	{   // the remote control's switches in the config: an old remote=1 (before the switches) also
+		// turned on /status.json, so it still does; MCP is off unless the file says otherwise
+		system("rm -rf out/audit out/psxrip.cfg");
+		audit_init("out/audit", &vf_io);
+		audit_set_hooks(set_setting_hook, NULL);
+		int bad = 0;
+		auto load = [](const char *txt) {
+			FILE *f = fopen("out/psxrip.cfg", "w");
+			if (f) { fputs(txt, f); fclose(f); }
+			g_remote = g_mcp = g_status_json = 0;
+			g_cfg_primed = false; cfg_load(); cfg_prime();
+		};
+		load("remote=1\n");
+		if (g_remote != 1 || g_status_json != 1 || g_mcp != 0) { printf("FAIL remote=1 migrated to view %d, status.json %d, mcp %d\n", g_remote, g_status_json, g_mcp); bad++; }
+		load("remote=0\n");
+		if (g_remote || g_status_json || g_mcp) { printf("FAIL remote=0 migrated to view %d, status.json %d, mcp %d\n", g_remote, g_status_json, g_mcp); bad++; }
+		load("remote=1\nmcp=1\nstatus_json=0\n");
+		if (g_remote != 1 || g_status_json != 0 || g_mcp != 1) { printf("FAIL the switches read as view %d, status.json %d, mcp %d\n", g_remote, g_status_json, g_mcp); bad++; }
+		char txt[4096];
+		cfg_text(txt, sizeof txt);
+		if (!strstr(txt, "\nremote=1\n") || !strstr(txt, "\nmcp=1\n") || !strstr(txt, "\nstatus_json=0\n")) { printf("FAIL the switches in the config text\n"); bad++; }
+		// a change is a setting row of the audit log, and the undo hook applies it
+		g_input_src = AU_PAD;
+		g_mcp = 0; cfg_save();
+		AuditRow r[4];
+		int n = audit_events(AU_SETTINGS, NULL, r, 4);
+		if (n != 1 || strcmp(r[0].what, "mcp") || strcmp(r[0].before, "1") || strcmp(r[0].after, "0")) { printf("FAIL the mcp change in the audit log (%d rows)\n", n); bad++; }
+		if (set_setting_hook("status_json", "1") != 0 || g_status_json != 1) { printf("FAIL status_json through the undo hook\n"); bad++; }
+		if (set_setting_hook("mcp", "1") != 0 || g_mcp != 1) { printf("FAIL mcp through the undo hook\n"); bad++; }
+		g_remote = g_mcp = g_status_json = 0;
+		system("rm -rf out/audit out/psxrip.cfg");
+		audit_init("out/audit", &vf_io);
+		if (bad) g_fail += bad; else printf("ok   the remote control's switches in the config (migration of remote=1, audit, undo)\n");
+	}
 	{   // undoing an audit_mb row applies the size cap at once (the kept sectors over it go)
 		system("rm -rf out/audit out/psxrip.cfg");
 		audit_init("out/audit", &vf_io);

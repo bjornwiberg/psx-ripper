@@ -1,7 +1,10 @@
-// Remote view (see remote.h): MJPEG stream of the UI canvas, /status.json and a pad (POST /pad). System dialogs are drawn by the PS3 on top of the app and are not included.
+// Remote control (see remote.h): MJPEG stream of the UI canvas and a pad (POST /pad), POST /mcp and
+// /status.json, each path only while its switch is on. System dialogs are drawn by the PS3 on top
+// of the app and are not included.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/thread.h>
 #include <sys/socket.h>
@@ -16,9 +19,13 @@
 #include "ui.h"
 #include "lang.h"
 #include "remote.h"
+#include "mcp.h"
+
+#define MCP_MAX_RESPONSE (512 * 1024)   // a screenshot (base64) is the largest answer
 
 static RemoteHooks g_hooks;
-static volatile int g_on = 0, g_listen = -1, g_running = 0;
+static volatile int g_paths = 0, g_listen = -1, g_running = 0;
+static volatile int g_mcp_busy = 0;   // one MCP request at a time (two clients: one waits)
 
 int remote_ip(char *out, int n)
 {
@@ -74,27 +81,101 @@ static int send_all(int s, const void *p, int n)
 
 static int send_str(int s, const char *t) { return send_all(s, t, strlen(t)); }
 
+// The Content-Length of a request (its header name in any case, as HTTP allows), 0 when it has
+// none; a value too large to be real comes back as INT_MAX.
+static int content_length(const char *req, const char *hend)
+{
+	for (const char *l = strstr(req, "\r\n"); l && l + 2 < hend; l = strstr(l + 2, "\r\n")) {
+		if (strncasecmp(l + 2, "Content-Length:", 15)) continue;
+		const char *v = l + 17;
+		while (*v == ' ' || *v == '\t') v++;
+		long x = 0;
+		for (; *v >= '0' && *v <= '9'; v++) if ((x = x * 10 + (*v - '0')) > 0x7FFFFFFF / 10) return 0x7FFFFFFF;
+		return (int)x;
+	}
+	return 0;
+}
+
+static const char *http_reason(int st)
+{
+	return st == 200 ? "OK" : st == 202 ? "Accepted" : st == 403 ? "Forbidden" : st == 413 ? "Payload Too Large" : "Bad Request";
+}
+
+static void send_json(int s, int status, const char *js)
+{
+	char hdr[160];
+	snprintf(hdr, sizeof(hdr), "HTTP/1.0 %d %s\r\nContent-Type: application/json\r\nCache-Control: no-store\r\nContent-Length: %d\r\n\r\n",
+	         status, http_reason(status), (int)strlen(js));
+	if (!send_str(s, hdr)) send_str(s, js);
+}
+
+// POST /mcp: the body (at most MCP_MAX_REQUEST bytes, by its Content-Length; part of it may have
+// come with the headers) through mcp_handle, its answer with the status mcp_handle gives.
+static void mcp_request(int s, const char *got, int have, int want)
+{
+	if (!(g_paths & REMOTE_MCP)) {   // the agent learns why, and what to do about it
+		send_json(s, 403, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32000,\"message\":"
+		          "\"MCP is off on the console. Turn it on in PSX RiPPER: Settings → Remote control → MCP.\"}}");
+		return;
+	}
+	if (want > MCP_MAX_REQUEST) {   // refused before reading it
+		char js[160];
+		snprintf(js, sizeof(js), "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Request too large (at most %d bytes)\"}}", MCP_MAX_REQUEST);
+		send_json(s, 413, js);
+		return;
+	}
+	char *body = (char *)malloc(want + 1), *out = (char *)malloc(MCP_MAX_RESPONSE);
+	if (body && out) {
+		int n = have < want ? have : want;
+		memcpy(body, got, n);
+		while (n < want) {
+			int r = recv(s, body + n, want - n, 0);
+			if (r <= 0) break;   // the client stopped sending: what came is parsed (and refused)
+			n += r;
+		}
+		body[n] = 0;
+		while (__sync_lock_test_and_set(&g_mcp_busy, 1)) usleep(5 * 1000);
+		int st = mcp_handle(body, n, out, MCP_MAX_RESPONSE);
+		__sync_lock_release(&g_mcp_busy);
+		if (st == 202) send_str(s, "HTTP/1.0 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+		else send_json(s, st, out);
+	}
+	free(body);
+	free(out);
+}
+
 static void client_thread(void *arg)
 {
 	int s = (int)(long)arg;
+	// a client that stops sending must not hold the thread: give up after a while
+	struct timeval rt = {10, 0};
+	setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &rt, sizeof(rt));
 	char req[2048];
 	int n = 0;
-	// read the headers and, for a POST, the (small) body
+	// read the headers and, for a POST, the (small) body; /mcp reads its own (larger) body
+	const char *hend = NULL;
 	for (;;) {
 		int r = recv(s, req + n, sizeof(req) - 1 - n, 0);
 		if (r <= 0) break;
 		n += r; req[n] = 0;
 		char *e = strstr(req, "\r\n\r\n");
 		if (!e) { if (n >= (int)sizeof(req) - 1) break; continue; }
-		const char *cl = strstr(req, "Content-Length:");
-		int want = cl ? atoi(cl + 15) : 0;
-		if ((int)(req + n - (e + 4)) >= want || n >= (int)sizeof(req) - 1) break;
+		hend = e + 4;
+		if (!strncmp(req, "POST /mcp", 9) || (int)(req + n - hend) >= content_length(req, hend) || n >= (int)sizeof(req) - 1) break;
 	}
 	req[n] = 0;
-	const char *body = strstr(req, "\r\n\r\n");
-	body = body ? body + 4 : "";
+	const char *body = hend ? hend : "";
+	const int view = g_paths & REMOTE_VIEW;
+	const char *not_found = "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n";
 
-	if (!strncmp(req, "GET /stream", 11) || !strncmp(req, "GET /shot.jpg", 13)) {
+	if (!strncmp(req, "POST /mcp", 9) && (req[9] == ' ' || req[9] == '?')) {
+		if (hend) mcp_request(s, hend, req + n - hend, content_length(req, hend));
+		else send_str(s, "HTTP/1.0 400 Bad Request\r\nContent-Length: 0\r\n\r\n");   // headers over 2 KB
+	} else if (!strncmp(req, "GET /status.json", 16) && !(g_paths & REMOTE_STATUS)) {
+		send_str(s, not_found);
+	} else if (!view && strncmp(req, "GET /status.json", 16)) {   // the remote view's paths, and anything else
+		send_str(s, not_found);
+	} else if (!strncmp(req, "GET /stream", 11) || !strncmp(req, "GET /shot.jpg", 13)) {
 		JpgBuf jb = {NULL, 0, 0};
 		uint8_t *rgb = (uint8_t *)malloc(ui_w() / 2 * (ui_h() / 2) * 3);
 		if (rgb && !strncmp(req, "GET /stream", 11)) {
@@ -103,7 +184,7 @@ static void client_thread(void *arg)
 			struct timeval tv = {10, 0};
 			setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 			if (!send_str(s, "HTTP/1.0 200 OK\r\nCache-Control: no-cache\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n")) {
-				while (g_on) {
+				while (g_paths & REMOTE_VIEW) {
 					int len = encode_frame(&jb, rgb);
 					char ph[128];
 					int k = snprintf(ph, sizeof(ph), "--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", len);
@@ -223,9 +304,9 @@ static void server_thread(void *arg)
 		sysThreadExit(0);
 	}
 	g_listen = ls;
-	while (g_on) {
+	while (g_paths) {
 		int s = accept(ls, NULL, NULL);
-		if (s < 0) { if (!g_on) break; usleep(100 * 1000); continue; }
+		if (s < 0) { if (!g_paths) break; usleep(100 * 1000); continue; }
 		sys_ppu_thread_t t;
 		// low priority (higher number): never compete with the rip threads
 		if (sysThreadCreate(&t, client_thread, (void *)(long)s, 2000, 0x8000, 0, (char *)"psxremote")) close(s);
@@ -241,15 +322,16 @@ void remote_init(const RemoteHooks *hooks)
 	netCtlInit();
 }
 
-void remote_set(int on)
+void remote_set(int paths)
 {
-	if (on && !g_running) {
-		g_on = 1;
+	int was = g_paths;
+	g_paths = paths;   // a path whose switch went off stops answering at once
+	if (paths && !g_running) {
 		g_running = 1;
 		sys_ppu_thread_t t;
 		if (sysThreadCreate(&t, server_thread, NULL, 2000, 0x4000, 0, (char *)"psxremoted")) g_running = 0;
-	} else if (!on && g_on) {
-		g_on = 0;                       // stream clients stop after their current frame
+	} else if (!paths && was) {
+		// stream clients stop after their current frame
 		int ls = g_listen;
 		if (ls >= 0) { shutdown(ls, SHUT_RDWR); close(ls); }   // wakes accept()
 	}

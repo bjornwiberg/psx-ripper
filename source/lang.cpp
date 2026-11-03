@@ -83,7 +83,7 @@ static const char *en[STR_COUNT] = {
 	"%sUnreadable so far: %u · fixed: %u",
 	"Cancelling… waiting for the drive to finish",
 	"Re-reading uncertain sectors slowly",
-	"Remote view",
+	"Remote control",
 	"Webhooks",
 	"On · %s:%d",
 	"On · %s",
@@ -329,6 +329,12 @@ static const char *en[STR_COUNT] = {
 	"Redo %s?",
 	"Redo all changes to %s?",
 	"Redoing %s, please wait",
+	"Remote view",
+	"MCP",
+	"status.json",
+	"The screen and a pad in a web browser: http://%s:%d/",
+	"An AI agent (MCP client) can read and control the app: http://%s:%d/mcp",
+	"The drives' state as JSON, for other programs: http://%s:%d/status.json",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -408,7 +414,7 @@ static const char *sv[STR_COUNT] = {
 	"%sOläsbara hittills: %u · lagade: %u",
 	"Avbryter … väntar på att läsaren blir klar",
 	"Läser om osäkra sektorer långsamt",
-	"Fjärrvisning",
+	"Fjärrstyrning",
 	"Webhooks",
 	"På · %s:%d",
 	"På · %s",
@@ -654,6 +660,12 @@ static const char *sv[STR_COUNT] = {
 	"Gör om %s?",
 	"Gör om alla ändringar på %s?",
 	"Gör om %s, vänta",
+	"Fjärrvisning",
+	"MCP",
+	"status.json",
+	"Skärmen och en handkontroll i webbläsaren: http://%s:%d/",
+	"En AI-agent (MCP-klient) kan läsa av och styra appen: http://%s:%d/mcp",
+	"Läsarnas läge som JSON, för andra program: http://%s:%d/status.json",
 };
 
 static const char **table = en;

@@ -34,6 +34,7 @@
 #include "md5.h"
 #include "redump.h"
 #include "remote.h"
+#include "mcp.h"
 #include "webhook.h"
 #include "vfs.h"
 #include "usbodd.h"
@@ -51,7 +52,11 @@ static int g_mounttest = 0;   // flag psxrip.mounttest: rip the image Cobra has 
 #endif
 static char g_outdir[64] = "/dev_hdd0/PSXISO";
 static int g_redump = RD_OFF;      // verification against Redump: off, online or local copy
-static int g_remote = 0;           // remote view (web server on port 8090)
+// Remote control (Settings → Remote control): the web server on port 8090 runs while any is on
+static int g_remote = 0;           // remote view: the stream and the pad page
+static int g_mcp = 0;              // MCP (POST /mcp): an agent reads and controls the app
+static int g_status_json = 0;      // /status.json
+static int g_cfg_status_seen;      // cfg_load: the file had status_json= (else it is migrated)
 enum { CHECK_OFF, CHECK_ON, CHECK_BITPERFECT };
 static int g_webhook_on = 0;       // send webhooks
 static char g_webhook[512] = "";   // webhook address (http://...); may contain a secret id, never logged
@@ -179,6 +184,8 @@ static int cfg_apply_line(const char *line)
 	else if (!strncmp(line, "autostart=", 10)) g_std.autostart = atoi(line + 10) ? 1 : 0;
 	else if (!strncmp(line, "redump=", 7)) { int v = atoi(line + 7); if (v < RD_OFF || v > RD_LOCAL) return 0; g_redump = v; }
 	else if (!strncmp(line, "remote=", 7)) g_remote = atoi(line + 7) ? 1 : 0;
+	else if (!strncmp(line, "mcp=", 4)) g_mcp = atoi(line + 4) ? 1 : 0;
+	else if (!strncmp(line, "status_json=", 12)) { g_status_json = atoi(line + 12) ? 1 : 0; g_cfg_status_seen = 1; }
 	else if (!strncmp(line, "check=", 6)) { int v = atoi(line + 6); if (v < CHECK_OFF || v > CHECK_BITPERFECT) return 0; g_std.check = v; }
 	else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
 	else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
@@ -224,11 +231,13 @@ static int cfg_load()
 	FILE *f = fopen(CFG_PATH, "r");
 	if (!f) return 0;
 	char line[640];
+	g_cfg_status_seen = 0;
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = 0;
 		cfg_apply_line(line);
 	}
 	fclose(f);
+	if (!g_cfg_status_seen) g_status_json = g_remote;   // a config from before the switches: the remote view had /status.json
 	return 1;
 }
 
@@ -309,6 +318,7 @@ static void cfg_text(char *txt, size_t cap)
 	put("webhook_headers_on=%d\n", g_webhook_hdr_on);
 	for (int i = 0; i < WH_HEADERS; i++) put("webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
 	put("audit_mb=%d\n", g_audit_mb);
+	put("mcp=%d\nstatus_json=%d\n", g_mcp, g_status_json);
 }
 
 // At start: the file may have been edited (over FTP) while the app was off. Every setting whose
@@ -352,6 +362,9 @@ static void cfg_save_src(AuditSrc src)
 static void cfg_save() { cfg_save_src(g_input_src); }
 
 static void setting_applied(const char *key);   // below: what the screens do besides changing the value
+
+// The web server's paths after a switch changed (the server runs while any is on).
+static void remote_apply() { remote_set((g_remote ? REMOTE_VIEW : 0) | (g_mcp ? REMOTE_MCP : 0) | (g_status_json ? REMOTE_STATUS : 0)); }
 
 // The audit's undo of a setting row: the value goes through the config parser like a line in the
 // file, and the save records the change as an undo.
@@ -682,6 +695,8 @@ static void draw_backdrop()
 		int y = ui_h() / 10 - ui_line(UI_SMALL) * 3 / 4;
 		ui_text(UI_TITLE, ui_w() / 2, y, 0xFFFFFF, "PSX RiPPER", UI_CENTER);
 		ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) - ui_line(UI_SMALL) / 4, 0x8890A8, "v" APP_VERSION, UI_CENTER);
+		// an agent may be controlling the app: always in sight, at the left of the title
+		if (g_mcp) ui_text(UI_SMALL, ui_w() / 6, y + (ui_line(UI_TITLE) - ui_line(UI_SMALL)) / 2, 0xF0C060, "[MCP]");
 	}
 }
 
@@ -4318,8 +4333,66 @@ static void audit_screen()
 	}
 }
 
+// Remote control (a row of the settings): the web server's three switches, each with where it
+// answers. One frame of it (the UI tests draw it).
+static void remote_control_draw(int row)
+{
+	draw_backdrop();
+	ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_L_REMOTE), UI_CENTER);
+	int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10;
+	int left = ui_w() / 6, right = ui_w() * 5 / 6;
+	const StrId labels[3] = {STR_L_REMOTE_VIEW, STR_L_MCP, STR_L_STATUS_JSON}, help[3] = {STR_RC_VIEW_HELP, STR_RC_MCP_HELP, STR_RC_STATUS_HELP};
+	const int on[3] = {g_remote, g_mcp, g_status_json};
+	for (int r = 0; r < 3; r++) {
+		int y = top + r * lh;
+		char v[64];
+		snprintf(v, sizeof(v), r == row ? "‹ %s ›" : "%s", T(on[r] ? STR_ON : STR_OFF));
+		if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh, 0x703D6FD9);
+		ui_text(UI_BODY, left, y, 0xFFFFFF, T(labels[r]));
+		ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
+	}
+	char ip[20], det[200];
+	remote_ip(ip, sizeof(ip));
+	snprintf(det, sizeof(det), T(help[row]), ip, REMOTE_PORT);
+	footer_note(det);
+	const char *b[] = {"updown", "leftright", "circle"};
+	const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_BACK)};
+	hint_bar(b, l, 3);
+}
+
+static void remote_control_screen()
+{
+	int row = 0;
+	const int NROWS = 3;
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			remote_control_draw(row);
+			g_drawn = 2;
+			g_backdrop_shown = 0;
+		}
+		flip_frame();
+		int p = pad_pressed();
+		if (p) g_redraw = 2;
+		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
+		if (p & B_DOWN) row = (row + 1) % NROWS;
+		if (p & B_R2) row = NROWS - 1;   // all rows show: L2/R2 go to the first / last
+		if (p & B_L2) row = 0;
+		if (p & B_CIRCLE) return;
+		if (!(p & (B_LEFT | B_RIGHT | B_CROSS))) continue;   // X switches too
+		int &v = row == 0 ? g_remote : row == 1 ? g_mcp : g_status_json;
+		v = !v;
+		remote_apply();
+		cfg_save();   // the audit log gets the change
+		logf("remote control: view=%d mcp=%d status_json=%d", g_remote, g_mcp, g_status_json);
+		if (row == 0 && g_remote) notify_url(STR_REMOTE_HELP, "");
+	}
+}
+
 // Settings (START): the standard for the drives (speed, re-reads, check, eject, rip at once; a
-// drive can have its own values, SELECT on its card), Redump, the Redump copy, remote view, webhooks.
+// drive can have its own values, SELECT on its card), Redump, the Redump copy, remote control, webhooks.
 // One frame of the settings (START): the rows with their values and the buttons of the focused
 // row. (The UI tests on the host draw it.)
 static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, int webhook_on, int rdcount, const char *rdver, time_t rdwhen)
@@ -4362,8 +4435,8 @@ static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, i
 	snprintf(vals[12], sizeof(vals[12]), "v%s", APP_VERSION);
 	const char *labels[13] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
 	                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_AUDIT), T(STR_L_AUDIT_MB), T(STR_L_ABOUT)};
-	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 10 | 1u << 12);   // the Redump download, the audit log and About are actions
-	if (row == 10 || row == 12) {   // the audit log and About: X opens them
+	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 8 | 1u << 10 | 1u << 12);   // the Redump download, remote control, the audit log and About are actions
+	if (row == 8 || row == 10 || row == 12) {   // remote control, the audit log and About: X opens them
 		const char *b[] = {"updown", "l2r2", "cross", "circle"};
 		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_OPEN), T(STR_HINT_BACK)};
 		hint_bar(b, l, 4);
@@ -4380,7 +4453,7 @@ static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, i
 
 static void settings_screen()
 {
-	int redump = g_redump, remote = g_remote, webhook_on = g_webhook_on, row = 0;
+	int redump = g_redump, webhook_on = g_webhook_on, row = 0;
 	const int NROWS = 13;   // the last row opens About
 	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	DriveCfg sd = g_std;
@@ -4393,7 +4466,7 @@ static void settings_screen()
 		if (g_redraw > 0) {
 			g_redraw = 0;
 			g_drawn = 2;
-			settings_draw(row, sd, redump, remote, webhook_on, rdcount, rdver, rdwhen);
+			settings_draw(row, sd, redump, g_remote || g_mcp || g_status_json, webhook_on, rdcount, rdver, rdwhen);
 		}
 		flip_frame();
 		int p = pad_pressed();
@@ -4416,7 +4489,13 @@ static void settings_screen()
 		}
 		if ((p & B_CROSS) && row == 10) {
 			audit_screen();
-			sd = g_std; redump = g_redump; remote = g_remote; webhook_on = g_webhook_on;   // an undo may have changed them
+			sd = g_std; redump = g_redump; webhook_on = g_webhook_on;   // an undo may have changed them
+			pad_pressed();
+			g_redraw = 2;
+			continue;
+		}
+		if ((p & B_CROSS) && row == 8) {
+			remote_control_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
@@ -4435,7 +4514,7 @@ static void settings_screen()
 			continue;
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (row == 7 || row == 10 || row == 12) d = 0;
+		if (row == 7 || row == 8 || row == 10 || row == 12) d = 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) {
 			reset = own_dialog(T(STR_RESET_Q), 1) == 1;
@@ -4446,8 +4525,9 @@ static void settings_screen()
 				snprintf(g_name_pat, sizeof(g_name_pat), "%s", FN_PRESETS[0]);
 				sd = st;
 				redump = RD_OFF;
-				if (remote) remote_set(0);
-				remote = 0; webhook_on = 0; g_webhook_step = 5;
+				g_remote = g_mcp = g_status_json = 0;
+				remote_apply();
+				webhook_on = 0; g_webhook_step = 5;
 				g_audit_mb = 256;
 			}
 		}
@@ -4469,10 +4549,6 @@ static void settings_screen()
 				fn_step(d);
 			} else if (row == 6) {
 				redump = (redump + (d > 0 ? 1 : 2)) % 3;
-			} else if (row == 8) {
-				remote = !remote;
-				remote_set(remote);
-				if (remote) notify_url(STR_REMOTE_HELP, "");
 			} else if (row == 9) {
 				webhook_on = !webhook_on;
 			} else if (row == 11) {   // right = more; no wrap-around: 256 to 1 MB would drop the kept sectors
@@ -4485,7 +4561,7 @@ static void settings_screen()
 			}
 		}
 		if (d || reset) {   // every change is applied and saved immediately
-			g_std = sd; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on;
+			g_std = sd; g_redump = redump; g_webhook_on = webhook_on;
 			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
 			cfg_save();
 			audit_apply_cap();   // a smaller size drops the oldest kept sectors at once
@@ -4647,7 +4723,7 @@ static void cards_take_pending()
 // view, the cards' own copies of the drive settings and destinations, the cards' re-check).
 static void setting_applied(const char *key)
 {
-	if (!strcmp(key, "remote")) remote_set(g_remote);
+	if (!strcmp(key, "remote") || !strcmp(key, "mcp") || !strcmp(key, "status_json")) remote_apply();
 	else if (!strcmp(key, "drive_bd")) card_take_cfg(0, CF_DRIVE);
 	else if (!strncmp(key, "drive_usb", 9) && key[9] >= '0' && key[9] <= '7' && !key[10]) {
 		for (int c = 1; c < NCARDS; c++) if (usbodd_port(c - 1) == key[9] - '0') card_take_cfg(c, CF_DRIVE);
@@ -4658,6 +4734,14 @@ static void setting_applied(const char *key)
 	}
 	for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
 }
+
+// MCP's hooks into the app. Until the tools are wired up, each answers that it is not available yet.
+static int mcp_na(char *out, int n) { snprintf(out, n, "not available yet"); return -1; }
+static int mcp_na_shot(unsigned char **, int *) { return -1; }
+static int mcp_na_set(const char *, const char *, const char *, char *out, int n) { return mcp_na(out, n); }
+static int mcp_na_ui(const char *, const char *, char *out, int n) { return mcp_na(out, n); }
+static int mcp_na_log(int, int, char *out, int n) { return mcp_na(out, n); }
+static const McpHooks g_mcp_hooks = {mcp_na, mcp_na_shot, mcp_na, mcp_na, mcp_na_set, mcp_na_ui, mcp_na_log};
 
 // The system reports discs only for its own drive and nothing about USB drives coming and going.
 // A thread looks every two seconds: USB optical drives (model and port when they connect, unlock
@@ -6632,7 +6716,8 @@ int main(int argc, char *argv[])
 	{
 		static const RemoteHooks hooks = {status_json, debug_cmd, remote_press};
 		remote_init(&hooks);
-		if (g_remote) remote_set(1);
+		mcp_init(&g_mcp_hooks, APP_VERSION);
+		remote_apply();
 	}
 	// card 0 = the PS3's drive: its destination is the "outdir" of the config (the hard disk while
 	// a chosen USB drive is out); the USB drives get theirs when they connect
