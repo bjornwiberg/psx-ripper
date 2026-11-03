@@ -37,6 +37,7 @@
 #include "webhook.h"
 #include "vfs.h"
 #include "usbodd.h"
+#include "audit.h"
 #include <sys/mutex.h>
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
@@ -45,7 +46,9 @@ static const char *SBI_DIR = "/dev_hdd0/tmp/sbi";
 static int g_mounttest = 0;   // flag psxrip.mounttest: rip the image Cobra has mounted (development aid)
 
 // ---------------------------------------------------------------- settings (saved in CFG_PATH)
+#ifndef CFG_PATH   // the host tests point it elsewhere
 #define CFG_PATH "/dev_hdd0/tmp/psxrip.cfg"
+#endif
 static char g_outdir[64] = "/dev_hdd0/PSXISO";
 static int g_redump = RD_OFF;      // verification against Redump: off, online or local copy
 static int g_remote = 0;           // remote view (web server on port 8090)
@@ -143,6 +146,73 @@ static void card_store(int c)
 	if (port >= 0 && port < 8) g_usbcfg[port] = d;
 }
 static volatile int g_card = 0;       // changes only while no identification, rip or repair runs
+// The audit's image access: the app's own file layer (it also reaches exFAT drives).
+static void *au_open(const char *p, const char *m) { return vf_open(p, m); }
+static size_t au_read(void *f, void *p, size_t n) { return vf_read((VFile *)f, p, n); }
+static size_t au_write(void *f, const void *p, size_t n) { return vf_write((VFile *)f, p, n); }
+static int au_seek(void *f, uint64_t pos) { return vf_seek((VFile *)f, pos); }
+static int au_close(void *f) { return vf_close((VFile *)f); }
+static const AuditIo vf_io = {au_open, au_read, au_write, au_seek, au_close};
+
+// Where the last button press came from (set by pad_pressed): the source of the changes made after it.
+static AuditSrc g_input_src = AU_PAD;
+static int g_audit_mb = 256;   // size cap of the audit's sector files, in MB
+static const int audit_mb_steps[] = {1, 2, 4, 8, 16, 32, 64, 128, 256};
+static void audit_apply_cap() { audit_set_cap((uint64_t)g_audit_mb << 20); }
+
+// One config line ("key=value") into the settings. Returns 1 when it was a known key with a usable
+// value, else 0 (nothing changed).
+static int cfg_apply_line(const char *line)
+{
+	if (!strncmp(line, "outdir=", 7)) {
+		if (line[7] != '/' && strncmp(line + 7, "exfat", 5)) return 0;   // also exFAT drives
+		snprintf(g_outdir, sizeof(g_outdir), "%s", line + 7);
+	}
+	else if (!strncmp(line, "retries=", 8)) { int r = atoi(line + 8); if (r < 1 || r > 64) return 0; g_std.retries = r; }
+	else if (!strncmp(line, "speed=", 6)) { int v = atoi(line + 6); if (v < 0 || v > 3) return 0; g_std.speed = v; }
+	else if (!strncmp(line, "eject=", 6)) g_std.eject = atoi(line + 6) ? 1 : 0;
+	else if (!strncmp(line, "autostart=", 10)) g_std.autostart = atoi(line + 10) ? 1 : 0;
+	else if (!strncmp(line, "redump=", 7)) { int v = atoi(line + 7); if (v < RD_OFF || v > RD_LOCAL) return 0; g_redump = v; }
+	else if (!strncmp(line, "remote=", 7)) g_remote = atoi(line + 7) ? 1 : 0;
+	else if (!strncmp(line, "check=", 6)) { int v = atoi(line + 6); if (v < CHECK_OFF || v > CHECK_BITPERFECT) return 0; g_std.check = v; }
+	else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
+	else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
+	else if (!strncmp(line, "webhook_events=", 15)) g_webhook_mask = atoi(line + 15) & ((1 << WH_COUNT) - 1);
+	else if (!strncmp(line, "webhook_headers_on=", 19)) g_webhook_hdr_on = atoi(line + 19) ? 1 : 0;
+	else if (!strncmp(line, "webhook_header", 14) && line[14] >= '1' && line[14] <= '0' + WH_HEADERS && line[15] == '=') {
+		snprintf(g_webhook_hdr[line[14] - '1'], sizeof(g_webhook_hdr[0]), "%s", line + 16);
+		clean_header(g_webhook_hdr[line[14] - '1']);
+	}
+	else if (!strncmp(line, "outdir_usb", 10) && line[10] >= '0' && line[10] <= '7' && line[11] == '=') {   // destination of the USB drive on port N
+		if (line[12] != '/' && strncmp(line + 12, "exfat", 5)) return 0;
+		snprintf(g_outdir_usb[line[10] - '0'], sizeof(g_outdir_usb[0]), "%s", line + 12);
+	}
+	else if ((!strncmp(line, "drive_usb", 9) && line[9] >= '0' && line[9] <= '7' && line[10] == '=') || !strncmp(line, "drive_bd=", 9)) {
+		// drive_bd= / drive_usbN=retries,speed,eject,autostart,check; -1 = the standard
+		DriveCfg c = {1, -1, -1, -1, -1, -1};
+		const char *v = strchr(line, '=') + 1;
+		if (sscanf(v, "%d,%d,%d,%d,%d", &c.retries, &c.speed, &c.eject, &c.autostart, &c.check) == 5 &&
+		    (c.retries == -1 || (c.retries >= 1 && c.retries <= 64)) && c.speed >= -1 && c.speed <= 3 && c.eject >= -1 && c.eject <= 1 &&
+		    c.autostart >= -1 && c.autostart <= 1 && c.check >= -1 && c.check <= CHECK_BITPERFECT) {
+			if (line[6] == 'b') g_bdcfg = c; else g_usbcfg[line[9] - '0'] = c;
+		} else return 0;
+	}
+	else if (!strncmp(line, "name_pattern=", 13) && line[13]) snprintf(g_name_pat, sizeof(g_name_pat), "%s", line + 13);
+	else if (!strncmp(line, "webhook_step=", 13)) {
+		int v = atoi(line + 13), ok = 0;
+		for (int i = 0; i < 7; i++) if (wh_steps[i] == v) { g_webhook_step = v; ok = 1; }
+		if (!ok) return 0;
+	}
+	else if (!strncmp(line, "audit_mb=", 9)) {
+		int v = atoi(line + 9), mb = 256;   // anything but a listed size is the default
+		for (size_t i = 0; i < sizeof(audit_mb_steps) / sizeof(audit_mb_steps[0]); i++) if (audit_mb_steps[i] == v) mb = v;
+		g_audit_mb = mb;
+		audit_apply_cap();
+	}
+	else return 0;
+	return 1;
+}
+
 // Returns 0 when there is no config file yet.
 static int cfg_load()
 {
@@ -151,60 +221,109 @@ static int cfg_load()
 	char line[640];
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = 0;
-		if (!strncmp(line, "outdir=", 7) && (line[7] == '/' || !strncmp(line + 7, "exfat", 5)))   // also exFAT drives
-			snprintf(g_outdir, sizeof(g_outdir), "%s", line + 7);
-		else if (!strncmp(line, "retries=", 8)) { int r = atoi(line + 8); if (r >= 1 && r <= 64) g_std.retries = r; }
-		else if (!strncmp(line, "speed=", 6)) { int v = atoi(line + 6); if (v >= 0 && v <= 3) g_std.speed = v; }
-		else if (!strncmp(line, "eject=", 6)) g_std.eject = atoi(line + 6) ? 1 : 0;
-		else if (!strncmp(line, "autostart=", 10)) g_std.autostart = atoi(line + 10) ? 1 : 0;
-		else if (!strncmp(line, "redump=", 7)) { int v = atoi(line + 7); if (v >= RD_OFF && v <= RD_LOCAL) g_redump = v; }
-		else if (!strncmp(line, "remote=", 7)) g_remote = atoi(line + 7) ? 1 : 0;
-		else if (!strncmp(line, "check=", 6)) { int v = atoi(line + 6); if (v >= CHECK_OFF && v <= CHECK_BITPERFECT) g_std.check = v; }
-		else if (!strncmp(line, "webhook_on=", 11)) g_webhook_on = atoi(line + 11) ? 1 : 0;
-		else if (!strncmp(line, "webhook=", 8)) snprintf(g_webhook, sizeof(g_webhook), "%s", line + 8);
-		else if (!strncmp(line, "webhook_events=", 15)) g_webhook_mask = atoi(line + 15) & ((1 << WH_COUNT) - 1);
-		else if (!strncmp(line, "webhook_headers_on=", 19)) g_webhook_hdr_on = atoi(line + 19) ? 1 : 0;
-		else if (!strncmp(line, "webhook_header", 14) && line[14] >= '1' && line[14] <= '0' + WH_HEADERS && line[15] == '=') {
-			snprintf(g_webhook_hdr[line[14] - '1'], sizeof(g_webhook_hdr[0]), "%s", line + 16);
-			clean_header(g_webhook_hdr[line[14] - '1']);
-		}
-		else if (!strncmp(line, "outdir_usb", 10) && line[10] >= '0' && line[10] <= '7' && line[11] == '=' &&
-		         (line[12] == '/' || !strncmp(line + 12, "exfat", 5)))   // destination of the USB drive on port N
-			snprintf(g_outdir_usb[line[10] - '0'], sizeof(g_outdir_usb[0]), "%s", line + 12);
-		else if ((!strncmp(line, "drive_usb", 9) && line[9] >= '0' && line[9] <= '7' && line[10] == '=') || !strncmp(line, "drive_bd=", 9)) {
-			// drive_bd= / drive_usbN=retries,speed,eject,autostart,check; -1 = the standard
-			DriveCfg c = {1, -1, -1, -1, -1, -1};
-			const char *v = strchr(line, '=') + 1;
-			if (sscanf(v, "%d,%d,%d,%d,%d", &c.retries, &c.speed, &c.eject, &c.autostart, &c.check) == 5 &&
-			    (c.retries == -1 || (c.retries >= 1 && c.retries <= 64)) && c.speed >= -1 && c.speed <= 3 && c.eject >= -1 && c.eject <= 1 &&
-			    c.autostart >= -1 && c.autostart <= 1 && c.check >= -1 && c.check <= CHECK_BITPERFECT) {
-				if (line[6] == 'b') g_bdcfg = c; else g_usbcfg[line[9] - '0'] = c;
-			}
-		}
-		else if (!strncmp(line, "name_pattern=", 13) && line[13]) snprintf(g_name_pat, sizeof(g_name_pat), "%s", line + 13);
-		else if (!strncmp(line, "webhook_step=", 13)) { int v = atoi(line + 13); for (int i = 0; i < 7; i++) if (wh_steps[i] == v) g_webhook_step = v; }
+		cfg_apply_line(line);
 	}
 	fclose(f);
 	return 1;
 }
 
-static void cfg_save()
+// The config text as last written; every line that differs after the next save is an audit row.
+static char g_cfg_last[4096];
+static bool g_cfg_primed = false;   // the first save after start only fills g_cfg_last
+
+// The webhook address may hold a secret id and the headers often hold a token: neither goes into the log.
+static bool cfg_key_secret(const char *key) { return !strcmp(key, "webhook") || (!strncmp(key, "webhook_header", 14) && key[14] >= '1' && key[14] <= '9' && !key[15]); }
+
+// The value of line `key` in text (up to the next newline) into out; false when text has no such line.
+static bool cfg_find(const char *text, const char *key, char *out, size_t n)
+{
+	size_t kl = strlen(key);
+	for (const char *p = text; *p; ) {
+		const char *e = strchr(p, '\n');
+		size_t len = e ? (size_t)(e - p) : strlen(p);
+		if (len > kl && !strncmp(p, key, kl) && p[kl] == '=') {
+			size_t vl = len - kl - 1;
+			if (vl >= n) vl = n - 1;
+			memcpy(out, p + kl + 1, vl);
+			out[vl] = 0;
+			return true;
+		}
+		p += len + (e ? 1 : 0);
+	}
+	return false;
+}
+
+// Logs the lines of `now` that differ from `was` (and lines that vanished) as setting rows.
+// The address and header lines can hold a secret: they are logged as set / cleared, never as text.
+static void cfg_audit_diff(AuditSrc src, const char *was, const char *now)
+{
+	char key[48], a[512], b[512];
+	for (int pass = 0; pass < 2; pass++) {
+		const char *t = pass ? was : now;   // pass 1 finds the lines only `was` had
+		for (const char *p = t; *p; ) {
+			const char *e = strchr(p, '\n'), *eq = (const char *)memchr(p, '=', e ? (size_t)(e - p) : strlen(p));
+			if (eq && (size_t)(eq - p) < sizeof(key)) {
+				memcpy(key, p, eq - p); key[eq - p] = 0;
+				bool in_was = cfg_find(was, key, a, sizeof(a)), in_now = cfg_find(now, key, b, sizeof(b));
+				if (!in_was) a[0] = 0;
+				if (!in_now) b[0] = 0;
+				if ((pass == 0 || !in_now) && (in_was != in_now || strcmp(a, b))) {
+					if (cfg_key_secret(key)) {
+						snprintf(a, sizeof(a), "%s", a[0] ? "set" : "cleared");
+						snprintf(b, sizeof(b), "%s", b[0] ? "set" : "cleared");
+					}
+					audit_setting(src, key, a, b);
+				}
+			}
+			p += (e ? (size_t)(e - p) + 1 : strlen(p));
+		}
+	}
+}
+
+static void cfg_save_src(AuditSrc src)
 {
 	FILE *f = fopen(CFG_PATH, "w");
 	if (!f) return;
+	char txt[sizeof(g_cfg_last)];
+	size_t n = 0;
+	auto put = [&](const char *fmt, ...) {
+		va_list ap;
+		va_start(ap, fmt);
+		if (n < sizeof(txt)) n += vsnprintf(txt + n, sizeof(txt) - n, fmt, ap);
+		va_end(ap);
+		if (n >= sizeof(txt)) n = sizeof(txt) - 1;
+	};
 	const DriveCfg &k = g_std;   // the standard drive settings (the globals follow the card in use)
-	fprintf(f, "outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\nwebhook_step=%d\n",
-	        g_outdir, k.retries, k.speed, k.eject, k.autostart, g_redump, g_remote, g_webhook_on, g_webhook, k.check, g_webhook_mask, g_webhook_step);
+	put("outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\nwebhook_step=%d\n",
+	    g_outdir, k.retries, k.speed, k.eject, k.autostart, g_redump, g_remote, g_webhook_on, g_webhook, k.check, g_webhook_mask, g_webhook_step);
 	if (g_bdcfg.set)
-		fprintf(f, "drive_bd=%d,%d,%d,%d,%d\n", g_bdcfg.retries, g_bdcfg.speed, g_bdcfg.eject, g_bdcfg.autostart, g_bdcfg.check);
-	for (int i = 0; i < 8; i++) if (g_outdir_usb[i][0]) fprintf(f, "outdir_usb%d=%s\n", i, g_outdir_usb[i]);
+		put("drive_bd=%d,%d,%d,%d,%d\n", g_bdcfg.retries, g_bdcfg.speed, g_bdcfg.eject, g_bdcfg.autostart, g_bdcfg.check);
+	for (int i = 0; i < 8; i++) if (g_outdir_usb[i][0]) put("outdir_usb%d=%s\n", i, g_outdir_usb[i]);
 	for (int i = 0; i < 8; i++)
 		if (g_usbcfg[i].set)
-			fprintf(f, "drive_usb%d=%d,%d,%d,%d,%d\n", i, g_usbcfg[i].retries, g_usbcfg[i].speed, g_usbcfg[i].eject, g_usbcfg[i].autostart, g_usbcfg[i].check);
-	fprintf(f, "name_pattern=%s\n", g_name_pat);
-	fprintf(f, "webhook_headers_on=%d\n", g_webhook_hdr_on);
-	for (int i = 0; i < WH_HEADERS; i++) fprintf(f, "webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
+			put("drive_usb%d=%d,%d,%d,%d,%d\n", i, g_usbcfg[i].retries, g_usbcfg[i].speed, g_usbcfg[i].eject, g_usbcfg[i].autostart, g_usbcfg[i].check);
+	put("name_pattern=%s\n", g_name_pat);
+	put("webhook_headers_on=%d\n", g_webhook_hdr_on);
+	for (int i = 0; i < WH_HEADERS; i++) put("webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
+	put("audit_mb=%d\n", g_audit_mb);
+	fputs(txt, f);
 	fclose(f);
+	if (g_cfg_primed) cfg_audit_diff(src, g_cfg_last, txt);
+	snprintf(g_cfg_last, sizeof(g_cfg_last), "%s", txt);
+	g_cfg_primed = true;
+}
+static void cfg_save() { cfg_save_src(g_input_src); }
+
+// The audit's undo of a setting row: the value goes through the config parser like a line in the
+// file, and the save records the change as an undo.
+static int set_setting_hook(const char *key, const char *value)
+{
+	if (cfg_key_secret(key)) return -1;   // its row holds only set / cleared: there is no text to put back
+	char line[700];
+	snprintf(line, sizeof(line), "%s=%s", key, value);
+	if (!cfg_apply_line(line)) return -1;
+	cfg_save_src(AU_UNDO);
+	return 0;
 }
 
 #define RAW_SIZE   2352
@@ -2852,7 +2971,9 @@ static int pad_pressed()
 			now |= pad_state[i];
 		}
 	}
-	int pressed = (now & ~last) | __sync_lock_test_and_set(&g_remote_btn, 0);   // and the web page's pad
+	int remote = __sync_lock_test_and_set(&g_remote_btn, 0);
+	int pressed = (now & ~last) | remote;   // and the web page's pad
+	if (pressed) g_input_src = remote ? AU_REMOTE : AU_PAD;
 	// auto-repeat a single held arrow: first after ~0.4 s, then every ~0.1 s (called once per frame)
 	const int arrows = B_UP | B_DOWN | B_LEFT | B_RIGHT;
 	int a = now & arrows;
@@ -5609,7 +5730,10 @@ int main(int argc, char *argv[])
 	netInitialize();
 	// start-up checks: config, lv1 state after an earlier crash, USB file systems
 	char warn[400] = "";
+	audit_init("/dev_hdd0/tmp/psxrip_audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
 	int had_cfg = cfg_load();
+	audit_apply_cap();   // also without a config file (the default size)
 	card_defaults(g_cards[0]);
 	if (g_bdcfg.set) card_from(g_cards[0], g_bdcfg);
 	if (!had_cfg) { mkdir("/dev_hdd0/tmp", 0777); cfg_save(); logf("startup: no config, defaults written"); }   // editable over FTP

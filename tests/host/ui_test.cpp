@@ -5,6 +5,7 @@
 //  - characters the font does not have (they come out as "?").
 // Run: make -C tests/host   (exit status 1 when a check fails)
 #include "host.h"
+#define CFG_PATH "out/psxrip.cfg"   // not the console's path
 #define main psx_main
 #include "../../source/main.cpp"
 #undef main
@@ -283,6 +284,73 @@ int main()
 		printf("%s settings-about-row\n", g_fail == (int)b0 ? "ok  " : "FAIL");
 	}
 
+	{   // settings in the audit log: what changed, where it came from, no secrets
+		system("rm -rf out/audit out/psxrip.cfg");
+		audit_init("out/audit", &vf_io);
+		audit_set_hooks(set_setting_hook, NULL);
+		g_cfg_primed = false; g_webhook_hdr[0][0] = 0; g_webhook[0] = 0;
+		int bad = 0;
+		AuditRow r[20];
+		auto rows = [&]() { return audit_events(AU_SETTINGS, NULL, r, 20); };
+		g_input_src = AU_PAD;
+		cfg_save();   // the first save after start only primes the last text
+		if (rows() != 0) { printf("FAIL the first cfg_save logged %d rows\n", rows()); bad++; }
+		g_std.speed = 2;
+		cfg_save();
+		int n = rows();
+		if (n != 1 || strcmp(r[0].kind, "setting") || strcmp(r[0].what, "speed") || strcmp(r[0].before, "0") || strcmp(r[0].after, "2") || r[0].src != AU_PAD)
+			{ printf("FAIL speed change: %d rows, %s %s -> %s\n", n, n ? r[0].what : "-", n ? r[0].before : "-", n ? r[0].after : "-"); bad++; }
+		cfg_save();
+		if (rows() != 1) { printf("FAIL a save without a change logged a row\n"); bad++; }
+		snprintf(g_webhook_hdr[0], sizeof(g_webhook_hdr[0]), "X-Token: topsecret");
+		snprintf(g_webhook, sizeof(g_webhook), "http://h/secretid");
+		cfg_save();
+		n = rows();
+		bool hdr = false, url = false;
+		for (int i = 0; i < n; i++) {
+			if (!strcmp(r[i].what, "webhook_header1") && !strcmp(r[i].before, "cleared") && !strcmp(r[i].after, "set")) hdr = true;
+			if (!strcmp(r[i].what, "webhook") && !strcmp(r[i].before, "cleared") && !strcmp(r[i].after, "set")) url = true;
+		}
+		if (n != 3 || !hdr || !url) { printf("FAIL header/address rows: %d rows, header %d, address %d\n", n, hdr, url); bad++; }
+		{   // the secrets are nowhere in the audit directory
+			int leak = system("grep -rq -e topsecret -e secretid out/audit");
+			if (leak == 0) { printf("FAIL a secret reached the audit log\n"); bad++; }
+		}
+		// the remote pad: a press from the web page is a remote source
+		g_remote_btn = B_CROSS;
+		int p = pad_pressed();
+		if (!(p & B_CROSS) || g_input_src != AU_REMOTE) { printf("FAIL remote press source: %d\n", (int)g_input_src); bad++; }
+		g_std.eject = 0;
+		cfg_save();
+		n = rows();
+		if (n != 4 || r[0].src != AU_REMOTE || strcmp(r[0].what, "eject")) { printf("FAIL a change after a remote press is not from the remote\n"); bad++; }
+		// undo through the hook: the setting goes back and the undo is its own source
+		char why[200];
+		g_std.speed = 2;
+		uint32_t sid = 0;
+		for (int i = 0; i < n; i++) if (!strcmp(r[i].what, "speed")) sid = r[i].id;
+		if (audit_undo_row(sid, why, sizeof why) != 0 || g_std.speed != 0) { printf("FAIL undo of speed: %s (speed %d)\n", why, g_std.speed); bad++; }
+		n = rows();
+		bool us = false, um = false;   // the hook's save row, then the undo marker row
+		for (int i = 0; i < n; i++) {
+			if (r[i].src == AU_UNDO && !strcmp(r[i].kind, "setting") && !strcmp(r[i].what, "speed") && !strcmp(r[i].after, "0")) us = true;
+			if (r[i].src == AU_UNDO && !strcmp(r[i].kind, "undo")) um = true;
+		}
+		if (!us || !um) { printf("FAIL the undo's rows: setting %d, marker %d\n", us, um); bad++; }
+		// R4: a header (or the address) is never put back with "set" / "cleared"
+		snprintf(g_webhook_hdr[0], sizeof(g_webhook_hdr[0]), "X-Token: topsecret");
+		uint32_t hid = 0;
+		n = rows();
+		for (int i = 0; i < n; i++) if (!strcmp(r[i].what, "webhook_header1")) hid = r[i].id;
+		if (set_setting_hook("webhook_header1", "cleared") == 0 || strcmp(g_webhook_hdr[0], "X-Token: topsecret")) { printf("FAIL the hook accepted a header\n"); bad++; }
+		if (audit_undo_row(hid, why, sizeof why) == 0 || strcmp(g_webhook_hdr[0], "X-Token: topsecret") || !strstr(why, "webhook_header1")) { printf("FAIL undo of a header row: \"%s\"\n", why); bad++; }
+		// audit_mb: the listed sizes, anything else is 256
+		cfg_apply_line("audit_mb=16");
+		if (g_audit_mb != 16) { printf("FAIL audit_mb=16 gave %d\n", g_audit_mb); bad++; }
+		cfg_apply_line("audit_mb=3");
+		if (g_audit_mb != 256) { printf("FAIL audit_mb=3 gave %d\n", g_audit_mb); bad++; }
+		if (bad) g_fail += bad; else printf("ok   settings in the audit log (changes, source, secrets, undo, audit_mb)\n");
+	}
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;
