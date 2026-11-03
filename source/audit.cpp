@@ -34,8 +34,10 @@ static int g_slot_rr;
 
 // jobs begun and not ended in this run: their job<N>.bin is never pruned and their rows not undone
 static uint32_t g_running[16];
-// how each ended job ended (its result row): only a finished job's sectors can be undone
+// how each ended job ended (its result row), and which jobs are rips: a rip's sectors can only be
+// undone when it finished
 static std::map<uint32_t, std::string> g_results;
+static std::map<uint32_t, bool> g_rips;
 static uint64_t g_cap = 256ull << 20, g_blob_total;   // the audit_mb setting; all job<N>.bin together
 static int (*g_set_setting)(const char *key, const char *value);
 static void (*g_recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n);
@@ -251,6 +253,7 @@ void audit_init(const char *dir, const AuditIo *io)
 	memset(g_slots, 0, sizeof g_slots);
 	memset(g_running, 0, sizeof g_running);
 	g_results.clear();
+	g_rips.clear();
 	char p[256], t[260];
 	path_log(p, sizeof p);
 	snprintf(t, sizeof t, "%s.tmp", p);
@@ -262,6 +265,7 @@ void audit_init(const char *dir, const AuditIo *io)
 		if (r.id >= g_next_id) g_next_id = r.id + 1;
 		if (r.job >= g_next_job) g_next_job = r.job + 1;
 		if (!strcmp(r.kind, "result")) g_results[r.job] = r.after;
+		if (!strcmp(r.kind, "job") && !strcmp(r.what, "rip")) g_rips[r.job] = true;
 	});
 	// Drop a half line so the next row does not glue onto it. If that fails, keep the original and
 	// end the half line with a newline; it has no end marker, so it is never read as a row.
@@ -336,6 +340,7 @@ uint32_t audit_job_begin(AuditSrc src, const char *disc, const char *name, const
 	s->src = src;
 	copyn(s->disc, sizeof s->disc, disc);
 	for (uint32_t &r : g_running) if (!r) { r = job; break; }
+	if (what && !strcmp(what, "rip")) g_rips[job] = true;
 	write_row(job, src, AU_RIPS, disc, "job", what, name, "", NULL, false, 0, 0);
 	unlock();
 	return job;
@@ -461,10 +466,11 @@ static const char *sector_block(const AuditRow &r, char *msg, size_t n, bool *re
 	}
 	// A rip that did not finish wrote into a .part that is gone; its rows name the image an earlier
 	// rip left under that name, which must not get this job's first reads. No result row and not
-	// running: the app stopped in the middle, the same.
+	// running: the app stopped in the middle, the same. A repair or check writes into the image
+	// itself: its rows stay reversible whatever its result.
 	auto res = g_results.find(r.job);
-	if (res == g_results.end() || res->second != "finished") {
-		snprintf(msg, n, "job %u was not finished (%s)", (unsigned)r.job, res == g_results.end() ? "no result" : res->second.c_str());
+	if (g_rips.count(r.job) && (res == g_results.end() || res->second != "finished")) {
+		snprintf(msg, n, "the rip was not finished (%s)", res == g_results.end() ? "no result" : res->second.c_str());
 		return msg;
 	}
 	char p[256];

@@ -530,7 +530,6 @@ static void undo_refused_while_disc_busy(int &bad)
 	CHECK(audit_undo_row(id, why, sizeof why) == 0 && img_is(1, 0x11));
 }
 
-// the image got its old bytes back but the undo row could not be appended: say so, and the next
 // the recheck gets every undone sector of the file and whether its restored bytes are all zero
 // (an unreadable sector the rip filled with zeros)
 static void recheck_gets_sectors(int &bad)
@@ -555,7 +554,8 @@ static void recheck_gets_sectors(int &bad)
 }
 
 // R8: a rip that was cancelled (or never ended) wrote into a .part that is gone; its rows name the
-// image an earlier rip left there, so their undo is refused; a finished job's undo works
+// image an earlier rip left there, so their undo is refused; a finished rip's undo works. A repair
+// writes into the image itself: its rows stay reversible whatever its result (R8b).
 static void undo_refused_unfinished(int &bad)
 {
 	fresh();
@@ -566,17 +566,17 @@ static void undo_refused_unfinished(int &bad)
 	char why[128] = "";
 	AuditRow r;
 	CHECK(row_of(job, sector_id(job, 0), &r) && r.reversible == 0);
-	CHECK(audit_undo_job(job, why, sizeof why) == -1 && strstr(why, "not finished"));
+	CHECK(audit_undo_job(job, why, sizeof why) == -1 && strstr(why, "rip was not finished"));
 	CHECK(img_is(1, 0x22));
 	// no result row and not running (the app stopped in the middle): the same
 	uint32_t j2 = audit_job_begin(AU_PAD, "V:4", "V", "rip");
 	repair_write(j2, 2, 0x11, 0x22);
 	audit_init(DIR, &IO);   // a new run: nothing is running
 	why[0] = 0;
-	CHECK(audit_undo_job(j2, why, sizeof why) == -1 && strstr(why, "not finished"));
+	CHECK(audit_undo_job(j2, why, sizeof why) == -1 && strstr(why, "rip was not finished"));
 	CHECK(img_is(2, 0x22));
-	// the result survives a reload: a finished job stays reversible
-	uint32_t j3 = audit_job_begin(AU_PAD, "W:4", "W", "repair");
+	// the result survives a reload: a finished rip stays reversible
+	uint32_t j3 = audit_job_begin(AU_PAD, "W:4", "W", "rip");
 	repair_write(j3, 3, 0x11, 0x22);
 	audit_job_end(j3, "finished");
 	audit_init(DIR, &IO);
@@ -584,6 +584,28 @@ static void undo_refused_unfinished(int &bad)
 	CHECK(audit_undo_job(j3, why, sizeof why) == 0 && img_is(3, 0x11));
 }
 
+static void undo_unfinished_repair(int &bad)
+{
+	fresh();
+	img_make(4);
+	char why[128] = "";
+	AuditRow r;
+	// a cancelled repair: what it wrote can be undone
+	uint32_t job = audit_job_begin(AU_PAD, "U:4", "U", "repair");
+	repair_write(job, 1, 0x11, 0x22);
+	audit_job_end(job, "cancelled");
+	CHECK(row_of(job, sector_id(job, 0), &r) && r.reversible == 1);
+	CHECK(audit_undo_job(job, why, sizeof why) == 0 && img_is(1, 0x11));
+	// a repair without a result row (the app stopped in the middle), after a reload: nothing runs
+	uint32_t j2 = audit_job_begin(AU_PAD, "V:4", "V", "repair");
+	repair_write(j2, 2, 0x11, 0x22);
+	audit_init(DIR, &IO);
+	CHECK(row_of(j2, sector_id(j2, 0), &r) && r.reversible == 1);
+	why[0] = 0;
+	CHECK(audit_undo_job(j2, why, sizeof why) == 0 && img_is(2, 0x11));
+}
+
+// the image got its old bytes back but the undo row could not be appended: say so, and the next
 // undo only adds the missing row instead of being refused forever
 static void undo_row_lost(int &bad)
 {
@@ -681,6 +703,7 @@ int main()
 		{"undo_missing_blob", undo_missing_blob}, {"undo_setting", undo_setting}, {"private_setting_not_reversible", private_setting_not_reversible},
 		{"recheck_called_once_per_file", recheck_called_once_per_file}, {"undo_disc_since", undo_disc_since},
 		{"recheck_gets_sectors", recheck_gets_sectors}, {"undo_refused_unfinished", undo_refused_unfinished},
+		{"undo_unfinished_repair", undo_unfinished_repair},
 		{"undo_refused_while_disc_busy", undo_refused_while_disc_busy}, {"undo_row_lost", undo_row_lost},
 		{"cap_keeps_running_job", cap_keeps_running_job}, {"cap_lowered_prunes_now", cap_lowered_prunes_now},
 	};
