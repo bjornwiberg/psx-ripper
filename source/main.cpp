@@ -108,6 +108,7 @@ struct Card {
 	char rd[160];                     // Redump line, "" = none
 	volatile int prev_rip, repair_n, space_short;
 	volatile int recheck;             // the destination changed: look again for an earlier rip there
+	volatile int pend_cfg;            // CF_*: config the card takes when its job ends (an undo changed it meanwhile)
 	char base[256];                   // destination + file name without extension (g_base of the card)
 	char outdir[64];                  // chosen destination
 	char dest[64];                    // used: the chosen one, or the hard disk while it is out
@@ -4565,19 +4566,40 @@ static void card_set_outdir(int c, const char *dir)
 	logf("card %d: destination %s", c, dir);
 }
 
+enum { CF_OUTDIR = 1, CF_DRIVE = 2 };
+
+// Card c takes its destination (CF_OUTDIR) and drive settings (CF_DRIVE) from the config. A card
+// with a job keeps them until the job ends, as the screens do (they apply to the next job).
+static void card_take_cfg(int c, int what)
+{
+	Card &k = g_cards[c];
+	if (card_busy(c)) { k.pend_cfg |= what; k.recheck = 1; return; }
+	k.pend_cfg &= ~what;
+	int port = c ? usbodd_port(c - 1) : 0;
+	if (c && (port < 0 || port > 7)) return;
+	if (what & CF_DRIVE) card_from(k, c ? g_usbcfg[port] : g_bdcfg);
+	if (what & CF_OUTDIR) card_apply_outdir(c, !c ? g_outdir : g_outdir_usb[port][0] ? g_outdir_usb[port] : HDD_DIR);
+}
+
+// The cards whose job ended take what changed meanwhile (home screen, each round).
+static void cards_take_pending()
+{
+	for (int c = 0; c < NCARDS; c++)
+		if (g_cards[c].pend_cfg && !card_busy(c)) card_take_cfg(c, g_cards[c].pend_cfg);
+}
+
 // After the audit's undo changed a setting: the same follow-ups as the settings screens (the web
 // view, the cards' own copies of the drive settings and destinations, the cards' re-check).
 static void setting_applied(const char *key)
 {
 	if (!strcmp(key, "remote")) remote_set(g_remote);
-	else if (!strcmp(key, "drive_bd")) card_from(g_cards[0], g_bdcfg);
+	else if (!strcmp(key, "drive_bd")) card_take_cfg(0, CF_DRIVE);
 	else if (!strncmp(key, "drive_usb", 9) && key[9] >= '0' && key[9] <= '7' && !key[10]) {
-		for (int c = 1; c < NCARDS; c++) if (usbodd_port(c - 1) == key[9] - '0') card_from(g_cards[c], g_usbcfg[key[9] - '0']);
+		for (int c = 1; c < NCARDS; c++) if (usbodd_port(c - 1) == key[9] - '0') card_take_cfg(c, CF_DRIVE);
 	}
-	else if (!strcmp(key, "outdir")) card_apply_outdir(0, g_outdir);
+	else if (!strcmp(key, "outdir")) card_take_cfg(0, CF_OUTDIR);
 	else if (!strncmp(key, "outdir_usb", 10) && key[10] >= '0' && key[10] <= '7' && !key[11]) {
-		for (int c = 1; c < NCARDS; c++)
-			if (usbodd_port(c - 1) == key[10] - '0') card_apply_outdir(c, g_outdir_usb[key[10] - '0'][0] ? g_outdir_usb[key[10] - '0'] : HDD_DIR);
+		for (int c = 1; c < NCARDS; c++) if (usbodd_port(c - 1) == key[10] - '0') card_take_cfg(c, CF_OUTDIR);
 	}
 	for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
 }
@@ -5100,6 +5122,7 @@ static int home_screen()
 		if (g_rd_seq != last_rd) { last_rd = g_rd_seq; g_redraw = 2; }
 		// disc events and identification, one drive at a time
 		if (!g_ident_busy && !g_repairing) {
+			cards_take_pending();   // an undo changed a busy card's destination or drive settings
 			for (int i = 0; i < nc; i++) {
 				Card &k = g_cards[list[i]];
 				if (k.job) continue;   // ripping: the rip has the drive

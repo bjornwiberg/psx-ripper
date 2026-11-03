@@ -596,6 +596,25 @@ int main()
 			card_apply_outdir(0, g_outdir);
 			if (strcmp(g_outdir, "/dev_hdd0/SELF") || strcmp(g_cards[0].outdir, "/dev_hdd0/SELF") || strcmp(g_cards[0].dest, "/dev_hdd0/SELF"))
 				{ printf("FAIL card_apply_outdir with the global itself: %s\n", g_outdir); bad++; }
+			// M2: a card with a running job keeps its destination and drive settings until the job ends
+			{
+				Card &k0 = g_cards[0];
+				snprintf(g_outdir, sizeof(g_outdir), "/dev_hdd0/OTHER");
+				card_apply_outdir(0, g_outdir);
+				card_from(k0, g_bdcfg);
+				int sp = k0.speed;
+				k0.job = 1; k0.recheck = 0;
+				if (set_setting_hook("outdir", "/dev_hdd0/BUSY") != 0 || strcmp(g_outdir, "/dev_hdd0/BUSY") || strcmp(k0.outdir, "/dev_hdd0/OTHER") || strcmp(k0.dest, "/dev_hdd0/OTHER") || !k0.recheck)
+					{ printf("FAIL outdir undo on a busy card: card %s / %s, global %s\n", k0.outdir, k0.dest, g_outdir); bad++; }
+				if (set_setting_hook("drive_bd", "5,3,1,0,1") != 0 || g_bdcfg.speed != 3 || k0.speed != sp)
+					{ printf("FAIL drive_bd undo on a busy card: card speed %d\n", k0.speed); bad++; }
+				cards_take_pending();   // still busy: nothing
+				if (strcmp(k0.outdir, "/dev_hdd0/OTHER") || k0.speed != sp) { printf("FAIL pending applied while busy\n"); bad++; }
+				k0.job = 0;
+				cards_take_pending();   // the job ended
+				if (strcmp(k0.outdir, "/dev_hdd0/BUSY") || strcmp(k0.dest, "/dev_hdd0/BUSY") || k0.speed != 3 || !k0.recheck)
+					{ printf("FAIL pending after the job: card %s, speed %d\n", k0.outdir, k0.speed); bad++; }
+			}
 			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 0;
 			set_setting_hook("name_pattern", "%D");
 			bool all = true;
