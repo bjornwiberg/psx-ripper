@@ -21,7 +21,15 @@ static void *io_open(const char *p, const char *m) { return fopen(p, m); }
 static size_t io_read(void *f, void *p, size_t n) { return fread(p, 1, n, (FILE *)f); }
 static size_t io_write(void *f, const void *p, size_t n) { return fwrite(p, 1, n, (FILE *)f); }
 static int io_seek(void *f, uint64_t pos) { return fseek((FILE *)f, (long)pos, SEEK_SET); }
-static int io_close(void *f) { return fclose((FILE *)f); }
+// set by a test: the next close of an image file makes audit.log read-only (the disk filling up
+// between the sector write and its undo row)
+static int g_log_fails_after_close;
+static int io_close(void *f)
+{
+	int rc = fclose((FILE *)f);
+	if (g_log_fails_after_close) { g_log_fails_after_close = 0; if (system("chmod 444 ./out/audit/audit.log")) {} }
+	return rc;
+}
 static const AuditIo IO = {io_open, io_read, io_write, io_seek, io_close};
 
 static const char *DIR = "./out/audit";
@@ -469,6 +477,58 @@ static void undo_disc_since(int &bad)
 	CHECK(img_is(0, 0x0A) && img_is(1, 0x0B));   // the other disc is left alone
 }
 
+// a repair running on the same disc (second drive) blocks undo of an older job's rows
+static void undo_refused_while_disc_busy(int &bad)
+{
+	fresh();
+	img_make(4);
+	uint32_t a = audit_job_begin(AU_PAD, "U:4", "U", "repair");
+	repair_write(a, 1, 0x11, 0x22);
+	audit_job_end(a, "finished");
+	uint32_t b = audit_job_begin(AU_PAD, "U:4", "U", "repair");
+	uint32_t id = sector_id(a, 0);
+	AuditRow r;
+	CHECK(row_of(a, id, &r) && r.reversible == 0);
+	char why[128] = "", want[24];
+	CHECK(audit_undo_row(id, why, sizeof why) == -1);
+	snprintf(want, sizeof want, "row %u", (unsigned)id);
+	CHECK(strstr(why, want) && strstr(why, "running"));
+	CHECK(img_is(1, 0x22));
+	CHECK(audit_undo_job(a, why, sizeof why) == -1 && img_is(1, 0x22));
+	CHECK(audit_undo_disc_since("U:4", 0, why, sizeof why) == -1 && img_is(1, 0x22));
+	audit_job_end(b, "finished");
+	CHECK(audit_undo_row(id, why, sizeof why) == 0 && img_is(1, 0x11));
+}
+
+// the image got its old bytes back but the undo row could not be appended: say so, and the next
+// undo only adds the missing row instead of being refused forever
+static void undo_row_lost(int &bad)
+{
+	fresh();
+	hooks_reset();
+	img_make(4);
+	uint32_t job = audit_job_begin(AU_PAD, "U:4", "U", "repair");
+	repair_write(job, 1, 0x11, 0x22);
+	repair_write(job, 2, 0x11, 0x22);
+	audit_job_end(job, "finished");
+	uint32_t id1 = sector_id(job, 0), id2 = sector_id(job, 1);
+	char why[128] = "", want[24];
+	g_log_fails_after_close = 1;
+	CHECK(audit_undo_job(job, why, sizeof why) == -1);
+	snprintf(want, sizeof want, "row %u", (unsigned)id2);
+	CHECK(strstr(why, want) && strstr(why, "could not be written"));
+	CHECK(img_is(2, 0x11) && img_is(1, 0x22));   // newest restored, then stopped
+	CHECK(g_recheck_calls == 1);                  // the file did change
+	if (system("chmod 644 ./out/audit/audit.log")) {}
+	AuditRow r;
+	CHECK(row_of(job, id2, &r) && r.undone == 0 && r.reversible == 1);
+	CHECK(audit_undo_job(job, why, sizeof why) == 0);
+	CHECK(img_is(1, 0x11) && img_is(2, 0x11));
+	CHECK(row_of(job, id2, &r) && r.undone == 1 && undo_rows_naming(job, id2) == 1);
+	CHECK(row_of(job, id1, &r) && r.undone == 1 && undo_rows_naming(job, id1) == 1);
+	audit_set_hooks(NULL, NULL);
+}
+
 static bool blob_exists(uint32_t job)
 {
 	char p[256];
@@ -537,6 +597,7 @@ int main()
 		{"undo_job_newest_first", undo_job_newest_first}, {"undo_job_stops_at_refusal", undo_job_stops_at_refusal},
 		{"undo_missing_blob", undo_missing_blob}, {"undo_setting", undo_setting},
 		{"recheck_called_once_per_file", recheck_called_once_per_file}, {"undo_disc_since", undo_disc_since},
+		{"undo_refused_while_disc_busy", undo_refused_while_disc_busy}, {"undo_row_lost", undo_row_lost},
 		{"cap_keeps_running_job", cap_keeps_running_job}, {"cap_lowered_prunes_now", cap_lowered_prunes_now},
 	};
 	if (system("mkdir -p out")) {}

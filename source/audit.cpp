@@ -28,7 +28,7 @@ static AuditIo g_io;
 static uint32_t g_next_id = 1, g_next_job = 1;
 
 // what the running jobs need on every row: where they came from and how many sectors they have
-struct JobSlot { uint32_t job; AuditSrc src; char disc[96]; uint32_t blobs; };
+struct JobSlot { uint32_t job; AuditSrc src; char disc[96]; uint32_t blobs; char file[256]; };
 static JobSlot g_slots[8];
 static int g_slot_rr;
 
@@ -281,12 +281,12 @@ static JobSlot *slot_of(uint32_t job)
 	scan_log([sp, job](const AuditRow &r) {
 		if (r.job != job) return;
 		if (!strcmp(r.kind, "job")) { sp->src = r.src; copyn(sp->disc, sizeof sp->disc, r.disc); }
-		else if (!strcmp(r.kind, "sector")) sp->blobs = r.blob + 1;
+		else if (!strcmp(r.kind, "sector")) { sp->blobs = r.blob + 1; copyn(sp->file, sizeof sp->file, r.file); }
 	});
 	return s;
 }
 
-// Appends one row; the caller holds the lock. Returns the id.
+// Appends one row; the caller holds the lock. Returns the id, 0 when the row could not be written.
 static uint32_t write_row(uint32_t job, AuditSrc src, AuditDom dom, const char *disc, const char *kind,
                           const char *what, const char *before, const char *after,
                           const char *file, bool sector, uint32_t lba, uint32_t blob)
@@ -311,12 +311,13 @@ static uint32_t write_row(uint32_t job, AuditSrc src, AuditDom dom, const char *
 	n += (size_t)snprintf(line + n, sizeof line - n, "\tend=1\n");
 	char p[256];
 	path_log(p, sizeof p);
+	bool ok = false;
 	if (FILE *fp = fopen(p, "ab")) {
-		fwrite(line, 1, n, fp);   // one write of the whole line
-		fflush(fp);
-		fclose(fp);
+		ok = fwrite(line, 1, n, fp) == n;   // one write of the whole line
+		if (fflush(fp) != 0) ok = false;
+		if (fclose(fp) != 0) ok = false;
 	}
-	return id;
+	return ok ? id : 0;
 }
 
 uint32_t audit_job_begin(AuditSrc src, const char *disc, const char *name, const char *what)
@@ -377,6 +378,7 @@ void audit_sector(uint32_t job, const char *file, uint32_t lba, const uint8_t *o
 		g_blob_total += BLOB_ROW;
 	}
 	s->blobs++;
+	copyn(s->file, sizeof s->file, file);
 	char what[24];
 	snprintf(what, sizeof what, "lba %u", (unsigned)lba);
 	write_row(job, s->src, AU_RIPS, s->disc, "sector", what, "", "", file, true, lba, blob);
@@ -427,11 +429,22 @@ static const char *base_name(const char *path)
 
 static uint8_t g_blob_buf[BLOB_ROW], g_sec_buf[SECTOR];   // under the lock
 
-// Why a sector row cannot be undone now, or NULL; then g_blob_buf holds its old and new bytes.
-// Caller holds the lock.
-static const char *sector_block(const AuditRow &r, char *msg, size_t n)
+// Why a sector row cannot be undone now, or NULL; then g_blob_buf holds its old and new bytes and
+// *restored says the image already has the old bytes (an undo whose log row was lost: only the row
+// is missing). Caller holds the lock.
+static const char *sector_block(const AuditRow &r, char *msg, size_t n, bool *restored)
 {
+	*restored = false;
 	if (is_running(r.job)) { snprintf(msg, n, "job %u is still running", (unsigned)r.job); return msg; }
+	// another job writing the same rip reads and writes sectors outside the lock: wait for it
+	for (uint32_t j : g_running) {
+		if (!j) continue;
+		JobSlot *s = slot_of(j);
+		if ((r.disc[0] && !strcmp(s->disc, r.disc)) || (r.file[0] && !strcmp(s->file, r.file))) {
+			snprintf(msg, n, "a job on this disc is running (job %u)", (unsigned)j);
+			return msg;
+		}
+	}
 	char p[256];
 	path_blob(p, sizeof p, r.job);
 	FILE *f = fopen(p, "rb");
@@ -440,8 +453,9 @@ static const char *sector_block(const AuditRow &r, char *msg, size_t n)
 	if (!kept) { snprintf(msg, n, "the sector's bytes are no longer kept (size limit)"); return msg; }
 	void *img = g_io.open ? g_io.open(r.file, "rb") : NULL;
 	if (!img) { snprintf(msg, n, "cannot open %s", base_name(r.file)); return msg; }
-	bool same = g_io.seek(img, (uint64_t)r.lba * SECTOR) == 0 && g_io.read(img, g_sec_buf, SECTOR) == SECTOR &&
-	            !memcmp(g_sec_buf, g_blob_buf + SECTOR, SECTOR);
+	bool got = g_io.seek(img, (uint64_t)r.lba * SECTOR) == 0 && g_io.read(img, g_sec_buf, SECTOR) == SECTOR;
+	bool same = got && !memcmp(g_sec_buf, g_blob_buf + SECTOR, SECTOR);
+	if (got && !same && !memcmp(g_sec_buf, g_blob_buf, SECTOR)) *restored = true, same = true;
 	g_io.close(img);
 	if (!same) { snprintf(msg, n, "sector %u of %s changed since", (unsigned)r.lba, base_name(r.file)); return msg; }
 	return NULL;
@@ -451,7 +465,7 @@ static const char *sector_block(const AuditRow &r, char *msg, size_t n)
 static const char *row_block(const AuditRow &r, const UndoState &s, char *msg, size_t n)
 {
 	if (s.is_undone(r.id)) { snprintf(msg, n, "already undone"); return msg; }
-	if (!strcmp(r.kind, "sector")) return sector_block(r, msg, n);
+	if (!strcmp(r.kind, "sector")) { bool restored; return sector_block(r, msg, n, &restored); }
 	if (!strcmp(r.kind, "setting")) {
 		auto it = s.cur.find(r.what);
 		if (it == s.cur.end() || it->second != r.after) { snprintf(msg, n, "setting %.100s changed since", r.what); return msg; }
@@ -598,23 +612,29 @@ static int undo_sectors(const std::vector<Target> &ts, const std::vector<std::st
 		copyn(r.file, sizeof r.file, files[t.file].c_str());
 		copyn(r.disc, sizeof r.disc, discs[t.disc].c_str());
 		lock();
-		const char *e = sector_block(r, msg, sizeof msg);
-		if (!e) {
+		bool restored;
+		const char *e = sector_block(r, msg, sizeof msg, &restored);
+		bool written = false;
+		if (!e && !restored) {
+			// A failed close may still have written the sector; the next undo then finds the old
+			// bytes and only adds the row.
 			void *img = g_io.open(r.file, "r+b");
 			bool ok = img && g_io.seek(img, (uint64_t)r.lba * SECTOR) == 0 && g_io.write(img, g_blob_buf, SECTOR) == SECTOR;
 			if (img && g_io.close(img) != 0) ok = false;
-			if (ok) {
-				char id[16];
-				snprintf(id, sizeof id, "%u", (unsigned)r.id);
-				write_row(r.job, AU_UNDO, r.dom, r.disc, "undo", id, "", "", NULL, false, 0, 0);
-			} else {
-				snprintf(msg, sizeof msg, "cannot write %s", base_name(r.file));
+			if (!ok) { snprintf(msg, sizeof msg, "cannot write %s", base_name(r.file)); e = msg; }
+			written = ok;
+		}
+		if (!e) {
+			char id[16];
+			snprintf(id, sizeof id, "%u", (unsigned)r.id);
+			if (!write_row(r.job, AU_UNDO, r.dom, r.disc, "undo", id, "", "", NULL, false, 0, 0)) {
+				snprintf(msg, sizeof msg, "undone, but the log row could not be written");
 				e = msg;
 			}
 		}
 		unlock();
+		if (written || restored) touched[t.file] = 1;
 		if (e) { say(why, n, "row %u: %s", t.id, e); rc = -1; break; }
-		touched[t.file] = 1;
 	}
 	void (*recheck)(const char *) = g_recheck;
 	if (recheck)
@@ -639,8 +659,9 @@ static int undo_setting_row(const AuditRow &r, char *why, size_t n)
 	char id[16];
 	snprintf(id, sizeof id, "%u", (unsigned)r.id);
 	lock();
-	write_row(0, AU_UNDO, AU_SETTINGS, "", "undo", id, r.after, r.before, NULL, false, 0, 0);
+	uint32_t ok = write_row(0, AU_UNDO, AU_SETTINGS, "", "undo", id, r.after, r.before, NULL, false, 0, 0);
 	unlock();
+	if (!ok) { say(why, n, "row %u: %s", r.id, "undone, but the log row could not be written"); return -1; }
 	return 0;
 }
 
