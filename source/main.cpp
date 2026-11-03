@@ -4550,10 +4550,12 @@ static int card_list(int *out)
 static void card_apply_outdir(int c, const char *dir)
 {
 	Card &k = g_cards[c];
-	snprintf(k.outdir, sizeof(k.outdir), "%s", dir);
-	snprintf(k.dest, sizeof(k.dest), "%s", dir);
-	if (c == 0) snprintf(g_outdir, sizeof(g_outdir), "%s", dir);
-	else if (usbodd_port(c - 1) >= 0) snprintf(g_outdir_usb[usbodd_port(c - 1)], sizeof(g_outdir_usb[0]), "%s", dir);
+	// dir may be one of these buffers (the undo passes the global): never copy one onto itself
+	auto put = [dir](char *to, size_t n) { if (to != dir) snprintf(to, n, "%s", dir); };
+	put(k.outdir, sizeof(k.outdir));
+	put(k.dest, sizeof(k.dest));
+	if (c == 0) put(g_outdir, sizeof(g_outdir));
+	else if (usbodd_port(c - 1) >= 0) put(g_outdir_usb[usbodd_port(c - 1)], sizeof(g_outdir_usb[0]));
 	k.recheck = 1;
 }
 static void card_set_outdir(int c, const char *dir)

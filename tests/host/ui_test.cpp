@@ -591,6 +591,11 @@ int main()
 			snprintf(g_outdir, sizeof(g_outdir), "/dev_hdd0/PSXISO");
 			if (set_setting_hook("outdir", "/dev_hdd0/OTHER") != 0 || strcmp(g_cards[0].outdir, "/dev_hdd0/OTHER") || strcmp(g_cards[0].dest, "/dev_hdd0/OTHER") || !g_cards[0].recheck)
 				{ printf("FAIL card outdir after undo\n"); bad++; }
+			// M1: the card takes the global destination itself (the copy is not made onto itself)
+			snprintf(g_outdir, sizeof(g_outdir), "/dev_hdd0/SELF");
+			card_apply_outdir(0, g_outdir);
+			if (strcmp(g_outdir, "/dev_hdd0/SELF") || strcmp(g_cards[0].outdir, "/dev_hdd0/SELF") || strcmp(g_cards[0].dest, "/dev_hdd0/SELF"))
+				{ printf("FAIL card_apply_outdir with the global itself: %s\n", g_outdir); bad++; }
 			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 0;
 			set_setting_hook("name_pattern", "%D");
 			bool all = true;
