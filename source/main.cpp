@@ -1214,6 +1214,28 @@ static void serial_from_cnf(const char *cnf, char *out)
 	}
 }
 
+// The disc ID out of the volume name, for the earliest discs that have no SYSTEM.CNF (they boot
+// PSX.EXE; Gokujou Parodius Da! Deluxe Pack, SLPS-00002, says "SLPS00002"): four letters and five
+// digits, with or without "_" / "-" between them -> "SLPS_000.02". Empty when it is not one.
+static void serial_from_volume(const char *vol, char *out)
+{
+	out[0] = 0;
+	char c[9];
+	int n = 0;
+	for (const char *p = vol; *p; p++) {
+		if (n == 4 && (*p == '_' || *p == '-')) continue;
+		if (n == 9) return;   // longer than an ID
+		c[n++] = *p;
+	}
+	if (n != 9) return;
+	for (int i = 0; i < 9; i++) {
+		int ok = i < 4 ? ((c[i] >= 'A' && c[i] <= 'Z') || (c[i] >= 'a' && c[i] <= 'z')) : (c[i] >= '0' && c[i] <= '9');
+		if (!ok) return;
+	}
+	for (int i = 0; i < 4; i++) out[i] = (c[i] >= 'a' && c[i] <= 'z') ? c[i] - 32 : c[i];
+	out[4] = '_'; out[5] = c[4]; out[6] = c[5]; out[7] = c[6]; out[8] = '.'; out[9] = c[7]; out[10] = c[8]; out[11] = 0;
+}
+
 static void detect_disc_id()
 {
 	uint8_t pvd[2048], dir[2048], cnf[2048];
@@ -1234,7 +1256,8 @@ static void detect_disc_id()
 	if (read_user_sector(root, dir)) { logf("root dir read failed"); return; }
 	uint32_t lba, size;
 	if (find_file(dir, 2048, "SYSTEM.CNF", &lba, &size) || read_user_sector(lba, cnf)) {
-		logf("SYSTEM.CNF not found (vol=%s)", g_volid);
+		serial_from_volume(g_volid, g_serial);   // the earliest discs boot PSX.EXE and have none
+		logf("SYSTEM.CNF not found (vol=%s), serial from the volume name: %s", g_volid, g_serial[0] ? g_serial : "none");
 		return;
 	}
 	cnf[2047] = 0;
