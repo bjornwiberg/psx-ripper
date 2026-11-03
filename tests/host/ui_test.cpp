@@ -164,6 +164,13 @@ int main()
 		if (bad) g_fail += bad; else printf("ok   disc ID from SYSTEM.CNF (upper and lower case)\n");
 	}
 
+	{   // a disc pressed with another game's ID: Castlevania Chronicles says SLUS_013.48 (Tennis)
+		const char *a = title_override("SLUS_013.48", "KONAMI"), *b = title_override("SLUS_013.48", "AGETEC");
+		const char *c = lookup_title("SLUS_013.48");
+		if (!a || strcmp(a, "Castlevania Chronicles") || b || !c || strcmp(c, "Tennis")) { printf("FAIL title override: %s / %s / %s\n", a ? a : "-", b ? b : "-", c ? c : "-"); g_fail++; }
+		else printf("ok   Castlevania Chronicles despite its SLUS_013.48, Tennis stays Tennis\n");
+	}
+
 	{   // every text in both languages: a StrId without an entry in a table would be null
 		int missing = 0;
 		for (int lang : {PS3_LANG_SWEDISH, PS3_LANG_ENGLISH_US}) {
