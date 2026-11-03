@@ -248,6 +248,7 @@ struct Ctx {
 	uint32_t g_leadout;
 	char g_serial[16];             // "SLUS_005.53"
 	char g_volid[33];
+	char g_publisher[129];   // the ISO volume's publisher ("KONAMI"), for discs whose ID is wrong
 	char g_name[128];              // title (or volume id)
 	char g_base[256];              // "/dev_hdd0/PSXISO/NAME [SERIAL]"
 	// Q and LibCrypt
@@ -357,6 +358,7 @@ static void ctx_init(int c)
 #define g_leadout (CX.g_leadout)
 #define g_serial (CX.g_serial)
 #define g_volid (CX.g_volid)
+#define g_publisher (CX.g_publisher)
 #define g_name (CX.g_name)
 #define g_base (CX.g_base)
 #define g_lc (CX.g_lc)
@@ -1167,11 +1169,15 @@ static void detect_disc_id()
 	uint8_t pvd[2048], dir[2048], cnf[2048];
 	g_serial[0] = 0;
 	g_volid[0] = 0;
+	g_publisher[0] = 0;
 	if (read_user_sector(16, pvd) || memcmp(pvd + 1, "CD001", 5)) { logf("no ISO9660 PVD"); return; }
 
 	memcpy(g_volid, pvd + 40, 32);
 	g_volid[32] = 0;
 	for (int i = 31; i >= 0 && (g_volid[i] == ' ' || g_volid[i] == 0); i--) g_volid[i] = 0;
+	memcpy(g_publisher, pvd + 318, 128);
+	g_publisher[128] = 0;
+	for (int i = 127; i >= 0 && (g_publisher[i] == ' ' || g_publisher[i] == 0); i--) g_publisher[i] = 0;
 
 	uint32_t root = pvd[158] | (pvd[159] << 8) | (pvd[160] << 16) | (pvd[161] << 24);  // root extent, little-endian copy
 	logf("volume=%s root=%u", g_volid, root);
@@ -1183,11 +1189,25 @@ static void detect_disc_id()
 	}
 	cnf[2047] = 0;
 	serial_from_cnf((const char *)cnf, g_serial);
-	logf("volume=%s serial=%s", g_volid, g_serial);
+	logf("volume=%s serial=%s publisher=%s", g_volid, g_serial, g_publisher);
 }
 
 // ---------------------------------------------------------------- serial -> title
 #include "titles.inc"
+
+// Discs pressed with another game's ID in SYSTEM.CNF: the ID and the volume's publisher pick the
+// right title (the ID alone is the other game in the database). NULL when the disc is not one of them.
+static const char *title_override(const char *serial, const char *publisher)
+{
+	static const struct { const char *serial, *publisher, *title; } t[] = {
+		// Castlevania Chronicles (USA) is SLUS-01384, but Konami wrote SLUS_013.48 (Tennis) on the
+		// disc, in SYSTEM.CNF and the volume name (volume set "CASTLEVAINA", publisher KONAMI)
+		{"SLUS_013.48", "KONAMI", "Castlevania Chronicles"},
+	};
+	for (unsigned i = 0; i < sizeof(t) / sizeof(t[0]); i++)
+		if (!strcmp(serial, t[i].serial) && !strcmp(publisher, t[i].publisher)) return t[i].title;
+	return NULL;
+}
 
 // "SLUS_005.53" -> "Alundra" (NULL when unknown)
 static const char *lookup_title(const char *serial)
@@ -4465,7 +4485,8 @@ static int prepare_disc(int *err, int *code)
 	}
 
 	detect_disc_id();
-	const char *title = g_serial[0] ? lookup_title(g_serial) : NULL;
+	const char *title = g_serial[0] ? title_override(g_serial, g_publisher) : NULL;
+	if (!title && g_serial[0]) title = lookup_title(g_serial);
 	snprintf(name, sizeof(g_name), "%s", title ? title : (g_volid[0] ? g_volid : "PSX DISC"));
 	logf("title=%s", title ? title : "(not in database)");
 	sanitize(name);
