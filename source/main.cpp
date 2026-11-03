@@ -124,7 +124,7 @@ struct Card {
 	char fname[200];                  // file name a rip gets (pattern), without .bin
 	char exist[256];                  // an earlier rip of this disc at the destination (base path), "" = none
 	int rd_state;                     // the image here vs Redump: 1 verified, 0 no match, -1 not known (not ripped)
-	uint64_t eta_t0, eta_tw; uint32_t eta_pw; double eta_rate;   // time left of the running rip
+	uint64_t eta_t0, eta_tw; uint32_t eta_pw, eta_p0; double eta_rate;   // time left of the running rip
 	int eta_phase;
 	int pg_scroll, pg_max;            // the page: pixels scrolled down, and how far it can (L2/R2)
 };
@@ -3009,7 +3009,7 @@ static void eta_tick(int c)
 	eta_pos(&pos, &total);
 	uint64_t t = now_ms();
 	if (!k.eta_t0 || g_phase != k.eta_phase) {   // a new job or a new pass: start measuring here
-		k.eta_t0 = k.eta_tw = t; k.eta_pw = pos; k.eta_rate = 0; k.eta_phase = g_phase;
+		k.eta_t0 = k.eta_tw = t; k.eta_pw = k.eta_p0 = pos; k.eta_rate = 0; k.eta_phase = g_phase;
 		return;
 	}
 	if (t - k.eta_tw >= 2000) {   // sample every 2 s, smooth over ~20 s
@@ -3025,9 +3025,14 @@ static void eta_text(const Card &k, char *out, size_t n)
 	eta_pos(&pos, &total);
 	char el[16], left[16];
 	fmt_dur(el, sizeof(el), g_rip_t0 ? (long)(time(NULL) - g_rip_t0) : 0);   // since the job started
-	if (k.eta_rate > 1 && now_ms() - k.eta_t0 > 6000 && total > pos) {
-		fmt_dur(left, sizeof(left), (long)((total - pos) / k.eta_rate));
-		unsigned kbs = (unsigned)(k.eta_rate * RAW_SIZE / 1024);
+	// the reading speed (sectors/s) over the last ~20 s; the re-read and verify passes, which may
+	// take a minute per sector, use the average since the pass started instead
+	uint64_t ms = now_ms() - k.eta_t0;
+	double rate = k.eta_rate;
+	if ((g_phase || rate <= 1) && pos > k.eta_p0 && ms > 6000) rate = (double)(pos - k.eta_p0) * 1000.0 / (double)ms;
+	if (k.eta_t0 && rate > 0 && ms > 6000 && total > pos && (g_phase || rate > 1) && (total - pos) / rate < 100.0 * 3600) {
+		fmt_dur(left, sizeof(left), (long)((total - pos) / rate));
+		unsigned kbs = (unsigned)(rate * RAW_SIZE / 1024);
 		if (g_phase) snprintf(out, n, T(STR_TIME_LEFT), el, left);   // later passes: no meaningful speed
 		else snprintf(out, n, T(STR_TIME_ETA), el, left, kbs / 1024, (kbs % 1024) * 10 / 1024);
 	} else {
@@ -4062,8 +4067,12 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		if (k.job) {
 			OnCard o(c);
 			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
-			if (g_pass2_total && (k.repairing || g_phase == 1 || g_phase == 2)) snprintf(stt[i], sizeof(stt[0]), "%u %%", (unsigned)((uint64_t)g_pass2_done * 100 / g_pass2_total));
-			else snprintf(stt[i], sizeof(stt[0]), "%u %%", g_total ? (unsigned)((uint64_t)pos * 100 / g_total) : 0);
+			uint32_t pm = g_total ? (uint32_t)((uint64_t)(pos > g_total ? g_total : pos) * 1000 / g_total) : 0;   // per mille, as on the page
+			if (g_pass2_total && (k.repairing || g_phase == 1 || g_phase == 2)) pm = (uint32_t)((uint64_t)g_pass2_done * 1000 / g_pass2_total);
+			if (g_phase == 3 && g_md5_total[c]) pm = (uint32_t)((uint64_t)g_md5_done[c] * 1000 / g_md5_total[c]);
+			if (pm > 1000) pm = 1000;
+			if (pm < 100) snprintf(stt[i], sizeof(stt[0]), T(STR_PCT_DEC), pm / 10, pm % 10);
+			else snprintf(stt[i], sizeof(stt[0]), "%u %%", pm / 10);
 			scol[i] = 0xC8E05A;
 		} else if (k.res[0] && (k.state == DISC_READY || k.state == DISC_NONE)) {
 			snprintf(stt[i], sizeof(stt[0]), "%s", T(k.res_failed == 2 ? STR_TAB_CANCELLED : k.res_failed ? STR_TAB_FAILED : STR_TAB_DONE));
@@ -4181,19 +4190,24 @@ static int draw_page_body(int c, int y)
 		y = dest_block(y, 0, 0x8890A8) + ls;
 		OnCard o(c);
 		uint32_t pos = g_readpos > g_done ? g_readpos : g_done, tot = g_total ? g_total : 1;
-		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / tot);
+		// per mille: under 10 % the page shows a decimal (6 of 1570 re-read is 0.4 %, not 0 %)
+		uint32_t pm = (uint32_t)((uint64_t)pos * 1000 / tot);
 		int inpass = g_pass2_total && (k.repairing || g_phase == 1 || g_phase == 2);   // the verify pass, the re-reads, a repair: their own progress
-		if (inpass) pct = (uint32_t)((uint64_t)g_pass2_done * 100 / g_pass2_total);
-		if (g_phase == 3 && g_md5_total[c]) pct = (uint32_t)((uint64_t)g_md5_done[c] * 100 / g_md5_total[c]);   // MD5s being recomputed
-		if (pct > 100) pct = 100;
+		if (inpass) pm = (uint32_t)((uint64_t)g_pass2_done * 1000 / g_pass2_total);
+		if (g_phase == 3 && g_md5_total[c]) pm = (uint32_t)((uint64_t)g_md5_done[c] * 1000 / g_md5_total[c]);   // MD5s being recomputed
+		if (pm > 1000) pm = 1000;
+		uint32_t pct = pm / 10;
 		int bh = ls * 2 / 3;
 		ui_rect(L, y, R - L, bh, 0x50FFFFFF);
-		ui_rect(L, y, (int)((uint64_t)(R - L) * (pct > 100 ? 100 : pct) / 100), bh, 0xFFC8E05A);
+		ui_rect(L, y, (int)((uint64_t)(R - L) * pm / 1000), bh, 0xFFC8E05A);
 		y += bh + ls / 2;
 		char tl[96], pc[140];
 		eta_text(k, tl, sizeof(tl));
 		// percentage and time on the right of the phase line (the tab shows the percentage too)
-		snprintf(pc, sizeof(pc), "%u %%  ·  %s", pct, tl);
+		char pcs[24];
+		if (pm < 100) snprintf(pcs, sizeof(pcs), T(STR_PCT_DEC), pm / 10, pm % 10);
+		else snprintf(pcs, sizeof(pcs), "%u %%", pct);
+		snprintf(pc, sizeof(pc), "%s  ·  %s", pcs, tl);
 		int pcw = ui_text_width(UI_BODY, pc);
 		ui_text(UI_BODY, R, y, 0xC8D0E0, pc, UI_RIGHT);
 		// what it does: the phase, a re-read, the counts

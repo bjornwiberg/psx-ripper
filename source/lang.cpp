@@ -288,6 +288,7 @@ static const char *en[STR_COUNT] = {
 	"The disc left the drive during a rip or repair (not cancelled)",
 	"Disc lost",
 	"Stopped: the disc left the drive",
+	"%u.%u %%",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -572,6 +573,7 @@ static const char *sv[STR_COUNT] = {
 	"Skivan försvann ur läsaren under rippning eller lagning (inte avbruten)",
 	"Skivan försvann",
 	"Avbruten: skivan försvann ur läsaren",
+	"%u,%u %%",
 };
 
 static const char **table = en;
