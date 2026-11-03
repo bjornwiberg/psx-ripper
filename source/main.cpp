@@ -515,12 +515,11 @@ static void maybe_screenshot()
 static void draw_backdrop()
 {
 	ui_background();
-	{   // the title with the version after it, smaller and grey, both centred together
-		const char *ver = "  (v" APP_VERSION ")";
-		int wt = ui_text_width(UI_TITLE, "PSX RiPPER"), wv = ui_text_width(UI_BODY, ver);
-		int x = ui_w() / 2 - (wt + wv) / 2, y = ui_h() / 10;
-		ui_text(UI_TITLE, x, y, 0xFFFFFF, "PSX RiPPER");
-		ui_text(UI_BODY, x + wt, y + (ui_line(UI_TITLE) - ui_line(UI_BODY)) * 3 / 4, 0x8890A8, ver);   // on the title's baseline
+	{   // the title, and under it the version, small and grey (a local build's is long: 1.0.2-20261103.0835)
+		// the title moves up so that both end where the title alone did: the screens below keep their layout
+		int y = ui_h() / 10 - ui_line(UI_SMALL) * 3 / 4;
+		ui_text(UI_TITLE, ui_w() / 2, y, 0xFFFFFF, "PSX RiPPER", UI_CENTER);
+		ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_TITLE) - ui_line(UI_SMALL) / 4, 0x8890A8, "v" APP_VERSION, UI_CENTER);
 	}
 }
 
