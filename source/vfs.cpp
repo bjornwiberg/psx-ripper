@@ -6,7 +6,12 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <sys/mutex.h>
+// FatFs and the C library both name a directory DIR: FatFs's is FF_DIR here (its functions are C,
+// so the name does not reach the linker)
+#define DIR FF_DIR
 #include "ff.h"
+#undef DIR
+#include <dirent.h>
 #include "vfs.h"
 
 int usb_info(int port, uint64_t *sectors, uint32_t *sector_size);
@@ -19,6 +24,11 @@ struct VFile {
 
 static FATFS g_fs[8];
 static int g_mounted[8];
+// The volume label of the drive on each port, read once when the drive is first seen (keyed by its
+// size, so another drive on the same port is read again). FatFs reads it from the root directory's
+// label entry, for FAT32 and exFAT alike, while the volume is mounted read-only by vf_scan anyway.
+static char g_label[8][48];
+static uint64_t g_label_of[8];   // sectors of the drive the label belongs to, 0 = none read
 
 // FatFs is built without re-entrancy: drives that rip at the same time take turns on it (the
 // stdio paths need no lock). Recursive, created by the first caller (vf_scan at start-up).
@@ -163,6 +173,25 @@ int vf_free_mb(const char *path, uint64_t *mb)
 	return 0;
 }
 
+// The label of the mounted volume on a port into g_label (whole UTF-8 characters, printable only).
+static void read_label(int port, const char *drv)
+{
+	char l[48] = "";
+	if (f_getlabel(drv, l, NULL) != FR_OK) l[0] = 0;
+	l[sizeof(l) - 1] = 0;
+	for (char *p = l; *p; p++) if ((unsigned char)*p < 0x20 || *p == 0x7F) *p = ' ';
+	snprintf(g_label[port], sizeof(g_label[port]), "%s", l);
+}
+
+int vf_label(int port, char *out, size_t n)
+{
+	if (port < 0 || port > 7) return -1;
+	Lk lk;
+	if (!g_label_of[port]) return -1;
+	snprintf(out, n, "%s", g_label[port]);
+	return 0;
+}
+
 int vf_scan(VfVolume *out, int max)
 {
 	Lk lk;
@@ -172,16 +201,21 @@ int vf_scan(VfVolume *out, int max)
 		uint32_t ss;
 		if (usb_info(port, &sectors, &ss)) {   // nothing on this port (any more)
 			if (g_mounted[port]) { char drv[4] = {(char)('0' + port), ':', 0}; f_unmount(drv); usb_close(port); g_mounted[port] = 0; }
+			g_label_of[port] = 0; g_label[port][0] = 0;
 			continue;
 		}
 		char drv[4] = {(char)('0' + port), ':', 0};
+		int need_label = g_label_of[port] != sectors;
+		if (need_label) { g_label_of[port] = sectors; g_label[port][0] = 0; }
 		if (!g_mounted[port]) {
 			// mount reads the boot sector only; a FAT32 drive is mounted by the PS3 itself and is
-			// released again at once, so it is never written through FatFs
+			// released again at once, so it is never written through FatFs. Its label is read (once
+			// per drive) before that: reading the root directory's first sectors, nothing written.
 			if (f_mount(&g_fs[port], drv, 1) != FR_OK) { usb_close(port); continue; }
+			if (need_label) read_label(port, drv);
 			if (g_fs[port].fs_type != FS_EXFAT) { f_unmount(drv); usb_close(port); continue; }
 			g_mounted[port] = 1;
-		}
+		} else if (need_label) read_label(port, drv);
 		if (n < max) {
 			snprintf(out[n].root, sizeof(out[n].root), "exfat%d:", port);
 			out[n].port = port;
@@ -201,7 +235,7 @@ int vf_list(const char *dir, void (*cb)(const char *name, void *ctx), void *ctx)
 	char fp[320];
 	if (fat_path(dir, fp, sizeof(fp)) < 0) return -1;
 	Lk lk;
-	DIR d;
+	FF_DIR d;
 	if (f_opendir(&d, fp) != FR_OK) return 0;
 	int n = 0;
 	FILINFO fi;
@@ -212,4 +246,55 @@ int vf_list(const char *dir, void (*cb)(const char *name, void *ctx), void *ctx)
 	}
 	f_closedir(&d);
 	return n;
+}
+
+int vf_listdir(const char *dir, void (*cb)(const char *name, void *ctx), void *ctx)
+{
+	char fp[320];
+	if (fat_path(dir, fp, sizeof(fp)) < 0) {
+		DIR *d = opendir(dir);
+		if (!d) return -1;
+		int n = 0;
+		struct dirent *de;
+		while ((de = readdir(d))) if (de->d_name[0] != '.') { cb(de->d_name, ctx); n++; }
+		closedir(d);
+		return n;
+	}
+	Lk lk;
+	FF_DIR d;
+	if (f_opendir(&d, fp) != FR_OK) return -1;
+	int n = 0;
+	FILINFO fi;
+	while (f_readdir(&d, &fi) == FR_OK && fi.fname[0]) {
+		if (fi.fname[0] == '.') continue;
+		cb(fi.fname, ctx);
+		n++;
+	}
+	f_closedir(&d);
+	return n;
+}
+
+int vf_size(const char *path, uint64_t *size)
+{
+	char fp[320];
+	if (fat_path(path, fp, sizeof(fp)) < 0) {
+		struct stat st;
+		if (stat(path, &st)) return -1;
+		*size = (uint64_t)st.st_size;
+		return 0;
+	}
+	Lk lk;
+	FILINFO fi;
+	if (f_stat(fp, &fi) != FR_OK) return -1;
+	*size = (uint64_t)fi.fsize;
+	return 0;
+}
+
+int vf_mtime(const char *path, time_t *t)
+{
+	if (strncmp(path, "/dev_hdd0", 9)) return -1;
+	struct stat st;
+	if (stat(path, &st)) return -1;
+	*t = st.st_mtime;
+	return 0;
 }
