@@ -200,6 +200,12 @@ int main()
 	g_cards[0].pg_scroll = 100000; frame("ripping-scrolled-bottom", 0);
 	g_cards[0].pg_scroll = 0;
 	frame("ripping-plain", 1);
+	{   // a repair recomputing its MD5s: the page says so, with the percentage
+		Card &k = g_cards[1]; k.repairing = 1;
+		OnCard o(1); g_phase = 3; g_md5_total[1] = 11906; g_md5_done[1] = 5000;
+		frame("repair-md5", 1);
+		g_md5_total[1] = 0; g_phase = 0; k.repairing = 0;
+	}
 	{   // /status.json for the same drives: valid JSON (checked by python) with every drive
 		static char js[8192];
 		status_json(js, sizeof(js));
@@ -229,6 +235,7 @@ int main()
 		Card &k = g_cards[c];
 		k.present = 1; k.state = DISC_NONE;
 		snprintf(k.res_disc, sizeof(k.res_disc), "%s", c == 0 ? "Alundra (Europe) (SLES_011.35)" : c == 1 ? "Motorhead (SLUS_007.17)" : "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv) (SLES_020.88)");
+		snprintf(k.res_key, sizeof(k.res_key), "%s", c == 0 ? "SLES_011.35" : c == 1 ? "SLUS_007.17" : "SLES_020.88");
 		snprintf(k.res, sizeof(k.res), "%s", c == 1 ? "klar på 1:12:40 · 239 oläsbara · 39 lagade" : "klar på 14:02");
 		k.res_col = c == 1 ? 0xF0C060 : 0x7CE0A0;
 		k.res_rd = c == 0 ? 1 : c == 1 ? 0 : -1;
@@ -237,6 +244,18 @@ int main()
 	frame("ejected-verified", 0);
 	frame("ejected-nomatch", 1);
 	frame("ejected-unchecked", 2);
+	{   // after a rip another disc goes in: the last rip's line is about the old disc and is not shown;
+		// the same disc in again: it is
+		auto last_shown = []() { for (auto &b : g_boxes) if (b.text.find("Senaste rippningen") != std::string::npos) return true; return false; };
+		Card &k = g_cards[0];
+		snprintf(k.res_key, sizeof(k.res_key), "SLES_011.35");
+		disc(0, "WipEout 3 - Special Edition", "", "SCES_028.45", 615);
+		frame("other-disc-in", 0);
+		if (last_shown()) { printf("FAIL another disc's page shows the last rip of the old one\n"); g_fail++; }
+		disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+		frame("same-disc-in", 0);
+		if (!last_shown()) { printf("FAIL the same disc in again: the last rip's line is missing\n"); g_fail++; }
+	}
 
 	{   // About, in Swedish here and in English below
 		g_boxes.clear(); about_draw(); save("about"); size_t b0 = g_fail; check("about"); printf("%s about\n", g_fail == (int)b0 ? "ok  " : "FAIL");

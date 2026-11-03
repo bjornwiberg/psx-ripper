@@ -284,6 +284,7 @@ static const char *en[STR_COUNT] = {
 	"Open",
 	"en",
 	"The buttons press the console's pad. Keyboard: arrows, Enter = &#10005;, Esc/Backspace = &#9675;, Q/E = L1/R1, 1/3 = L2/R2, T = &#9651;, S = &#9633;.",
+	"Recomputing MD5",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -564,6 +565,7 @@ static const char *sv[STR_COUNT] = {
 	"Öppna",
 	"sv",
 	"Knapparna trycker på konsolens handkontroll. Tangentbord: pilar, Enter = &#10005;, Esc/Backspace = &#9675;, Q/E = L1/R1, 1/3 = L2/R2, T = &#9651;, S = &#9633;.",
+	"Räknar om MD5",
 };
 
 static const char **table = en;
