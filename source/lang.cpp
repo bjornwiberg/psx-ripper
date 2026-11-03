@@ -285,6 +285,9 @@ static const char *en[STR_COUNT] = {
 	"en",
 	"The buttons press the console's pad. Keyboard: arrows, Enter = &#10005;, Esc/Backspace = &#9675;, Q/E = L1/R1, 1/3 = L2/R2, T = &#9651;, S = &#9633;.",
 	"Recomputing MD5",
+	"The disc left the drive during a rip or repair (not cancelled)",
+	"Disc lost",
+	"Stopped: the disc left the drive",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -566,6 +569,9 @@ static const char *sv[STR_COUNT] = {
 	"sv",
 	"Knapparna trycker på konsolens handkontroll. Tangentbord: pilar, Enter = &#10005;, Esc/Backspace = &#9675;, Q/E = L1/R1, 1/3 = L2/R2, T = &#9651;, S = &#9633;.",
 	"Räknar om MD5",
+	"Skivan försvann ur läsaren under rippning eller lagning (inte avbruten)",
+	"Skivan försvann",
+	"Avbruten: skivan försvann ur läsaren",
 };
 
 static const char **table = en;

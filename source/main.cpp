@@ -986,6 +986,10 @@ static int sector_zero(const uint8_t *p)
 	return 1;
 }
 
+// A job stopped because its disc left the drive (not because O was pressed): set by the read,
+// cleared when a job starts.
+static volatile int g_disc_lost[NCARDS];
+
 // READ CD with a chosen subchannel selection: 0 = none, 1 = raw P-W (96 bytes), 2 = formatted Q (16 bytes)
 static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, uint32_t blk)
 {
@@ -1014,6 +1018,7 @@ static int read_cd_sub(uint32_t lba, uint32_t count, uint8_t *buf, uint8_t sub, 
 			}
 			if (((uint32_t)r & 0xFF000000u) == 0x8D000000u && (r >> 16 & 0x0F) == 0x02 && (r >> 8 & 0xFF) == 0x3A && !g_abort) {
 				g_abort = 1;
+				g_disc_lost[cur_card()] = 1;   // not cancelled: the end says so (disc_lost)
 				logf("read %u: no disc in the drive (medium not present), stopping", l);
 			}
 			if (r) return r;
@@ -4875,9 +4880,10 @@ static int rip_disc_inner(int fresh, int autorip)
 		snprintf(msg, sizeof(msg), "%s.bin.part", g_base);
 		vf_unlink(msg);
 		g_state = ST_HOME;
-		fire_event(g_result == 1 ? "rip_cancelled" : "rip_failed");
+		int lost = g_result == 1 && g_disc_lost[cur_card()];
+		fire_event(lost ? "disc_lost" : g_result == 1 ? "rip_cancelled" : "rip_failed");
 		Card &k = g_cards[cur_card()];
-		snprintf(k.res, sizeof(k.res), "%s", g_result == 1 ? T(STR_CARD_CANCELLED) : T(STR_CREATE_FAILED));
+		snprintf(k.res, sizeof(k.res), "%s", lost ? T(STR_CARD_DISC_LOST) : g_result == 1 ? T(STR_CARD_CANCELLED) : T(STR_CREATE_FAILED));
 		k.res_col = g_result == 1 ? 0xF0C060 : 0xFF8A80;
 		k.res_failed = g_result == 1 ? 2 : 1;   // 2 = cancelled
 		return 0;
@@ -5178,6 +5184,7 @@ static void job_reset(int c)
 	g_cards[c].pg_scroll = 0;
 	g_cards[c].eta_t0 = 0;
 	memset(g_md5_known[c], 0, sizeof(g_md5_known[0])); memset(g_md5_dirty[c], 0, sizeof(g_md5_dirty[0]));
+	g_disc_lost[c] = 0;
 	g_md5_total[c] = 0; g_md5_done[c] = 0;
 }
 
@@ -5428,8 +5435,13 @@ static int repair_disc_inner()
 		k.res_rd = g_rd_result == 1 ? 1 : g_rd_result == 0 ? 0 : g_redump == RD_OFF ? -2 : -1;
 		k.res_bad = g_readerrs || g_badsect;
 	}
+	if (g_disc_lost[cur_card()]) {   // the disc left the drive: what was written stays, the rest was not tried
+		Card &k = g_cards[cur_card()];
+		snprintf(k.res, sizeof(k.res), "%s", T(STR_CARD_DISC_LOST));
+		k.res_col = 0xFF8A80;
+	}
 	g_state = ST_HOME;
-	fire_event("repair_finished");
+	fire_event(g_disc_lost[cur_card()] ? "disc_lost" : "repair_finished");
 	g_repair_n = 0;
 	return 1;
 }
