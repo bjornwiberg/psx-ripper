@@ -2437,6 +2437,20 @@ static void idx_find(const char *dir, const char *serial, char *out, size_t n)
 }
 
 // Counts the sectors in <g_base>.log that are still wrong (unreadable, bad, unconfirmed).
+// An earlier rip (before 1.0.3) may hold the drive's junk in the first pregap sector of track 2
+// (see pregap_transition): that sector not silent, the one after it silent. Returns that sector,
+// 0 when the image is fine. `log` is the rip's log, `bin` its open image.
+static uint32_t pregap_junk_in(VFile *bin, const char *log)
+{
+	const char *t2 = strstr(log, "track=02 start=");
+	unsigned s = 0;
+	if (!t2 || sscanf(t2, "track=02 start=%u", &s) != 1 || !s) return 0;
+	static uint8_t sec[NCARDS][2 * RAW_SIZE];
+	uint8_t *b = sec[cur_card()];
+	if (vf_seek(bin, (uint64_t)s * RAW_SIZE) || vf_read(bin, b, 2 * RAW_SIZE) != 2 * RAW_SIZE) return 0;
+	return !sector_zero(b) && sector_zero(b + RAW_SIZE) ? s : 0;
+}
+
 static int riplog_open_count()
 {
 	char path[320];
@@ -2450,6 +2464,11 @@ static int riplog_open_count()
 	int n = (int)vf_read(f, buf, sizeof(buf) - 1), cnt = 0;
 	vf_close(f);
 	buf[n > 0 ? n : 0] = 0;
+	{   // and the junk sector of an older rip, which its log does not list
+		snprintf(path, sizeof(path), "%s.bin", g_base);
+		VFile *bf = vf_open(path, "rb");
+		if (bf) { if (pregap_junk_in(bf, buf)) cnt++; vf_close(bf); }
+	}
 	for (char *l = strtok(buf, "\n"); l; l = strtok(NULL, "\n"))
 		if (!strncmp(l, "unreadable=", 11) || !strncmp(l, "bad=", 4) || (!strncmp(l, "uncertain=", 10) && strstr(l, "unconfirmed")))
 			cnt++;
@@ -5194,6 +5213,7 @@ static int repair_disc_inner()
 	g_nhard = 0; g_nsuspect = 0; g_confirmed = 0; g_changed = 0; g_readerrs = 0; g_badsect = 0; g_recovered = 0;
 	g_pass2_total = 0; g_pass2_done = 0; g_abort = 0; g_finished = 0; g_rd_result = -3; g_rd_result_name[0] = 0;
 	tstart_init();
+	uint32_t junk = pregap_junk_in(g_out, buf);   // before strtok cuts the log up
 	for (char *l = strtok(buf, "\n"); l; l = strtok(NULL, "\n")) {
 		unsigned v, tn, st;
 		if (sscanf(l, "unreadable=%u", &v) == 1) { note_hard(v, 0); g_readerrs++; }
@@ -5208,6 +5228,10 @@ static int repair_disc_inner()
 		else if (sscanf(l, "track=%u start=%u", &tn, &st) == 2) {
 			for (int t = 0; t < g_ntracks; t++) if (g_tracks[t].num == (int)tn) g_tstart[t] = st;
 		}
+	}
+	if (junk) {   // an older rip's junk pregap sector: read it again, it is stored as silence now
+		note_hard(junk, 0); g_readerrs++;
+		logf("repair: sector %u is junk from the drive (first pregap sector of track 2), reading it again", junk);
 	}
 	// confirmed sectors need no new reads: keep only the unconfirmed ones for the pass
 	uint32_t keep = 0;
