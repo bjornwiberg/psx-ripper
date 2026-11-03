@@ -697,6 +697,7 @@ static void do_flip()
 
 // Shows a dialog and blocks until answered. Returns 1 = OK/YES, 2 = NO/cancel.
 static int own_dialog(const char *msg, int yesno);   // own UI, defined with the other screens
+static void own_dialog_draw(const char *msg, int yesno);   // one frame of it (the UI tests draw it)
 static int ask(int type, const char *msg)
 {
 	return own_dialog(msg, (type & MSG_DIALOG_BTN_TYPE_YESNO) != 0);
@@ -3805,15 +3806,412 @@ static void about_screen()
 	}
 }
 
+// ---------------------------------------------------------------- the audit log (Settings → Audit log)
+// Four levels: the domains, then the discs (rips) or the events (settings), a disc's events, an
+// event's rows. X opens, O goes back, triangle undoes the focused item after a question. The lists
+// are read from the log when a level is entered and after an undo, never per frame.
+#define AV_PAGE 9     // rows a page shows
+#define AV_MAX 128    // discs and events a level lists (the newest)
+struct AuditView {
+	int level;               // 0 domains, 1 discs (rips) or events (settings), 2 a disc's events, 3 an event's rows
+	AuditDom dom;
+	char disc[96], disc_name[96];   // the disc of levels 2 and 3
+	AuditRow ev;             // level 3: the event
+	int row, first, n;       // focused entry, first one shown, entries loaded
+	int base, more;          // level 3: index of av_rows[0] in the event; rows follow the loaded ones
+	int empty;               // level 0: nothing in the log yet
+	int back[4];             // the focused entry of each level, for going back
+	int undo_ok;             // level 2, a job: its kept sectors can be undone
+	char why_key[100], why[200];   // the last refused undo (its row id or disc) and the reason
+};
+static char av_keys[AV_MAX][96], av_names[AV_MAX][96];
+static uint32_t av_last[AV_MAX];
+static AuditRow av_rows[AV_MAX];
+static const AuditDom av_doms[] = {AU_RIPS, AU_SETTINGS};
+
+static int av_count(const AuditView &v) { return v.level == 3 ? v.base + v.n : v.n; }
+
+static const AuditRow *audit_focused(const AuditView &v)
+{
+	if (v.level == 0 || (v.level == 1 && v.dom == AU_RIPS)) return NULL;
+	int i = v.level == 3 ? v.row - v.base : v.row;
+	return i >= 0 && i < v.n ? &av_rows[i] : NULL;
+}
+
+// Level 3: the two pages from the one `from` is on, and one row more to know whether others follow
+// (a repair can have thousands; each row shown is checked against the image).
+static void av_page(AuditView &v, int from)
+{
+	v.base = from / AV_PAGE * AV_PAGE;
+	int n = audit_rows(v.ev.job, av_rows, v.base, 2 * AV_PAGE + 1);
+	v.more = n > 2 * AV_PAGE;
+	v.n = v.more ? 2 * AV_PAGE : n;
+}
+
+// Whether the focused job's sectors can be undone: its first sector rows tell (an unfinished rip,
+// sectors changed since or no longer kept). Looked up when the focus moves, not per frame.
+static void av_probe(AuditView &v)
+{
+	v.undo_ok = 0;
+	const AuditRow *e = audit_focused(v);
+	if (v.level != 2 || !e || strcmp(e->kind, "job")) return;
+	static AuditRow p[8];
+	int n = audit_rows(e->job, p, 0, 8);
+	for (int i = 0; i < n; i++) {
+		if (strcmp(p[i].kind, "sector")) continue;
+		if (p[i].reversible) { v.undo_ok = 1; return; }
+		if (!p[i].undone) return;
+	}
+}
+
+// The focused row on the screen, the right page loaded.
+static void av_fix(AuditView &v)
+{
+	if (v.row < v.first) v.first = v.row;
+	if (v.row >= v.first + AV_PAGE) v.first = v.row - AV_PAGE + 1;
+	if (v.level == 3) {
+		if (v.first < v.base || (v.first + AV_PAGE > v.base + v.n && v.more)) av_page(v, v.first);
+		if (v.row >= v.base + v.n) v.row = v.base + v.n > 0 ? v.base + v.n - 1 : 0;   // the end
+		if (v.first > v.row) v.first = v.row;
+	}
+	av_probe(v);
+}
+
+static void av_load(AuditView &v)
+{
+	if (v.level == 0) {
+		AuditRow one;
+		v.n = 2;
+		v.empty = audit_discs(NULL, NULL, NULL, NULL, 1) == 0 && audit_events(AU_SETTINGS, NULL, &one, 1) == 0;
+	} else if (v.level == 1 && v.dom == AU_RIPS) v.n = audit_discs(av_keys, av_names, NULL, av_last, AV_MAX);
+	else if (v.level < 3) v.n = audit_events(v.dom, v.level == 2 ? v.disc : NULL, av_rows, AV_MAX);
+	else { av_page(v, v.first); return; }
+	if (v.row >= v.n) v.row = v.n ? v.n - 1 : 0;
+}
+
+static void audit_view_init(AuditView &v)
+{
+	memset(&v, 0, sizeof(v));
+	v.dom = AU_RIPS;
+	av_load(v);
+	av_fix(v);
+}
+
+static void audit_nav(AuditView &v, int p)
+{
+	int cnt = av_count(v);
+	if (!cnt) return;
+	if (v.level < 3) {   // the whole list is loaded: up and down go round
+		if (p & B_UP) v.row = (v.row + cnt - 1) % cnt;
+		if (p & B_DOWN) v.row = (v.row + 1) % cnt;
+		if (p & B_R2) v.row = v.row + AV_PAGE < cnt ? v.row + AV_PAGE : cnt - 1;
+	} else {   // an event's rows are read a page at a time: the end is known once it is reached
+		if ((p & B_UP) && v.row > 0) v.row--;
+		if (p & B_DOWN) v.row++;
+		if (p & B_R2) v.row += AV_PAGE;
+	}
+	if (p & B_L2) v.row = v.row >= AV_PAGE ? v.row - AV_PAGE : 0;
+	av_fix(v);
+}
+
+static int av_can_open(const AuditView &v)
+{
+	if (v.level == 0) return !v.empty;
+	if (v.level == 1) return v.dom == AU_RIPS && v.n > 0;
+	const AuditRow *r = audit_focused(v);
+	return v.level == 2 && r && !strcmp(r->kind, "job");
+}
+
+// X: one level down.
+static void audit_open(AuditView &v)
+{
+	if (!av_can_open(v)) return;
+	if (v.level == 0) v.dom = av_doms[v.row];
+	else if (v.level == 1) {
+		snprintf(v.disc, sizeof(v.disc), "%s", av_keys[v.row]);
+		snprintf(v.disc_name, sizeof(v.disc_name), "%s", av_names[v.row]);
+	} else v.ev = *audit_focused(v);
+	v.back[v.level++] = v.row;
+	v.row = v.first = v.base = v.n = v.more = 0;
+	v.why_key[0] = 0;
+	av_load(v);
+	av_fix(v);
+}
+
+// O: one level up; 0 at the top (the screen closes).
+static int audit_back(AuditView &v)
+{
+	if (v.level == 0) return 0;
+	v.row = v.back[--v.level];
+	v.first = 0;
+	v.why_key[0] = 0;
+	av_load(v);
+	av_fix(v);
+	return 1;
+}
+
+// Triangle is offered on: a disc (all its kept changes), a job (its sectors) and a row that can be undone.
+static int audit_can_undo(const AuditView &v)
+{
+	if (v.level == 1 && v.dom == AU_RIPS) return v.n > 0;
+	const AuditRow *r = audit_focused(v);
+	if (!r) return 0;
+	if (v.level == 2 && !strcmp(r->kind, "job")) return v.undo_ok == 1;
+	return r->reversible;
+}
+
+static void av_focus_key(const AuditView &v, char *out, size_t n)
+{
+	const AuditRow *r = audit_focused(v);
+	if (v.level == 1 && v.dom == AU_RIPS && v.row < v.n) snprintf(out, n, "%s", av_keys[v.row]);
+	else if (r) snprintf(out, n, "%u", (unsigned)r->id);
+	else out[0] = 0;
+}
+
+static const char *av_src(AuditSrc s)
+{
+	switch (s) {
+	case AU_PAD: return T(STR_AUDIT_SRC_PAD);
+	case AU_REMOTE: return T(STR_AUDIT_SRC_REMOTE);
+	case AU_APP: return T(STR_AUDIT_SRC_APP);
+	case AU_MCP: return "MCP";
+	case AU_UNDO: return T(STR_AUDIT_SRC_UNDO);
+	}
+	return "";
+}
+
+// A config key as the settings name it, and a value as they show it.
+static const char *av_key_label(const char *key)
+{
+	static const struct { const char *key; StrId s; } names[] = {
+		{"speed", STR_L_SPEED}, {"retries", STR_L_RETRIES}, {"check", STR_L_CHECK}, {"eject", STR_L_EJECT},
+		{"autostart", STR_L_AUTOSTART}, {"name_pattern", STR_L_FILENAME}, {"redump", STR_L_REDUMP}, {"remote", STR_L_REMOTE},
+		{"webhook_on", STR_L_WEBHOOK}, {"webhook", STR_WH_ADDRESS}, {"outdir", STR_L_TARGET}, {"audit_mb", STR_L_AUDIT_MB}};
+	for (auto &k : names) if (!strcmp(key, k.key)) return T(k.s);
+	if (!strncmp(key, "webhook_header", 14)) return T(STR_WH_HEADERS);
+	return key;
+}
+static void av_setting_val(const char *key, const char *val, char *out, size_t n)
+{
+	int v = atoi(val);
+	if (!val[0]) out[0] = 0;
+	else if (!strcmp(key, "speed") && v >= 0 && v <= 3) fmt_speed(v, out, n);
+	else if (!strcmp(key, "check") && v >= CHECK_OFF && v <= CHECK_BITPERFECT) fmt_check(v, out, n);
+	else if (!strcmp(key, "eject") || !strcmp(key, "autostart") || !strcmp(key, "remote") || !strcmp(key, "webhook_on") || !strcmp(key, "webhook_headers_on"))
+		fmt_onoff(v, out, n);
+	else if (!strcmp(key, "redump")) snprintf(out, n, "%s", v == RD_ONLINE ? T(STR_RD_ONLINE) : v == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
+	else if (!strcmp(key, "audit_mb")) snprintf(out, n, T(STR_AUDIT_MB_VAL), v);
+	else if (!strcmp(key, "name_pattern")) fn_label(val, out, n);
+	else snprintf(out, n, "%s", val);
+}
+
+// What a row did, in words.
+static void av_row_label(const AuditRow &r, char *out, size_t n)
+{
+	if (!strcmp(r.kind, "job"))
+		snprintf(out, n, "%s", T(!strcmp(r.what, "repair") ? STR_HINT_REPAIR : !strcmp(r.what, "check") ? STR_HINT_CHECK : STR_HINT_RIP));
+	else if (!strcmp(r.kind, "sector")) snprintf(out, n, T(STR_AUDIT_SECTOR), (unsigned)r.lba);
+	else if (!strcmp(r.kind, "setting")) {
+		if (r.norev) snprintf(out, n, "%s", av_key_label(r.what));   // a secret: only set / cleared was logged
+		else {
+			char a[96], b[96];
+			av_setting_val(r.what, r.before, a, sizeof(a));
+			av_setting_val(r.what, r.after, b, sizeof(b));
+			snprintf(out, n, "%s: %s → %s", av_key_label(r.what), a, b);
+		}
+	}
+	else if (!strcmp(r.kind, "result"))
+		snprintf(out, n, "%s", T(!strcmp(r.after, "finished") ? STR_TAB_DONE : !strcmp(r.after, "cancelled") ? STR_TAB_CANCELLED :
+		                         !strcmp(r.after, "disc_lost") ? STR_WH_SHORT_10 : STR_TAB_FAILED));
+	else if (!strcmp(r.kind, "redump")) {
+		if (!strncmp(r.after, "verified", 8)) snprintf(out, n, T(STR_RD_CARD_OK), r.after[8] ? r.after + 9 : "");
+		else snprintf(out, n, "%s", T(!strcmp(r.after, "no_match") ? STR_RD_NOMATCH : !strcmp(r.after, "not_found") ? STR_RD_NOTFOUND : STR_RD_UNCHECKED));
+	}
+	else if (!strcmp(r.kind, "undo")) snprintf(out, n, T(STR_AUDIT_UNDO_ROW), r.what);
+	else snprintf(out, n, "%s %.100s", r.kind, r.what);   // a kind this screen does not know yet
+	if (r.undone) {
+		size_t l = strlen(out);
+		snprintf(out + l, n - l, " %s", T(STR_AUDIT_UNDONE));
+	}
+}
+
+// Entry i of the level: its label, and the value at the right (when, and where it came from).
+static void audit_label(const AuditView &v, int i, char *out, size_t n)
+{
+	out[0] = 0;
+	if (v.level == 0) snprintf(out, n, "%s", T(av_doms[i] == AU_RIPS ? STR_AUDIT_DOM_RIPS : STR_AUDIT_DOM_SETTINGS));
+	else if (v.level == 1 && v.dom == AU_RIPS) { if (i < v.n) snprintf(out, n, "%s", av_names[i]); }
+	else {
+		int k = v.level == 3 ? i - v.base : i;
+		if (k >= 0 && k < v.n) av_row_label(av_rows[k], out, n);
+	}
+}
+static void av_value(const AuditView &v, int i, char *out, size_t n)
+{
+	out[0] = 0;
+	if (v.level == 0) return;
+	if (v.level == 1 && v.dom == AU_RIPS) { fmt_local(av_last[i], out, n); return; }
+	int k = v.level == 3 ? i - v.base : i;
+	if (k < 0 || k >= v.n) return;
+	char when[32];
+	fmt_local(av_rows[k].t, when, sizeof(when));
+	snprintf(out, n, "%s · %s", when, av_src(av_rows[k].src));
+}
+
+// The audit screen's undo is running: the recheck of a rip shows a wait screen (recheck_hook; not
+// in the UI tests, which have no screen to flip).
+static int g_check_ui;
+static char g_wait_name[128];
+
+// Undoes the focused item; the list is read again and the focus stays on it. 0 = done, else why[] says why not.
+static int audit_undo(AuditView &v, char *why, size_t n)
+{
+	const AuditRow *r = audit_focused(v);
+	char key[100];
+	av_focus_key(v, key, sizeof(key));
+	why[0] = 0;
+	int rc = -1;
+	if (v.level == 1 && v.dom == AU_RIPS) rc = audit_undo_disc_since(key, 0, why, n);
+	else if (r && v.level == 2 && !strcmp(r->kind, "job")) rc = audit_undo_job(r->job, why, n);
+	else if (r) rc = audit_undo_row(r->id, why, n);
+	snprintf(v.why_key, sizeof(v.why_key), "%s", rc ? key : "");
+	snprintf(v.why, sizeof(v.why), "%s", rc ? why : "");
+	av_load(v);
+	if (v.level == 1 || v.level == 2) {   // newer rows come first: find the item again
+		char k2[100];
+		int keep = v.row;
+		for (v.row = 0; v.row < v.n; v.row++) { av_focus_key(v, k2, sizeof(k2)); if (!strcmp(k2, key)) break; }
+		if (v.row >= v.n) v.row = keep < v.n ? keep : 0;
+	}
+	av_fix(v);
+	return rc;
+}
+
+static void audit_draw(const AuditView &v)
+{
+	draw_backdrop();
+	int ls = ui_line(UI_SMALL);
+	char sub[240], lb[160];
+	if (v.level == 0) snprintf(sub, sizeof(sub), "%s", T(STR_L_AUDIT));
+	else if (v.level == 1) snprintf(sub, sizeof(sub), "%s · %s", T(STR_L_AUDIT), T(v.dom == AU_RIPS ? STR_AUDIT_DOM_RIPS : STR_AUDIT_DOM_SETTINGS));
+	else if (v.level == 2) snprintf(sub, sizeof(sub), "%s", v.disc_name);
+	else { av_row_label(v.ev, lb, sizeof(lb)); snprintf(sub, sizeof(sub), "%s · %s", lb, v.disc_name); }
+	int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10;
+	int left = ui_w() / 6, right = ui_w() * 5 / 6;
+	ui_text_fit(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, sub, right - left, UI_CENTER);
+	int cnt = av_count(v);
+	if ((v.level == 0 && v.empty) || !cnt) {
+		ui_text(UI_BODY, ui_w() / 2, ui_h() / 3, 0xC8D0E0, T(STR_AUDIT_EMPTY), UI_CENTER);
+		const char *b[] = {"circle"};
+		const char *l[] = {T(STR_HINT_BACK)};
+		hint_bar(b, l, 1);
+		return;
+	}
+	{   // more rows above / below: arrows at the right edge, as in the settings (L2/R2 jump a page)
+		int asz = ls * 2 / 3, ax = right + ui_w() / 40;
+		if (v.first > 0) ui_icon("up", ax, top + (lh * 3 / 4 - asz) / 2 - lh / 8, asz, 0xC8D0E0);
+		if (v.first + AV_PAGE < cnt || v.more) ui_icon("down", ax, top + (AV_PAGE - 1) * lh + (lh * 3 / 4 - asz) / 2 - lh / 8, asz, 0xC8D0E0);
+	}
+	for (int i = v.first; i < cnt && i < v.first + AV_PAGE; i++) {
+		int y = top + (i - v.first) * lh;
+		char val[96];
+		audit_label(v, i, lb, sizeof(lb));
+		av_value(v, i, val, sizeof(val));
+		if (i == v.row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh, 0x703D6FD9);
+		// when and from where: a detail, small, on the label's baseline
+		int vy = y + ui_line(UI_BODY) - ui_line(UI_SMALL) - ui_line(UI_BODY) / 12;
+		int vw = val[0] ? ui_text(UI_SMALL, right, vy, i == v.row ? 0xFFFFFF : 0xA8B0C8, val, UI_RIGHT) + ui_w() / 40 : 0;
+		ui_text_fit(UI_BODY, left, y, 0xFFFFFF, lb, right - left - vw);   // never over the value
+	}
+	// the focused item's details, small: why it cannot be undone, or the file a sector is in
+	char det[300] = "", key[100];
+	const AuditRow *r = audit_focused(v);
+	av_focus_key(v, key, sizeof(key));
+	if (v.why_key[0] && !strcmp(v.why_key, key)) snprintf(det, sizeof(det), T(STR_AUDIT_REFUSED), v.why);
+	else if (r && !r->undone && !audit_can_undo(v)) snprintf(det, sizeof(det), "%s", T(STR_AUDIT_NO_UNDO));
+	else if (r && !strcmp(r->kind, "sector")) { const char *s = strrchr(r->file, '/'); snprintf(det, sizeof(det), "%s", s ? s + 1 : r->file); }
+	if (det[0]) footer_note(det);
+	const char *b[5], *l[5];
+	int m = 0;
+	b[m] = "updown"; l[m++] = T(STR_HINT_SELECT);
+	if (cnt > AV_PAGE || v.more) { b[m] = "l2r2"; l[m++] = T(STR_HINT_PAGE); }
+	if (av_can_open(v)) { b[m] = "cross"; l[m++] = T(STR_HINT_OPEN); }
+	if (audit_can_undo(v)) { b[m] = "triangle"; l[m++] = T(STR_HINT_UNDO); }
+	b[m] = "circle"; l[m++] = T(STR_HINT_BACK);
+	hint_bar(b, l, m);
+}
+
+// The wait while an undone rip is checked again (it reads the whole image): its name and how far.
+static void audit_wait_draw(const char *name, uint32_t mb)
+{
+	draw_backdrop();
+	ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_L_AUDIT), UI_CENTER);
+	char t[300];
+	snprintf(t, sizeof(t), T(STR_AUDIT_WAIT), name);
+	int y = draw_wrapped(UI_BODY, t, ui_h() / 3, 0xE8E8F0);
+	if (mb) {
+		snprintf(t, sizeof(t), T(STR_AUDIT_MB_VAL), (int)mb);
+		ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_SMALL) / 2, 0xA8B0C8, t, UI_CENTER);
+	}
+}
+static void audit_wait_tick(uint32_t sectors)
+{
+	audit_wait_draw(g_wait_name, (uint32_t)((uint64_t)sectors * RAW_SIZE >> 20));
+	g_drawn = 2;
+	g_backdrop_shown = 0;
+	flip_frame();   // both buffers
+	flip_frame();
+}
+
+static void audit_screen()
+{
+	AuditView v;
+	audit_view_init(v);
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			audit_draw(v);
+			g_drawn = 2;
+			g_backdrop_shown = 0;
+		}
+		flip_frame();
+		int p = pad_pressed();
+		if (p) g_redraw = 2;
+		if (p & (B_UP | B_DOWN | B_L2 | B_R2)) audit_nav(v, p);
+		if (p & B_CROSS) audit_open(v);
+		if ((p & B_TRIANGLE) && audit_can_undo(v)) {
+			char label[160], q[256];
+			audit_label(v, v.row, label, sizeof(label));
+			snprintf(q, sizeof(q), T(STR_AUDIT_UNDO_Q), label);
+			if (own_dialog(q, 1) == 1) {
+				char why[200];
+				g_check_ui = 1;
+				int rc = audit_undo(v, why, sizeof(why));
+				g_check_ui = 0;
+				if (rc != 0) {
+					char m[300];
+					snprintf(m, sizeof(m), T(STR_AUDIT_REFUSED), why);
+					own_dialog(m, 0);
+				}
+			}
+			pad_pressed();
+			g_redraw = 2;
+		}
+		if ((p & B_CIRCLE) && !audit_back(v)) return;
+	}
+}
+
 // Settings (START): the standard for the drives (speed, re-reads, check, eject, rip at once; a
 // drive can have its own values, SELECT on its card), Redump, the Redump copy, remote view, webhooks.
 // One frame of the settings (START): the rows with their values and the buttons of the focused
 // row. (The UI tests on the host draw it.)
 static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, int webhook_on, int rdcount, const char *rdver, time_t rdwhen)
 {
-	const int NROWS = 11;
+	const int NROWS = 13;
 	draw_backdrop();
-	char vals[11][96];
+	char vals[13][96];
 	fn_label(g_name_pat, vals[5], sizeof(vals[5]));
 	fmt_speed(sd.speed, vals[0], sizeof(vals[0]));
 	fmt_int(sd.retries, vals[1], sizeof(vals[1]));
@@ -3844,11 +4242,13 @@ static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, i
 		for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
 		snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
 	}
-	snprintf(vals[10], sizeof(vals[10]), "v%s", APP_VERSION);
-	const char *labels[11] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
-	                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_ABOUT)};
-	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 10);   // the Redump download and About are actions
-	if (row == 10) {   // About: X opens it
+	vals[10][0] = 0;   // the audit log: X opens it
+	snprintf(vals[11], sizeof(vals[11]), T(STR_AUDIT_MB_VAL), g_audit_mb);
+	snprintf(vals[12], sizeof(vals[12]), "v%s", APP_VERSION);
+	const char *labels[13] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
+	                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_AUDIT), T(STR_L_AUDIT_MB), T(STR_L_ABOUT)};
+	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 10 | 1u << 12);   // the Redump download, the audit log and About are actions
+	if (row == 10 || row == 12) {   // the audit log and About: X opens them
 		const char *b[] = {"updown", "l2r2", "cross", "circle"};
 		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_OPEN), T(STR_HINT_BACK)};
 		hint_bar(b, l, 4);
@@ -3866,7 +4266,7 @@ static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, i
 static void settings_screen()
 {
 	int redump = g_redump, remote = g_remote, webhook_on = g_webhook_on, row = 0;
-	const int NROWS = 11;   // the last row opens About
+	const int NROWS = 13;   // the last row opens About
 	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	DriveCfg sd = g_std;
 	char rdver[64] = "";
@@ -3893,8 +4293,15 @@ static void settings_screen()
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 10) {
+		if ((p & B_CROSS) && row == 12) {
 			about_screen();
+			pad_pressed();
+			g_redraw = 2;
+			continue;
+		}
+		if ((p & B_CROSS) && row == 10) {
+			audit_screen();
+			sd = g_std; redump = g_redump; remote = g_remote; webhook_on = g_webhook_on;   // an undo may have changed them
 			pad_pressed();
 			g_redraw = 2;
 			continue;
@@ -3913,7 +4320,7 @@ static void settings_screen()
 			continue;
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (row == 7 || row == 10) d = 0;
+		if (row == 7 || row == 10 || row == 12) d = 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) {
 			reset = own_dialog(T(STR_RESET_Q), 1) == 1;
@@ -3926,6 +4333,7 @@ static void settings_screen()
 				redump = RD_OFF;
 				if (remote) remote_set(0);
 				remote = 0; webhook_on = 0; g_webhook_step = 5;
+				g_audit_mb = 256;
 			}
 		}
 		if (d && !reset) {
@@ -3952,14 +4360,22 @@ static void settings_screen()
 				if (remote) notify_url(STR_REMOTE_HELP, "");
 			} else if (row == 9) {
 				webhook_on = !webhook_on;
+			} else if (row == 11) {   // right = more; no wrap-around: 256 to 1 MB would drop the kept sectors
+				int k = 0, ns = (int)(sizeof(audit_mb_steps) / sizeof(audit_mb_steps[0]));
+				while (k < ns - 1 && audit_mb_steps[k] != g_audit_mb) k++;
+				k += d;
+				if (k < 0) k = 0;
+				if (k > ns - 1) k = ns - 1;
+				g_audit_mb = audit_mb_steps[k];
 			}
 		}
 		if (d || reset) {   // every change is applied and saved immediately
 			g_std = sd; g_redump = redump; g_remote = remote; g_webhook_on = webhook_on;
 			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
 			cfg_save();
-			logf("settings saved: standard speed=%d retries=%d check=%d eject=%d autostart=%d, redump=%d remote=%d webhook=%d",
-			     sd.speed, sd.retries, sd.check, sd.eject, sd.autostart, g_redump, g_remote, g_webhook_on);
+			audit_apply_cap();   // a smaller size drops the oldest kept sectors at once
+			logf("settings saved: standard speed=%d retries=%d check=%d eject=%d autostart=%d, redump=%d remote=%d webhook=%d audit_mb=%d",
+			     sd.speed, sd.retries, sd.check, sd.eject, sd.autostart, g_redump, g_remote, g_webhook_on, g_audit_mb);
 		}
 		if (p & B_CIRCLE) return;
 	}
@@ -5300,6 +5716,7 @@ static void job_reset(int c);
 // has none). As the card's job (job = 1) it shows its progress, can be cancelled and compares with
 // Redump as set. Otherwise (the audit's undo, on the UI thread) it touches no card's state and
 // compares with the local copy only (none: unchecked). Returns 0 checked, 1 cancelled, -1 no image.
+static void (*g_check_tick)(uint32_t sectors);   // set: called now and then while check_image reads (not as a job)
 static int check_image(const char *base, int job = 0)
 {
 	char path[320];
@@ -5347,6 +5764,7 @@ static int check_image(const char *base, int job = 0)
 			md5_update(&md[t], buf + (size_t)i * RAW_SIZE, RAW_SIZE);
 		}
 		if (job) { g_done = lba; if (lba > g_total) g_total = lba; }
+		else if (g_check_tick && lba % (16 * 512) == 0) g_check_tick(lba);   // about every 19 MB
 		if (got < 512 * RAW_SIZE) break;
 	}
 	vf_close(f);
@@ -5486,7 +5904,21 @@ static void recheck_hook(const char *file, const uint32_t *lbas, const uint8_t *
 	size_t len = strlen(base);
 	if (len > 4 && !strcmp(base + len - 4, ".bin")) base[len - 4] = 0;
 	if (n > 0 && lbas && zero) riplog_put_back(base, lbas, zero, n);
+	if (g_check_ui) {   // the audit screen's undo: reading the whole image takes a while, the screen says so
+		const char *slash = strrchr(base, '/');
+		snprintf(g_wait_name, sizeof(g_wait_name), "%s", slash ? slash + 1 : base);
+		audit_wait_tick(0);
+		g_check_tick = audit_wait_tick;
+	}
 	check_image(base);
+	g_check_tick = NULL;
+	// a drive's card showing this rip: its Redump state and known errors follow the log at once
+	for (int c = 0; c < NCARDS; c++) {
+		Card &k = g_cards[c];
+		if (strcmp(k.exist, base) && strcmp(k.base, base)) continue;
+		if (k.state == DISC_READY && !card_busy(c)) { OnCard o(c); prev_rip_check(); }
+		else k.recheck = 1;   // busy: the home screen looks again when it is idle
+	}
 	g_redraw = 2;   // the tabs' Redump icons follow the log
 }
 
@@ -5875,6 +6307,20 @@ static int draw_wrapped(UiFont f, const char *text, int y, uint32_t col)
 }
 
 // Message (X OK) or question (X Yes, O No) in the app's own style. Returns 1 = OK/yes, 2 = no.
+static void own_dialog_draw(const char *msg, int yesno)
+{
+	draw_backdrop();
+	draw_wrapped(UI_BODY, msg, ui_h() / 3, 0xE8E8F0);
+	if (yesno) {
+		const char *b[] = {"cross", "circle"};
+		const char *l[] = {T(STR_HINT_YES), T(STR_HINT_NO)};
+		hint_bar(b, l, 2);
+	} else {
+		const char *b[] = {"cross"};
+		const char *l[] = {T(STR_HINT_OK)};
+		hint_bar(b, l, 1);
+	}
+}
 static int own_dialog(const char *msg, int yesno)
 {
 	pad_pressed();
@@ -5882,17 +6328,7 @@ static int own_dialog(const char *msg, int yesno)
 	while (!exit_requested) {
 		if (g_redraw > 0) {
 			g_redraw = 0;
-			draw_backdrop();
-			draw_wrapped(UI_BODY, msg, ui_h() / 3, 0xE8E8F0);
-			if (yesno) {
-				const char *b[] = {"cross", "circle"};
-				const char *l[] = {T(STR_HINT_YES), T(STR_HINT_NO)};
-				hint_bar(b, l, 2);
-			} else {
-				const char *b[] = {"cross"};
-				const char *l[] = {T(STR_HINT_OK)};
-				hint_bar(b, l, 1);
-			}
+			own_dialog_draw(msg, yesno);
 			g_drawn = 2;
 			g_backdrop_shown = 0;
 		}
