@@ -5,6 +5,13 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.0.2](https://github.com/bjornwiberg/psx-ripper/compare/v1.0.1...v1.0.2) (2026-11-03)
+
+
+### Bug fixes
+
+* remote view picture comes back after the phone has been away ([#5](https://github.com/bjornwiberg/psx-ripper/issues/5)) ([7182ac5](https://github.com/bjornwiberg/psx-ripper/commit/7182ac51da18b2c602ce24724fddbc96e51d1702))
+
 ## [1.0.1](https://github.com/bjornwiberg/psx-ripper/compare/v1.0.0...v1.0.1) (2026-11-02)
 
 
