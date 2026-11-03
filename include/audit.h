@@ -49,4 +49,23 @@ int audit_events(AuditDom dom, const char *disc, AuditRow *out, int max);
 // All rows of one job in log order, skipping the first `first`.
 int audit_rows(uint32_t job, AuditRow *out, int first, int max);
 
+// Undo. Reversible are `sector` rows (their bytes still kept in job<N>.bin, the image's sector still
+// equal to the row's new bytes, the job not running) and `setting` rows (the setting still has the
+// row's `after`). Rows go newest first and stop at the first one that cannot be undone; rows undone
+// before that stay undone. Each undone row gets an `undo` row (`what` = its id). Returns 0 when done,
+// -1 when refused; why[] then names the row and the reason.
+int audit_undo_row(uint32_t id, char *why, size_t n);
+int audit_undo_job(uint32_t job, char *why, size_t n);
+// every reversible row of a disc from time since_t on
+int audit_undo_disc_since(const char *disc, uint32_t since_t, char *why, size_t n);
+// set_setting applies a config key/value the way the app does (0 = applied); recheck checks a rip
+// again from its file, called once per file after its sectors were undone. Both are called without
+// the audit's lock held, so they may write audit rows. NULL = none (a setting is then not undone).
+void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
+                     void (*recheck)(const char *file));
+// The audit_mb setting in bytes (default 256 MB). When the job<N>.bin files together exceed it, the
+// oldest are deleted, never the file of a running job; their rows stay, no longer reversible.
+// Applies at once.
+void audit_set_cap(uint64_t bytes);
+
 #endif

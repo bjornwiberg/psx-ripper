@@ -8,7 +8,10 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/mutex.h>
+#include <dirent.h>
 #include <vector>
+#include <string>
+#include <map>
 #include <algorithm>
 
 #define LINE_MAX_LEN 4096
@@ -29,8 +32,20 @@ struct JobSlot { uint32_t job; AuditSrc src; char disc[96]; uint32_t blobs; };
 static JobSlot g_slots[8];
 static int g_slot_rr;
 
+// jobs begun and not ended in this run: their job<N>.bin is never pruned and their rows not undone
+static uint32_t g_running[16];
+static uint64_t g_cap = 256ull << 20, g_blob_total;   // the audit_mb setting; all job<N>.bin together
+static int (*g_set_setting)(const char *key, const char *value);
+static void (*g_recheck)(const char *file);
+
 static void lock() { sysMutexLock(g_mx, 0); }
 static void unlock() { sysMutexUnlock(g_mx); }
+
+static bool is_running(uint32_t job)
+{
+	for (uint32_t j : g_running) if (j && j == job) return true;
+	return false;
+}
 
 static void path_log(char *out, size_t n) { snprintf(out, n, "%s/audit.log", g_dir); }
 static void path_blob(char *out, size_t n, uint32_t job) { snprintf(out, n, "%s/job%u.bin", g_dir, (unsigned)job); }
@@ -174,9 +189,47 @@ static bool cut_log(long keep)
 	if (in) fclose(in);
 	bool ok = in && out && done == keep;
 	if (out && fclose(out) != 0) ok = false;
-	if (ok && (remove(p) != 0 || rename(t, p) != 0)) ok = false;
-	if (!ok) remove(t);
-	return ok;
+	if (!ok) { remove(t); return false; }
+	if (rename(t, p) == 0) return true;   // replaces the log where the file system allows it
+	if (remove(p) != 0) { remove(t); return false; }
+	// The log is gone now and the tmp copy holds every row: never delete it. audit_init takes it
+	// back when it finds no log next to it.
+	return rename(t, p) == 0;
+}
+
+// Sums the job<N>.bin files and, while they exceed the cap, deletes the oldest whose job is not
+// running. Caller holds the lock.
+static void prune()
+{
+	struct Blob { uint32_t job; uint64_t size; };
+	std::vector<Blob> v;
+	uint64_t total = 0;
+	if (DIR *d = opendir(g_dir)) {
+		while (struct dirent *de = readdir(d)) {
+			const char *nm = de->d_name;
+			char *end;
+			if (strncmp(nm, "job", 3)) continue;
+			unsigned long job = strtoul(nm + 3, &end, 10);
+			if (end == nm + 3 || strcmp(end, ".bin")) continue;
+			char p[256];
+			struct stat st;
+			path_blob(p, sizeof p, (uint32_t)job);
+			if (stat(p, &st) != 0) continue;
+			Blob b = {(uint32_t)job, (uint64_t)st.st_size};
+			v.push_back(b);
+			total += b.size;
+		}
+		closedir(d);
+	}
+	std::sort(v.begin(), v.end(), [](const Blob &a, const Blob &b) { return a.job < b.job; });
+	for (const Blob &b : v) {
+		if (total <= g_cap) break;
+		if (is_running(b.job)) continue;
+		char p[256];
+		path_blob(p, sizeof p, b.job);
+		if (remove(p) == 0) total -= b.size;
+	}
+	g_blob_total = total;
 }
 
 void audit_init(const char *dir, const AuditIo *io)
@@ -193,8 +246,12 @@ void audit_init(const char *dir, const AuditIo *io)
 	mkdirs(g_dir);
 	g_next_id = g_next_job = 1;
 	memset(g_slots, 0, sizeof g_slots);
-	char p[256];
+	memset(g_running, 0, sizeof g_running);
+	char p[256], t[260];
 	path_log(p, sizeof p);
+	snprintf(t, sizeof t, "%s.tmp", p);
+	struct stat st;
+	if (stat(p, &st) != 0 && stat(t, &st) == 0) rename(t, p);   // a cut that lost its rename
 	long size = 0;
 	if (FILE *f = fopen(p, "rb")) { fseek(f, 0, SEEK_END); size = ftell(f); fclose(f); }
 	long good = scan_log([](const AuditRow &r) {
@@ -203,9 +260,11 @@ void audit_init(const char *dir, const AuditIo *io)
 	});
 	// Drop a half line so the next row does not glue onto it. If that fails, keep the original and
 	// end the half line with a newline; it has no end marker, so it is never read as a row.
+	// "r+b" does not create the log: after a failed rename the rows are in the tmp copy only.
 	if (good < size && !cut_log(good)) {
-		if (FILE *f = fopen(p, "ab")) { fputc('\n', f); fclose(f); }
+		if (FILE *f = fopen(p, "r+b")) { fseek(f, 0, SEEK_END); fputc('\n', f); fclose(f); }
 	}
+	prune();
 	unlock();
 }
 
@@ -269,6 +328,7 @@ uint32_t audit_job_begin(AuditSrc src, const char *disc, const char *name, const
 	s->job = job;
 	s->src = src;
 	copyn(s->disc, sizeof s->disc, disc);
+	for (uint32_t &r : g_running) if (!r) { r = job; break; }
 	write_row(job, src, AU_RIPS, disc, "job", what, name, "", NULL, false, 0, 0);
 	unlock();
 	return job;
@@ -278,6 +338,7 @@ void audit_job_end(uint32_t job, const char *result)
 {
 	lock();
 	JobSlot *s = slot_of(job);
+	for (uint32_t &r : g_running) if (r == job) r = 0;
 	write_row(job, s->src, AU_RIPS, s->disc, "result", "", "", result, NULL, false, 0, 0);
 	unlock();
 }
@@ -313,11 +374,13 @@ void audit_sector(uint32_t job, const char *file, uint32_t lba, const uint8_t *o
 		fwrite(new2352 ? new2352 : zero, 1, SECTOR, f);
 		fflush(f);
 		fclose(f);
+		g_blob_total += BLOB_ROW;
 	}
 	s->blobs++;
 	char what[24];
 	snprintf(what, sizeof what, "lba %u", (unsigned)lba);
 	write_row(job, s->src, AU_RIPS, s->disc, "sector", what, "", "", file, true, lba, blob);
+	if (g_blob_total > g_cap) prune();
 	unlock();
 }
 
@@ -326,6 +389,84 @@ void audit_setting(AuditSrc src, const char *key, const char *before, const char
 	lock();
 	write_row(0, src, AU_SETTINGS, "", "setting", key, before, after, NULL, false, 0, 0);
 	unlock();
+}
+
+// ---- undo state ----
+
+// What the log says about undo: which rows were undone, and the value each setting has now.
+struct UndoState {
+	std::vector<uint32_t> undone;   // sorted
+	std::map<std::string, std::string> cur;
+	bool is_undone(uint32_t id) const { return std::binary_search(undone.begin(), undone.end(), id); }
+};
+
+// Caller holds the lock.
+static void build_state(UndoState &s)
+{
+	std::map<uint32_t, std::pair<std::string, std::string> > sets;   // setting row -> key, before
+	scan_log([&](const AuditRow &r) {
+		if (!strcmp(r.kind, "setting")) {
+			s.cur[r.what] = r.after;
+			sets[r.id] = std::make_pair(std::string(r.what), std::string(r.before));
+		} else if (!strcmp(r.kind, "undo")) {
+			uint32_t id = (uint32_t)strtoul(r.what, NULL, 10);
+			if (!id) return;
+			s.undone.push_back(id);
+			auto it = sets.find(id);
+			if (it != sets.end()) s.cur[it->second.first] = it->second.second;
+		}
+	});
+	std::sort(s.undone.begin(), s.undone.end());
+}
+
+static const char *base_name(const char *path)
+{
+	const char *b = strrchr(path, '/');
+	return b ? b + 1 : path;
+}
+
+static uint8_t g_blob_buf[BLOB_ROW], g_sec_buf[SECTOR];   // under the lock
+
+// Why a sector row cannot be undone now, or NULL; then g_blob_buf holds its old and new bytes.
+// Caller holds the lock.
+static const char *sector_block(const AuditRow &r, char *msg, size_t n)
+{
+	if (is_running(r.job)) { snprintf(msg, n, "job %u is still running", (unsigned)r.job); return msg; }
+	char p[256];
+	path_blob(p, sizeof p, r.job);
+	FILE *f = fopen(p, "rb");
+	bool kept = f && fseek(f, (long)r.blob * BLOB_ROW, SEEK_SET) == 0 && fread(g_blob_buf, 1, BLOB_ROW, f) == BLOB_ROW;
+	if (f) fclose(f);
+	if (!kept) { snprintf(msg, n, "the sector's bytes are no longer kept (size limit)"); return msg; }
+	void *img = g_io.open ? g_io.open(r.file, "rb") : NULL;
+	if (!img) { snprintf(msg, n, "cannot open %s", base_name(r.file)); return msg; }
+	bool same = g_io.seek(img, (uint64_t)r.lba * SECTOR) == 0 && g_io.read(img, g_sec_buf, SECTOR) == SECTOR &&
+	            !memcmp(g_sec_buf, g_blob_buf + SECTOR, SECTOR);
+	g_io.close(img);
+	if (!same) { snprintf(msg, n, "sector %u of %s changed since", (unsigned)r.lba, base_name(r.file)); return msg; }
+	return NULL;
+}
+
+// Why a row cannot be undone now, or NULL. Caller holds the lock.
+static const char *row_block(const AuditRow &r, const UndoState &s, char *msg, size_t n)
+{
+	if (s.is_undone(r.id)) { snprintf(msg, n, "already undone"); return msg; }
+	if (!strcmp(r.kind, "sector")) return sector_block(r, msg, n);
+	if (!strcmp(r.kind, "setting")) {
+		auto it = s.cur.find(r.what);
+		if (it == s.cur.end() || it->second != r.after) { snprintf(msg, n, "setting %.100s changed since", r.what); return msg; }
+		return NULL;
+	}
+	snprintf(msg, n, "a %s row cannot be undone", r.kind);
+	return msg;
+}
+
+// Fills the computed fields of a row for the queries. Caller holds the lock.
+static void mark(AuditRow &r, const UndoState &s)
+{
+	char msg[96];
+	r.undone = s.is_undone(r.id);
+	r.reversible = !r.undone && (!strcmp(r.kind, "sector") || !strcmp(r.kind, "setting")) && !row_block(r, s, msg, sizeof msg);
 }
 
 // ---- queries ----
@@ -374,28 +515,188 @@ int audit_events(AuditDom dom, const char *disc, AuditRow *out, int max)
 	// keep the newest `max` matches in a ring, then hand them out newest first
 	std::vector<AuditRow> ring(max);
 	int total = 0;
+	UndoState st;
 	lock();
+	build_state(st);
 	scan_log([&](const AuditRow &r) {
 		if (r.dom != dom || !is_event(r)) return;
 		if (disc && *disc && strcmp(disc, r.disc)) return;
 		ring[total % max] = r;
 		total++;
 	});
-	unlock();
 	int n = total < max ? total : max;
-	for (int i = 0; i < n; i++) out[i] = ring[(total - 1 - i) % max];
+	for (int i = 0; i < n; i++) {
+		out[i] = ring[(total - 1 - i) % max];
+		mark(out[i], st);
+	}
+	unlock();
 	return n;
 }
 
 int audit_rows(uint32_t job, AuditRow *out, int first, int max)
 {
 	int n = 0, seen = 0;
+	UndoState st;
 	lock();
+	build_state(st);
 	scan_log([&](const AuditRow &r) {
 		if (r.job != job || n >= max) return;
 		if (seen++ < first) return;
 		out[n++] = r;
 	});
+	for (int i = 0; i < n; i++) mark(out[i], st);   // reads the image for sector rows: one page only
 	unlock();
 	return n;
+}
+
+// ---- undo ----
+
+static void say(char *why, size_t n, const char *fmt, uint32_t id, const char *msg)
+{
+	if (why && n) snprintf(why, n, fmt, (unsigned)id, msg);
+}
+
+// A sector row to undo, kept small (a job can have thousands): file and disc index into lists.
+struct Target { uint32_t id, job, lba, blob; int file, disc; };
+
+static int index_of(std::vector<std::string> &v, const char *s)
+{
+	for (size_t i = 0; i < v.size(); i++) if (v[i] == s) return (int)i;
+	v.push_back(s);
+	return (int)v.size() - 1;
+}
+
+// The sector rows `want` picks that are not undone yet, newest first.
+template <class F> static void collect(F want, std::vector<Target> &ts, std::vector<std::string> &files,
+                                       std::vector<std::string> &discs)
+{
+	UndoState st;
+	lock();
+	build_state(st);
+	scan_log([&](const AuditRow &r) {
+		if (strcmp(r.kind, "sector") || !want(r) || st.is_undone(r.id)) return;
+		Target t = {r.id, r.job, r.lba, r.blob, index_of(files, r.file), index_of(discs, r.disc)};
+		ts.push_back(t);
+	});
+	unlock();
+	std::reverse(ts.begin(), ts.end());
+}
+
+// Writes each sector's old bytes back, newest first, and stops at the first refusal. Then every
+// file that got a sector back is checked again (outside the lock: the check writes rows).
+static int undo_sectors(const std::vector<Target> &ts, const std::vector<std::string> &files,
+                        const std::vector<std::string> &discs, char *why, size_t n)
+{
+	std::vector<char> touched(files.size(), 0);
+	int rc = 0;
+	char msg[160];
+	for (const Target &t : ts) {
+		AuditRow r;
+		memset(&r, 0, sizeof r);
+		r.id = t.id; r.job = t.job; r.lba = t.lba; r.blob = t.blob; r.dom = AU_RIPS;
+		copyn(r.kind, sizeof r.kind, "sector");
+		copyn(r.file, sizeof r.file, files[t.file].c_str());
+		copyn(r.disc, sizeof r.disc, discs[t.disc].c_str());
+		lock();
+		const char *e = sector_block(r, msg, sizeof msg);
+		if (!e) {
+			void *img = g_io.open(r.file, "r+b");
+			bool ok = img && g_io.seek(img, (uint64_t)r.lba * SECTOR) == 0 && g_io.write(img, g_blob_buf, SECTOR) == SECTOR;
+			if (img && g_io.close(img) != 0) ok = false;
+			if (ok) {
+				char id[16];
+				snprintf(id, sizeof id, "%u", (unsigned)r.id);
+				write_row(r.job, AU_UNDO, r.dom, r.disc, "undo", id, "", "", NULL, false, 0, 0);
+			} else {
+				snprintf(msg, sizeof msg, "cannot write %s", base_name(r.file));
+				e = msg;
+			}
+		}
+		unlock();
+		if (e) { say(why, n, "row %u: %s", t.id, e); rc = -1; break; }
+		touched[t.file] = 1;
+	}
+	void (*recheck)(const char *) = g_recheck;
+	if (recheck)
+		for (size_t i = 0; i < files.size(); i++) if (touched[i]) recheck(files[i].c_str());
+	return rc;
+}
+
+// Sets a setting back to the row's `before` through the app's hook (outside the lock: the app
+// records the change itself).
+static int undo_setting_row(const AuditRow &r, char *why, size_t n)
+{
+	int (*set)(const char *, const char *) = g_set_setting;
+	if (!set) { say(why, n, "row %u: %s", r.id, "settings cannot be changed here"); return -1; }
+	char msg[160];
+	UndoState st;
+	lock();
+	build_state(st);
+	const char *e = row_block(r, st, msg, sizeof msg);
+	unlock();
+	if (e) { say(why, n, "row %u: %s", r.id, e); return -1; }
+	if (set(r.what, r.before) != 0) { say(why, n, "row %u: setting %s could not be applied", r.id, r.what); return -1; }
+	char id[16];
+	snprintf(id, sizeof id, "%u", (unsigned)r.id);
+	lock();
+	write_row(0, AU_UNDO, AU_SETTINGS, "", "undo", id, r.after, r.before, NULL, false, 0, 0);
+	unlock();
+	return 0;
+}
+
+int audit_undo_row(uint32_t id, char *why, size_t n)
+{
+	AuditRow row;
+	memset(&row, 0, sizeof row);
+	bool found = false, undone = false;
+	if (why && n) why[0] = 0;
+	UndoState st;
+	lock();
+	build_state(st);
+	scan_log([&](const AuditRow &r) { if (r.id == id) { row = r; found = true; } });
+	undone = found && st.is_undone(id);
+	unlock();
+	if (!found) { say(why, n, "row %u: %s", id, "no such row"); return -1; }
+	if (undone) { say(why, n, "row %u: %s", id, "already undone"); return -1; }
+	if (!strcmp(row.kind, "setting")) return undo_setting_row(row, why, n);
+	if (strcmp(row.kind, "sector")) { say(why, n, "row %u: a %s row cannot be undone", id, row.kind); return -1; }
+	std::vector<Target> ts;
+	std::vector<std::string> files, discs;
+	Target t = {row.id, row.job, row.lba, row.blob, index_of(files, row.file), index_of(discs, row.disc)};
+	ts.push_back(t);
+	return undo_sectors(ts, files, discs, why, n);
+}
+
+int audit_undo_job(uint32_t job, char *why, size_t n)
+{
+	if (why && n) why[0] = 0;
+	std::vector<Target> ts;
+	std::vector<std::string> files, discs;
+	collect([job](const AuditRow &r) { return r.job == job; }, ts, files, discs);
+	return undo_sectors(ts, files, discs, why, n);
+}
+
+int audit_undo_disc_since(const char *disc, uint32_t since_t, char *why, size_t n)
+{
+	if (why && n) why[0] = 0;
+	if (!disc || !*disc) { if (why && n) snprintf(why, n, "no disc given"); return -1; }
+	std::vector<Target> ts;
+	std::vector<std::string> files, discs;
+	collect([disc, since_t](const AuditRow &r) { return r.t >= since_t && !strcmp(r.disc, disc); }, ts, files, discs);
+	return undo_sectors(ts, files, discs, why, n);
+}
+
+void audit_set_hooks(int (*set_setting)(const char *key, const char *value), void (*recheck)(const char *file))
+{
+	g_set_setting = set_setting;
+	g_recheck = recheck;
+}
+
+void audit_set_cap(uint64_t bytes)
+{
+	if (!g_mx_made) { g_cap = bytes; return; }   // before audit_init: pruned there
+	lock();
+	g_cap = bytes;
+	prune();
+	unlock();
 }
