@@ -692,6 +692,111 @@ static void cap_lowered_prunes_now(int &bad)
 	audit_set_cap(256ull << 20);
 }
 
+// Every verdict that a row cannot be undone carries a reason code (the UI says it in its language)
+static void reason_codes(int &bad)
+{
+	fresh();
+	hooks_reset();
+	img_make(8);
+	AuditRow r;
+	AuditReason rs;
+	char why[160];
+	// an unfinished rip
+	uint32_t rip = audit_job_begin(AU_PAD, "U:8", "U", "rip");
+	repair_write(rip, 1, 0x11, 0x22);
+	audit_job_end(rip, "cancelled");
+	CHECK(row_of(rip, sector_id(rip, 0), &r) && r.why == AW_UNFINISHED && r.why_job == rip);
+	CHECK(audit_undo_job(rip, why, sizeof why, &rs) == -1 && rs.code == AW_UNFINISHED && rs.job == rip && strstr(why, "rip was not finished"));
+	// the job row itself is a record, not a change
+	uint32_t jid = 0;
+	{ static AuditRow a[8]; int n = audit_rows(rip, a, 0, 8); for (int i = 0; i < n; i++) if (!strcmp(a[i].kind, "job")) { jid = a[i].id; CHECK(a[i].why == AW_RECORD); } }
+	CHECK(jid && audit_undo_row(jid, why, sizeof why, &rs) == -1 && rs.code == AW_RECORD && rs.row == jid);
+	// a sector changed since
+	uint32_t rep = audit_job_begin(AU_PAD, "V:8", "V", "repair");
+	repair_write(rep, 2, 0x11, 0x22);
+	audit_job_end(rep, "finished");
+	uint8_t x[2352];
+	sector_fill(x, 0x33);
+	img_put(2, x);
+	uint32_t sid = sector_id(rep, 0);
+	CHECK(row_of(rep, sid, &r) && r.reversible == 0 && r.why == AW_SECTOR_CHANGED && r.lba == 2);
+	CHECK(audit_undo_row(sid, why, sizeof why, &rs) == -1 && rs.code == AW_SECTOR_CHANGED && rs.lba == 2 && rs.row == sid);
+	// still running
+	uint32_t run = audit_job_begin(AU_PAD, "W:8", "W", "repair");
+	repair_write(run, 3, 0x11, 0x22);
+	CHECK(row_of(run, sector_id(run, 0), &r) && r.why == AW_RUNNING && r.why_job == run);
+	audit_job_end(run, "finished");
+	// already undone
+	uint32_t s3 = sector_id(run, 0);
+	CHECK(audit_undo_row(s3, why, sizeof why, &rs) == 0 && rs.code == AW_NONE);
+	CHECK(row_of(run, s3, &r) && r.why == AW_ALREADY);
+	CHECK(audit_undo_row(s3, why, sizeof why, &rs) == -1 && rs.code == AW_ALREADY);
+	// kept bytes dropped by the size cap
+	uint32_t old = audit_job_begin(AU_PAD, "X:8", "X", "repair");
+	repair_write(old, 4, 0x11, 0x22);
+	audit_job_end(old, "finished");
+	audit_set_cap(0);
+	CHECK(row_of(old, sector_id(old, 0), &r) && r.why == AW_DROPPED);
+	audit_set_cap(256ull << 20);
+	// a secret setting, a setting changed since, an unknown row
+	audit_setting_private(AU_PAD, "webhook", "cleared", "set");
+	uint32_t sec = newest_setting_id();
+	CHECK(audit_undo_row(sec, why, sizeof why, &rs) == -1 && rs.code == AW_SECRET);
+	audit_setting(AU_PAD, "speed", "0", "1");
+	uint32_t s1 = newest_setting_id();
+	audit_setting(AU_PAD, "speed", "1", "2");
+	AuditRow e[8];
+	int n = audit_events(AU_SETTINGS, NULL, e, 8);
+	for (int i = 0; i < n; i++) {
+		if (e[i].id == sec) CHECK(e[i].why == AW_SECRET);
+		if (e[i].id == s1) CHECK(e[i].why == AW_SETTING_CHANGED && !strcmp(e[i].what, "speed"));
+	}
+	CHECK(audit_undo_row(s1, why, sizeof why, &rs) == -1 && rs.code == AW_SETTING_CHANGED && !strcmp(rs.what, "speed"));
+	CHECK(audit_undo_row(999999, why, sizeof why, &rs) == -1 && rs.code == AW_NO_ROW);
+	audit_set_hooks(NULL, NULL);
+}
+
+// audit_job_reversible / audit_disc_reversible: 1 when an undo would undo at least one row
+static void reversible_queries(int &bad)
+{
+	fresh();
+	hooks_reset();
+	img_make(8);
+	AuditReason rs;
+	char why[160];
+	// a disc whose only rows are an unfinished rip
+	uint32_t rip = audit_job_begin(AU_PAD, "U:8", "U", "rip");
+	repair_write(rip, 1, 0x11, 0x22);
+	audit_job_end(rip, "cancelled");
+	CHECK(audit_job_reversible(rip, &rs) == 0 && rs.code == AW_UNFINISHED);
+	CHECK(audit_disc_reversible("U:8", &rs) == 0 && rs.code == AW_UNFINISHED);
+	// a check wrote nothing: nothing to undo
+	uint32_t chk = audit_job_begin(AU_PAD, "C:8", "C", "check");
+	audit_job_end(chk, "finished");
+	CHECK(audit_job_reversible(chk, &rs) == 0 && rs.code == AW_NOTHING);
+	CHECK(audit_disc_reversible("C:8", &rs) == 0 && rs.code == AW_NOTHING);
+	// a finished repair: yes, until it is undone
+	uint32_t rep = audit_job_begin(AU_PAD, "V:8", "V", "repair");
+	repair_write(rep, 2, 0x11, 0x22);
+	repair_write(rep, 3, 0x11, 0x22);
+	audit_job_end(rep, "finished");
+	CHECK(audit_job_reversible(rep, &rs) == 1 && rs.code == AW_NONE);
+	CHECK(audit_disc_reversible("V:8", NULL) == 1);
+	// its newest sector changed since: the undo would stop at once, so no
+	uint8_t x[2352];
+	sector_fill(x, 0x44);
+	img_put(3, x);
+	CHECK(audit_job_reversible(rep, &rs) == 0 && rs.code == AW_SECTOR_CHANGED && rs.lba == 3);
+	CHECK(audit_disc_reversible("V:8", &rs) == 0 && rs.code == AW_SECTOR_CHANGED);
+	CHECK(audit_undo_job(rep, why, sizeof why) == -1);
+	sector_fill(x, 0x22);
+	img_put(3, x);
+	CHECK(audit_undo_job(rep, why, sizeof why) == 0);
+	CHECK(audit_job_reversible(rep, &rs) == 0 && rs.code == AW_NOTHING);
+	CHECK(audit_disc_reversible("V:8", &rs) == 0);
+	audit_set_hooks(NULL, NULL);
+}
+
 int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
@@ -706,6 +811,7 @@ int main()
 		{"undo_unfinished_repair", undo_unfinished_repair},
 		{"undo_refused_while_disc_busy", undo_refused_while_disc_busy}, {"undo_row_lost", undo_row_lost},
 		{"cap_keeps_running_job", cap_keeps_running_job}, {"cap_lowered_prunes_now", cap_lowered_prunes_now},
+		{"reason_codes", reason_codes}, {"reversible_queries", reversible_queries},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {

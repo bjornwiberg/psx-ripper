@@ -179,7 +179,8 @@ static void audit_scenarios()
 	g_std.speed = 1; g_redump = RD_OFF; g_webhook_hdr[0][0] = 0; g_audit_mb = 256;
 	g_input_src = AU_PAD; cfg_save();   // primes
 	g_std.speed = 2; cfg_save();
-	g_input_src = AU_REMOTE; g_redump = RD_LOCAL; cfg_save();
+	g_input_src = AU_REMOTE; g_redump = RD_ONLINE; cfg_save();
+	g_redump = RD_LOCAL; cfg_save();   // the row before is then "changed since"
 	g_input_src = AU_PAD; snprintf(g_webhook_hdr[0], sizeof g_webhook_hdr[0], "X-Token: abc"); cfg_save();
 	g_input_src = AU_MCP; g_audit_mb = 64; cfg_save();
 	g_input_src = AU_PAD;
@@ -251,11 +252,24 @@ static void audit_scenarios()
 	if (v.level != 2 || v.n != 3 || strcmp(av_rows[0].what, "rip") || audit_can_undo(v))
 		{ printf("FAIL FF9's events: %d, undo of the cancelled rip offered %d\n", v.n, audit_can_undo(v)); bad++; }
 	aframe("audit-events-cancelled", v);
-	if (!has_text(T(STR_AUDIT_NO_UNDO))) { printf("FAIL the cancelled rip does not say it cannot be undone\n"); bad++; }
-	audit_back(v); audit_back(v);   // the domains
+	if (!has_text(T(STR_AW_UNFINISHED))) { printf("FAIL the cancelled rip does not say why it cannot be undone\n"); bad++; }
+	audit_back(v);   // the discs, FF9 focused: its only change is the cancelled rip's, so no undo
+	if (v.level != 1 || v.row != 1 || audit_can_undo(v)) { printf("FAIL the FF9 disc offers undo (%d)\n", audit_can_undo(v)); bad++; }
+	aframe("audit-discs-no-undo", v);
+	if (!has_text(T(STR_AW_UNFINISHED)) || has_text(T(STR_HINT_UNDO))) { printf("FAIL the FF9 disc: no reason, or an undo hint\n"); bad++; }
+	audit_nav(v, B_UP);   // Alundra: its repair can be undone; the question names the whole disc
+	if (!audit_can_undo(v)) { printf("FAIL the Alundra disc does not offer undo\n"); bad++; }
+	{
+		char q[256], label[160], nm[64];
+		audit_label(v, v.row, label, sizeof label);
+		snprintf(q, sizeof q, T(STR_AUDIT_UNDO_DISC_Q), label);
+		snprintf(nm, sizeof nm, "audit-undo-disc-dialog%s", g_sfx_sv ? "-sv" : "");
+		g_boxes.clear(); own_dialog_draw(q, 1); save(nm); size_t b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+	}
+	audit_back(v);   // the domains
 	audit_nav(v, B_DOWN);
 	audit_open(v);   // Settings
-	if (v.level != 1 || v.dom != AU_SETTINGS || v.n != 4) { printf("FAIL the settings: level %d, %d event(s)\n", v.level, v.n); bad++; }
+	if (v.level != 1 || v.dom != AU_SETTINGS || v.n != 5) { printf("FAIL the settings: level %d, %d event(s)\n", v.level, v.n); bad++; }
 	aframe("audit-settings", v);
 	if (!has_text("MCP") || !has_text(T(STR_AUDIT_SRC_REMOTE))) { printf("FAIL the settings rows do not show their sources\n"); bad++; }
 	{
@@ -267,11 +281,42 @@ static void audit_scenarios()
 		v.row = hdr;
 		if (hdr < 0 || audit_can_undo(v)) { printf("FAIL the header row offers undo\n"); bad++; }
 		aframe("audit-settings-secret", v);
+		if (!has_text(T(STR_AW_SECRET))) { printf("FAIL the secret row does not say why\n"); bad++; }
+		int old = -1;
+		for (int i = 0; i < v.n; i++) if (!strcmp(av_rows[i].what, "redump") && !strcmp(av_rows[i].after, "1")) old = i;
+		v.row = old;
+		char exp[160];
+		snprintf(exp, sizeof exp, T(STR_AW_SETTING_CHANGED), T(STR_L_REDUMP));
+		if (old < 0 || audit_can_undo(v)) { printf("FAIL the redump row changed since offers undo\n"); bad++; }
+		aframe("audit-settings-changed", v);
+		if (!has_text(exp)) { printf("FAIL the changed setting does not say \"%s\"\n", exp); bad++; }
 		v.row = spd;
 		char why[200];
 		if (spd < 0 || !audit_can_undo(v) || audit_undo(v, why, sizeof why) != 0 || g_std.speed != 1) { printf("FAIL undo of the speed from the screen (speed %d)\n", g_std.speed); bad++; }
-		if (v.n != 6) { printf("FAIL the settings after the undo: %d event(s), want 6\n", v.n); bad++; }   // + the undo's own rows
+		if (v.n != 7) { printf("FAIL the settings after the undo: %d event(s), want 7\n", v.n); bad++; }   // + the undo's own rows
 		aframe("audit-settings-undone", v);
+	}
+	{   // sector reasons: one changed since, then all kept bytes dropped by the size cap
+		FILE *f = fopen("out/t5/alundra.bin", "r+b");
+		uint8_t junk[RAW_SIZE];
+		memset(junk, 0x5A, sizeof junk);
+		if (f) { fseek(f, 21L * RAW_SIZE, SEEK_SET); fwrite(junk, 1, sizeof junk, f); fclose(f); }
+		AuditView w;
+		audit_view_init(w);
+		audit_open(w); audit_open(w); audit_open(w);   // Rips, Alundra, the repair
+		audit_nav(w, B_DOWN); audit_nav(w, B_DOWN);   // sector 21
+		char exp[160];
+		snprintf(exp, sizeof exp, T(STR_AW_SECTOR_CHANGED), 21u);
+		const AuditRow *x = audit_focused(w);
+		if (!x || x->lba != 21 || audit_can_undo(w)) { printf("FAIL sector 21 changed since: row %u, undo %d\n", x ? (unsigned)x->lba : 0, audit_can_undo(w)); bad++; }
+		aframe("audit-rows-changed", w);
+		if (!has_text(exp)) { printf("FAIL the changed sector does not say why\n"); bad++; }
+		audit_set_cap(0);
+		audit_back(w); audit_open(w);   // read again
+		audit_nav(w, B_DOWN);   // sector 20
+		aframe("audit-rows-dropped", w);
+		if (audit_can_undo(w) || !has_text(T(STR_AW_DROPPED))) { printf("FAIL a sector whose bytes were dropped: undo %d\n", audit_can_undo(w)); bad++; }
+		audit_set_cap(256ull << 20);
 	}
 	{   // an empty log
 		system("rm -rf out/audit");
@@ -753,6 +798,30 @@ int main()
 	audit_scenarios();
 	host_lang = PS3_LANG_ENGLISH_US; lang_init(); g_sfx_sv = 0;
 	audit_scenarios();
+	{   // undoing an audit_mb row applies the size cap at once (the kept sectors over it go)
+		system("rm -rf out/audit out/psxrip.cfg");
+		audit_init("out/audit", &vf_io);
+		audit_set_hooks(set_setting_hook, NULL);
+		int bad = 0;
+		g_cfg_primed = false; g_input_src = AU_PAD;
+		g_audit_mb = 1; audit_apply_cap(); cfg_save();   // primes
+		g_audit_mb = 256; cfg_save(); audit_apply_cap();
+		AuditRow e[4];
+		int n = audit_events(AU_SETTINGS, NULL, e, 4);
+		uint32_t job = audit_job_begin(AU_APP, "SLES_011.35:500", "Alundra", "repair");
+		uint8_t a[RAW_SIZE], b[RAW_SIZE];
+		memset(a, 1, sizeof a); memset(b, 2, sizeof b);
+		for (uint32_t l = 0; l < 500; l++) audit_sector(job, "out/t5/none.bin", l, a, b);   // 2.3 MB kept
+		audit_job_end(job, "finished");
+		char bp[64], why[200];
+		snprintf(bp, sizeof bp, "out/audit/job%u.bin", (unsigned)job);
+		bool kept = vf_exists(bp);
+		int rc = n == 1 && !strcmp(e[0].what, "audit_mb") ? audit_undo_row(e[0].id, why, sizeof why) : -2;
+		if (!kept || rc != 0 || g_audit_mb != 1 || vf_exists(bp)) { printf("FAIL undo of audit_mb: rows %d, kept %d, rc %d, audit_mb %d, file left %d\n", n, kept, rc, g_audit_mb, vf_exists(bp)); bad++; }
+		g_audit_mb = 256; audit_apply_cap();
+		audit_set_hooks(set_setting_hook, NULL);
+		if (bad) g_fail += bad; else printf("ok   undoing an audit_mb row applies the cap at once\n");
+	}
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

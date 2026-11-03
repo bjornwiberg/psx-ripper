@@ -3821,8 +3821,10 @@ struct AuditView {
 	int base, more;          // level 3: index of av_rows[0] in the event; rows follow the loaded ones
 	int empty;               // level 0: nothing in the log yet
 	int back[4];             // the focused entry of each level, for going back
-	int undo_ok;             // level 2, a job: its kept sectors can be undone
-	char why_key[100], why[200];   // the last refused undo (its row id or disc) and the reason
+	int undo_ok;             // the focused disc or job: an undo would undo something (the core's exact answer)
+	AuditReason no_undo;     // and if not, why
+	char why_key[100];       // the last refused undo (its row id or disc) and the reason
+	AuditReason why;
 };
 static char av_keys[AV_MAX][96], av_names[AV_MAX][96];
 static uint32_t av_last[AV_MAX];
@@ -3848,20 +3850,15 @@ static void av_page(AuditView &v, int from)
 	v.n = v.more ? 2 * AV_PAGE : n;
 }
 
-// Whether the focused job's sectors can be undone: its first sector rows tell (an unfinished rip,
-// sectors changed since or no longer kept). Looked up when the focus moves, not per frame.
+// Whether undoing the focused disc or job would undo anything, and if not why (the core applies
+// every guard the undo does). Asked when the focus moves, not per frame.
 static void av_probe(AuditView &v)
 {
 	v.undo_ok = 0;
+	memset(&v.no_undo, 0, sizeof(v.no_undo));
 	const AuditRow *e = audit_focused(v);
-	if (v.level != 2 || !e || strcmp(e->kind, "job")) return;
-	static AuditRow p[8];
-	int n = audit_rows(e->job, p, 0, 8);
-	for (int i = 0; i < n; i++) {
-		if (strcmp(p[i].kind, "sector")) continue;
-		if (p[i].reversible) { v.undo_ok = 1; return; }
-		if (!p[i].undone) return;
-	}
+	if (v.level == 1 && v.dom == AU_RIPS && v.row < v.n) v.undo_ok = audit_disc_reversible(av_keys[v.row], &v.no_undo);
+	else if (v.level == 2 && e && !strcmp(e->kind, "job")) v.undo_ok = audit_job_reversible(e->job, &v.no_undo);
 }
 
 // The focused row on the screen, the right page loaded.
@@ -3953,7 +3950,7 @@ static int audit_back(AuditView &v)
 // Triangle is offered on: a disc (all its kept changes), a job (its sectors) and a row that can be undone.
 static int audit_can_undo(const AuditView &v)
 {
-	if (v.level == 1 && v.dom == AU_RIPS) return v.n > 0;
+	if (v.level == 1 && v.dom == AU_RIPS) return v.n > 0 && v.undo_ok == 1;
 	const AuditRow *r = audit_focused(v);
 	if (!r) return 0;
 	if (v.level == 2 && !strcmp(r->kind, "job")) return v.undo_ok == 1;
@@ -4003,6 +4000,41 @@ static void av_setting_val(const char *key, const char *val, char *out, size_t n
 	else if (!strcmp(key, "audit_mb")) snprintf(out, n, T(STR_AUDIT_MB_VAL), v);
 	else if (!strcmp(key, "name_pattern")) fn_label(val, out, n);
 	else snprintf(out, n, "%s", val);
+}
+
+// The core's reason as words in the UI's language.
+static void av_reason(const AuditReason &rs, char *out, size_t n)
+{
+	switch (rs.code) {
+	case AW_NONE: out[0] = 0; break;
+	case AW_ALREADY: snprintf(out, n, "%s", T(STR_AW_ALREADY)); break;
+	case AW_RECORD: snprintf(out, n, "%s", T(STR_AW_RECORD)); break;
+	case AW_SECRET: snprintf(out, n, "%s", T(STR_AW_SECRET)); break;
+	case AW_SETTING_CHANGED: snprintf(out, n, T(STR_AW_SETTING_CHANGED), av_key_label(rs.what)); break;
+	case AW_SECTOR_CHANGED: snprintf(out, n, T(STR_AW_SECTOR_CHANGED), (unsigned)rs.lba); break;
+	case AW_DROPPED: snprintf(out, n, "%s", T(STR_AW_DROPPED)); break;
+	case AW_UNFINISHED: snprintf(out, n, "%s", T(STR_AW_UNFINISHED)); break;
+	case AW_RUNNING: case AW_JOB_ON_DISC: snprintf(out, n, "%s", T(STR_AW_RUNNING)); break;
+	case AW_CANNOT_OPEN: snprintf(out, n, T(STR_AW_CANNOT_OPEN), rs.file); break;
+	case AW_CANNOT_WRITE: snprintf(out, n, T(STR_AW_CANNOT_WRITE), rs.file); break;
+	case AW_LOG_WRITE: snprintf(out, n, "%s", T(STR_AW_LOG_WRITE)); break;
+	case AW_NOT_APPLIED: case AW_NO_HOOK: snprintf(out, n, T(STR_AW_NOT_APPLIED), av_key_label(rs.what)); break;
+	case AW_NOTHING: snprintf(out, n, "%s", T(STR_AW_NOTHING)); break;
+	case AW_NO_ROW: case AW_NO_DISC: snprintf(out, n, "%s", T(STR_AW_NOT_FOUND)); break;
+	default: snprintf(out, n, "%s", T(STR_AUDIT_NO_UNDO)); break;
+	}
+}
+// A row's own verdict (from the query) as a reason.
+static AuditReason av_row_reason(const AuditRow &r)
+{
+	AuditReason rs;
+	memset(&rs, 0, sizeof(rs));
+	rs.code = r.why;
+	rs.row = r.id; rs.job = r.why_job; rs.lba = r.lba;
+	snprintf(rs.what, sizeof(rs.what), "%.95s", r.what);   // a config key: short
+	const char *slash = strrchr(r.file, '/');
+	snprintf(rs.file, sizeof(rs.file), "%.95s", slash ? slash + 1 : r.file);
+	return rs;
 }
 
 // What a row did, in words.
@@ -4063,7 +4095,8 @@ static void av_value(const AuditView &v, int i, char *out, size_t n)
 static int g_check_ui;
 static char g_wait_name[128];
 
-// Undoes the focused item; the list is read again and the focus stays on it. 0 = done, else why[] says why not.
+// Undoes the focused item; the list is read again and the focus stays on it. 0 = done, else why[]
+// says why not (English, for the log) and v.why has the reason for the screen.
 static int audit_undo(AuditView &v, char *why, size_t n)
 {
 	const AuditRow *r = audit_focused(v);
@@ -4071,11 +4104,14 @@ static int audit_undo(AuditView &v, char *why, size_t n)
 	av_focus_key(v, key, sizeof(key));
 	why[0] = 0;
 	int rc = -1;
-	if (v.level == 1 && v.dom == AU_RIPS) rc = audit_undo_disc_since(key, 0, why, n);
-	else if (r && v.level == 2 && !strcmp(r->kind, "job")) rc = audit_undo_job(r->job, why, n);
-	else if (r) rc = audit_undo_row(r->id, why, n);
+	AuditReason rs;
+	memset(&rs, 0, sizeof(rs));
+	if (v.level == 1 && v.dom == AU_RIPS) rc = audit_undo_disc_since(key, 0, why, n, &rs);
+	else if (r && v.level == 2 && !strcmp(r->kind, "job")) rc = audit_undo_job(r->job, why, n, &rs);
+	else if (r) rc = audit_undo_row(r->id, why, n, &rs);
+	if (rc) logf("audit undo of %s refused: %s", key, why);   // the English text, for the log
 	snprintf(v.why_key, sizeof(v.why_key), "%s", rc ? key : "");
-	snprintf(v.why, sizeof(v.why), "%s", rc ? why : "");
+	v.why = rs;
 	av_load(v);
 	if (v.level == 1 || v.level == 2) {   // newer rows come first: find the item again
 		char k2[100];
@@ -4127,8 +4163,11 @@ static void audit_draw(const AuditView &v)
 	char det[300] = "", key[100];
 	const AuditRow *r = audit_focused(v);
 	av_focus_key(v, key, sizeof(key));
-	if (v.why_key[0] && !strcmp(v.why_key, key)) snprintf(det, sizeof(det), T(STR_AUDIT_REFUSED), v.why);
-	else if (r && !r->undone && !audit_can_undo(v)) snprintf(det, sizeof(det), "%s", T(STR_AUDIT_NO_UNDO));
+	char rtx[200];
+	if (v.why_key[0] && !strcmp(v.why_key, key)) { av_reason(v.why, rtx, sizeof(rtx)); snprintf(det, sizeof(det), T(STR_AUDIT_REFUSED), rtx); }
+	else if (!audit_can_undo(v) && (v.level == 1 && v.dom == AU_RIPS ? v.n > 0 : r && !strcmp(r->kind, "job") && v.level == 2))
+		av_reason(v.no_undo, det, sizeof(det));   // a disc or a job: the core's answer
+	else if (r && !r->undone && !r->reversible) av_reason(av_row_reason(*r), det, sizeof(det));
 	else if (r && !strcmp(r->kind, "sector")) { const char *s = strrchr(r->file, '/'); snprintf(det, sizeof(det), "%s", s ? s + 1 : r->file); }
 	if (det[0]) footer_note(det);
 	const char *b[5], *l[5];
@@ -4184,15 +4223,16 @@ static void audit_screen()
 		if ((p & B_TRIANGLE) && audit_can_undo(v)) {
 			char label[160], q[256];
 			audit_label(v, v.row, label, sizeof(label));
-			snprintf(q, sizeof(q), T(STR_AUDIT_UNDO_Q), label);
+			snprintf(q, sizeof(q), T(v.level == 1 && v.dom == AU_RIPS ? STR_AUDIT_UNDO_DISC_Q : STR_AUDIT_UNDO_Q), label);   // a disc: all of it
 			if (own_dialog(q, 1) == 1) {
 				char why[200];
 				g_check_ui = 1;
 				int rc = audit_undo(v, why, sizeof(why));
 				g_check_ui = 0;
 				if (rc != 0) {
-					char m[300];
-					snprintf(m, sizeof(m), T(STR_AUDIT_REFUSED), why);
+					char m[300], rtx[200];
+					av_reason(v.why, rtx, sizeof(rtx));
+					snprintf(m, sizeof(m), T(STR_AUDIT_REFUSED), rtx);
 					own_dialog(m, 0);
 				}
 			}

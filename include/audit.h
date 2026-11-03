@@ -9,6 +9,34 @@
 enum AuditSrc { AU_PAD, AU_REMOTE, AU_APP, AU_MCP, AU_UNDO };
 enum AuditDom { AU_RIPS, AU_SETTINGS, AU_FILES, AU_MCPDOM };
 
+// Why a row cannot be undone (or an undo was refused), as a code the UI says in its own language;
+// why[] keeps the English text for logs.
+enum AuditWhy {
+	AW_NONE,              // can be undone / was undone
+	AW_NO_ROW,            // no such row (row)
+	AW_ALREADY,           // already undone (row)
+	AW_RECORD,            // a job, result, redump or undo row: a record, not a change (row)
+	AW_SECRET,            // a secret setting: its value was never logged (row, what = key)
+	AW_SETTING_CHANGED,   // the setting changed since (row, what = key)
+	AW_SECTOR_CHANGED,    // the image's sector changed since (row, lba, file)
+	AW_DROPPED,           // the sector's bytes were dropped by the size cap (row, job)
+	AW_UNFINISHED,        // the rip was not finished (row, job, what = its result or "")
+	AW_RUNNING,           // the job is still running (row, job)
+	AW_JOB_ON_DISC,       // another job runs on this disc (row, job = that one)
+	AW_CANNOT_OPEN,       // the image cannot be opened (row, file)
+	AW_CANNOT_WRITE,      // the image cannot be written (row, file)
+	AW_LOG_WRITE,         // undone, but the log row could not be written (row)
+	AW_NOT_APPLIED,       // the setting could not be applied (row, what = key)
+	AW_NO_HOOK,           // settings cannot be changed here (row)
+	AW_NOTHING,           // a job or disc with nothing (left) to undo
+	AW_NO_DISC            // no disc given
+};
+struct AuditReason {
+	AuditWhy code;
+	uint32_t row, job, lba;
+	char what[96], file[96];   // file: the image's name without its directory
+};
+
 // The image files (undo reads and writes sectors through this): main passes the vf_* functions,
 // the host test stdio. Modes: "rb", "r+b".
 struct AuditIo {
@@ -27,6 +55,8 @@ struct AuditRow {
 	char disc[96], kind[12], what[160], before[192], after[192], file[256];
 	int undone, reversible;
 	int norev;   // the row was written with rev=0: its value is not in the log, it can never be undone
+	AuditWhy why;       // not reversible: why (AW_NONE when it is)
+	uint32_t why_job;   // for AW_RUNNING / AW_JOB_ON_DISC / AW_UNFINISHED / AW_DROPPED: the job meant
 };
 
 // Creates the directory and reads the next row id and job id from the log. A half-written last
@@ -57,10 +87,15 @@ int audit_rows(uint32_t job, AuditRow *out, int first, int max);
 // row's `after`). Rows go newest first and stop at the first one that cannot be undone; rows undone
 // before that stay undone. Each undone row gets an `undo` row (`what` = its id). Returns 0 when done,
 // -1 when refused; why[] then names the row and the reason.
-int audit_undo_row(uint32_t id, char *why, size_t n);
-int audit_undo_job(uint32_t job, char *why, size_t n);
+// rs (may be NULL) gets the reason as a code (AW_NONE when done).
+int audit_undo_row(uint32_t id, char *why, size_t n, AuditReason *rs = NULL);
+int audit_undo_job(uint32_t job, char *why, size_t n, AuditReason *rs = NULL);
 // every reversible row of a disc from time since_t on
-int audit_undo_disc_since(const char *disc, uint32_t since_t, char *why, size_t n);
+int audit_undo_disc_since(const char *disc, uint32_t since_t, char *why, size_t n, AuditReason *rs = NULL);
+// 1 when undoing the job / all of the disc would undo at least one row (the same guards as the
+// undo: its newest row not undone yet must be undoable now), else 0 and rs says why.
+int audit_job_reversible(uint32_t job, AuditReason *rs = NULL);
+int audit_disc_reversible(const char *disc, AuditReason *rs = NULL);
 // set_setting applies a config key/value the way the app does (0 = applied); recheck checks a rip
 // again from its file, called once per file after its sectors were undone, with the n sectors put
 // back (lbas) and for each whether its restored bytes are all zero (zero[i] = 1: a sector the rip

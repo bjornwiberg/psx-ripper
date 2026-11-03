@@ -307,6 +307,21 @@ static const char *en[STR_COUNT] = {
 	"Cannot be undone",
 	"Undo of change %s",
 	"Checking %s again, please wait",
+	"Undo all changes to %s?",
+	"Already undone",
+	"A record, not a change",
+	"Its value was never logged (secret)",
+	"%s has changed since",
+	"Sector %u has changed since",
+	"Its saved data was removed (size limit)",
+	"The rip was not finished",
+	"A job is running on this disc",
+	"Cannot open %s",
+	"Cannot write %s",
+	"Undone, but the log could not be written",
+	"%s could not be set",
+	"Nothing to undo",
+	"Not in the log",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -610,6 +625,21 @@ static const char *sv[STR_COUNT] = {
 	"Kan inte ångras",
 	"Ångring av ändring %s",
 	"Kontrollerar %s igen, vänta",
+	"Ångra alla ändringar av %s?",
+	"Redan ångrad",
+	"En notering, ingen ändring",
+	"Värdet loggades aldrig (hemligt)",
+	"%s har ändrats sedan dess",
+	"Sektor %u har ändrats sedan dess",
+	"Dess sparade data är borttagen (storleksgräns)",
+	"Rippningen blev inte klar",
+	"Ett jobb pågår på skivan",
+	"Kan inte öppna %s",
+	"Kan inte skriva %s",
+	"Ångrad, men loggen kunde inte skrivas",
+	"%s kunde inte ställas in",
+	"Inget att ångra",
+	"Finns inte i loggen",
 };
 
 static const char **table = en;
