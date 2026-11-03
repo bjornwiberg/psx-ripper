@@ -30,9 +30,13 @@ CONTENTID	:=	UP0001-$(APPID)_00-0000000000000000
 # The version: version.txt (semantic versioning, bumped by the release workflow). PARAM.SFO takes
 # "MM.mm", so APP_VER is the major and minor version; the app shows the full one.
 VERSION		:=	$(shell cat $(dir $(firstword $(MAKEFILE_LIST)))version.txt 2>/dev/null || echo 0.0.0)
+# A local build (tools/deploy.sh) adds when it was built: make pkg BUILD_TAG=20261103.0835 shows
+# "1.0.2-20261103.0835" in the app, the XMB and status.json. Releases are built without it.
+BUILD_TAG	?=
+FULL_VERSION	:=	$(VERSION)$(if $(BUILD_TAG),-$(BUILD_TAG))
 APP_VER		:=	$(shell echo $(VERSION) | awk -F. '{printf "%02d.%02d", $$1, $$2}')
 # the name in the XMB, with the version as other homebrew shows it
-TITLE		:=	PSX RiPPER v$(VERSION)
+TITLE		:=	PSX RiPPER v$(FULL_VERSION)
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
@@ -123,7 +127,7 @@ $(OUTPUT).pkg: $(CURDIR)/Makefile $(CURDIR)/version.txt $(CURDIR)/tools/sfo.xml.
 #---------------------------------------------------------------------------------
 $(BUILD):
 	@[ -d $@ ] || mkdir -p $@
-	@echo '#define APP_VERSION "$(VERSION)"' > $@/version.h.new
+	@echo '#define APP_VERSION "$(FULL_VERSION)"' > $@/version.h.new
 	@cmp -s $@/version.h.new $@/version.h && rm $@/version.h.new || mv $@/version.h.new $@/version.h
 	@sed 's/@APP_VER@/$(APP_VER)/' tools/sfo.xml.in > $@/sfo.xml
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
