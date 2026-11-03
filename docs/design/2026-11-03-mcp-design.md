@@ -194,12 +194,10 @@ The agent can do everything the pad can on the app's own screens, and see the re
 
 ### Phase 5 — changing files, trash
 
-- **Rename a rip**: all its files, and the file name inside its .cue.
-- **Delete a rip**: move all its files into `.trash` in the same destination (a move on the same
-  disk, fast). **Restore** moves them back. **Empty the trash** deletes for real; possible on the
-  console (new Trash menu under the settings: what is in it, restore one, empty) and over MCP.
-- Every rename, trash move, restore and emptying of the trash is written to the audit log
-  (phase 0) and can be rolled back from there, like any other change.
+Moved to the game list (`docs/design/2026-11-03-game-list-design.md`), built after the audit log
+and before MCP: renaming a rip (reusing the file name screen), deleting into `.trash`, restoring
+and emptying the trash all live there and go through the audit log. MCP gets tools for the same
+actions once it exists.
 
 ## Protocol and connection
 
