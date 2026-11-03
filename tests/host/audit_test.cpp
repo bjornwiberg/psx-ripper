@@ -893,6 +893,45 @@ static void setting_values(int &bad)
 	audit_set_hooks(NULL, NULL);
 }
 
+// M3: a big undo calls the app back every AUDIT_TICK sectors (frames, the system's exit request),
+// and stops when it says so; what was undone stays undone and is checked again
+static uint32_t g_tick_done[16], g_tick_total;
+static int g_ticks, g_tick_stop_at = -1;
+static int tick(uint32_t done, uint32_t total)
+{
+	if (g_ticks < 16) g_tick_done[g_ticks] = done;
+	g_ticks++;
+	g_tick_total = total;
+	return g_tick_stop_at >= 0 && done >= (uint32_t)g_tick_stop_at;
+}
+static void undo_progress(int &bad)
+{
+	fresh();
+	hooks_reset();
+	img_make(200);
+	uint32_t job = audit_job_begin(AU_PAD, "P:200", "P", "repair");
+	for (uint32_t l = 0; l < 150; l++) repair_write(job, l, 0x11, 0x22);
+	audit_job_end(job, "finished");
+	audit_set_progress(tick);
+	g_ticks = 0; g_tick_stop_at = -1;
+	char why[160];
+	AuditReason rs;
+	CHECK(audit_undo_row(sector_id(job, 0), why, sizeof why) == 0 && g_ticks == 0);   // one row: no wait
+	CHECK(audit_undo_job(job, why, sizeof why) == 0);
+	CHECK(g_ticks == 3 && g_tick_total == 149 && g_tick_done[0] == 0 && g_tick_done[1] == 64 && g_tick_done[2] == 128);
+	// stopped (the app is closing): the rows before stay undone, the file is checked again
+	uint32_t j2 = audit_job_begin(AU_PAD, "Q:200", "Q", "repair");
+	for (uint32_t l = 0; l < 150; l++) repair_write(j2, l, 0x11, 0x33);
+	audit_job_end(j2, "finished");
+	g_ticks = 0; g_tick_stop_at = 64; g_recheck_calls = 0;
+	CHECK(audit_undo_job(j2, why, sizeof why, &rs) == -1 && rs.code == AW_STOPPED && strstr(why, "stopped"));
+	CHECK(img_is(149, 0x11) && img_is(86, 0x11) && img_is(85, 0x33) && img_is(0, 0x33));   // newest first: 64 rows
+	CHECK(g_recheck_calls == 1 && g_recheck_n == 64);
+	audit_set_progress(NULL);
+	CHECK(audit_undo_job(j2, why, sizeof why) == 0 && img_is(0, 0x11));
+	audit_set_hooks(NULL, NULL);
+}
+
 int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
@@ -909,7 +948,7 @@ int main()
 		{"cap_keeps_running_job", cap_keeps_running_job}, {"cap_lowered_prunes_now", cap_lowered_prunes_now},
 		{"reason_codes", reason_codes}, {"reversible_queries", reversible_queries},
 		{"undo_refused_after_rerip", undo_refused_after_rerip}, {"short_write_not_glued", short_write_not_glued},
-		{"setting_values", setting_values},
+		{"setting_values", setting_values}, {"undo_progress", undo_progress},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {

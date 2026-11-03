@@ -30,7 +30,8 @@ enum AuditWhy {
 	AW_NO_HOOK,           // settings cannot be changed here (row)
 	AW_NOTHING,           // a job or disc with nothing (left) to undo
 	AW_NO_DISC,           // no disc given
-	AW_REPLACED           // the file was ripped again since: the row's bytes belong to an older image (row, file)
+	AW_REPLACED,          // the file was ripped again since: the row's bytes belong to an older image (row, file)
+	AW_STOPPED            // the undo was stopped (the app is closing); the rows before stay undone (row)
 };
 struct AuditReason {
 	AuditWhy code;
@@ -109,6 +110,11 @@ int audit_disc_reversible(const char *disc, AuditReason *rs = NULL);
 // NULL = none (a setting is then not undone).
 void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
                      void (*recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n));
+// Called by a job or disc undo before every AUDIT_TICK sectors (done of total), without the lock:
+// the app keeps its screen and the system's callbacks going. Nonzero stops the undo there (rows
+// undone so far stay undone, the recheck still runs). NULL = none.
+#define AUDIT_TICK 64
+void audit_set_progress(int (*tick)(uint32_t done, uint32_t total));
 // The audit_mb setting in bytes (default 256 MB). When the job<N>.bin files together exceed it, the
 // oldest are deleted, never the file of a running job; their rows stay, no longer reversible.
 // Applies at once.

@@ -4041,6 +4041,7 @@ static void av_reason(const AuditReason &rs, char *out, size_t n)
 	case AW_NOTHING: snprintf(out, n, "%s", T(STR_AW_NOTHING)); break;
 	case AW_NO_ROW: case AW_NO_DISC: snprintf(out, n, "%s", T(STR_AW_NOT_FOUND)); break;
 	case AW_REPLACED: snprintf(out, n, "%s", T(STR_AW_REPLACED)); break;
+	case AW_STOPPED: snprintf(out, n, "%s", T(STR_AW_STOPPED)); break;
 	default: snprintf(out, n, "%s", T(STR_AUDIT_NO_UNDO)); break;
 	}
 }
@@ -4200,13 +4201,14 @@ static void audit_draw(const AuditView &v)
 	hint_bar(b, l, m);
 }
 
-// The wait while an undone rip is checked again (it reads the whole image): its name and how far.
-static void audit_wait_draw(const char *name, uint32_t mb)
+// The wait while an undone rip is checked again (it reads the whole image), or while a big undo
+// writes its sectors back (STR_AUDIT_UNDOING): its name and how far.
+static void audit_wait_draw(const char *name, uint32_t mb, StrId what = STR_AUDIT_WAIT)
 {
 	draw_backdrop();
 	ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, T(STR_L_AUDIT), UI_CENTER);
 	char t[300];
-	snprintf(t, sizeof(t), T(STR_AUDIT_WAIT), name);
+	snprintf(t, sizeof(t), T(what), name);
 	int y = draw_wrapped(UI_BODY, t, ui_h() / 3, 0xE8E8F0);
 	if (mb) {
 		snprintf(t, sizeof(t), T(STR_AUDIT_MB_VAL), (int)mb);
@@ -4220,6 +4222,19 @@ static void audit_wait_tick(uint32_t sectors)
 	g_backdrop_shown = 0;
 	flip_frame();   // both buffers
 	flip_frame();
+}
+// The audit's undo of a job or disc, every AUDIT_TICK sectors: the screen says how far (the audit
+// screen only) and the system's callbacks run; closing the app stops the undo.
+static int audit_undo_tick(uint32_t done, uint32_t total)
+{
+	(void)total;
+	if (g_check_ui) {
+		audit_wait_draw(g_wait_name, (uint32_t)((uint64_t)done * RAW_SIZE >> 20), STR_AUDIT_UNDOING);
+		g_drawn = 2;
+		g_backdrop_shown = 0;
+		flip_frame();
+	} else sysUtilCheckCallback();
+	return exit_requested;
 }
 
 static void audit_screen()
@@ -4246,6 +4261,7 @@ static void audit_screen()
 			snprintf(q, sizeof(q), T(v.level == 1 && v.dom == AU_RIPS ? STR_AUDIT_UNDO_DISC_Q : STR_AUDIT_UNDO_Q), label);   // a disc: all of it
 			if (own_dialog(q, 1) == 1) {
 				char why[200];
+				snprintf(g_wait_name, sizeof(g_wait_name), "%s", label);   // a big undo shows it while it writes
 				g_check_ui = 1;
 				int rc = audit_undo(v, why, sizeof(why));
 				g_check_ui = 0;
@@ -6507,6 +6523,7 @@ int main(int argc, char *argv[])
 	char warn[400] = "";
 	audit_init("/dev_hdd0/tmp/psxrip_audit", &vf_io);
 	audit_set_hooks(set_setting_hook, recheck_hook);
+	audit_set_progress(audit_undo_tick);
 	int had_cfg = cfg_load();
 	audit_apply_cap();   // also without a config file (the default size)
 	cfg_prime();   // so the first change after the boot is logged

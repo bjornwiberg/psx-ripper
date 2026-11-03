@@ -226,6 +226,15 @@ static void audit_scenarios()
 		snprintf(nm, sizeof nm, "audit-wait%s", g_sfx_sv ? "-sv" : "");
 		g_boxes.clear(); audit_wait_draw("Alundra (Europe) (En,Fr,De,Es,It,Nl,Sv) [SLES-01135]", 412); save(nm); size_t b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
 	}
+	{   // the wait while a big undo writes its sectors back; closing the app stops it
+		char nm[64];
+		snprintf(nm, sizeof nm, "audit-undoing%s", g_sfx_sv ? "-sv" : "");
+		g_boxes.clear(); audit_wait_draw("Alundra (Europe) (En,Fr,De,Es,It,Nl,Sv) [SLES-01135]", 2, STR_AUDIT_UNDOING); save(nm); size_t b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+		if (audit_undo_tick(0, 100) != 0) { printf("FAIL the undo tick stops without an exit request\n"); bad++; }
+		exit_requested = 1;
+		if (audit_undo_tick(64, 100) == 0) { printf("FAIL the undo tick does not stop on exit\n"); bad++; }
+		exit_requested = 0;
+	}
 	{   // undo of that sector: the image gets its old bytes, the rip is checked again, the drive's card follows
 		disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 3);
 		Card &k = g_cards[0];

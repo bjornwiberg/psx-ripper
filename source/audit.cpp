@@ -45,6 +45,7 @@ static std::map<std::string, uint32_t> g_made;
 static uint64_t g_cap = 256ull << 20, g_blob_total;   // the audit_mb setting; all job<N>.bin together
 static int (*g_set_setting)(const char *key, const char *value);
 static void (*g_recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n);
+static int (*g_tick)(uint32_t done, uint32_t total);
 
 static void lock() { sysMutexLock(g_mx, 0); }
 static void unlock() { sysMutexUnlock(g_mx); }
@@ -708,9 +709,17 @@ static int undo_sectors(const std::vector<Target> &ts, const std::vector<std::st
 	std::vector<std::vector<uint8_t> > zero(files.size());   // and whether their old bytes are all zero
 	int rc = 0;
 	char msg[160];
-	for (const Target &t : ts) {
+	int (*tick)(uint32_t, uint32_t) = ts.size() > AUDIT_TICK ? g_tick : NULL;   // a few rows need no wait
+	for (size_t i = 0; i < ts.size(); i++) {
+		const Target &t = ts[i];
 		AuditRow r;
 		target_row(t, files, discs, r);
+		if (tick && i % AUDIT_TICK == 0 && tick((uint32_t)i, (uint32_t)ts.size())) {
+			reason(rs, AW_STOPPED, r);
+			say(why, n, "row %u: %s", t.id, "the undo was stopped");
+			rc = -1;
+			break;
+		}
 		lock();
 		bool restored;
 		const char *e = sector_block(r, msg, sizeof msg, &restored, rs);
@@ -856,6 +865,11 @@ void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
 {
 	g_set_setting = set_setting;
 	g_recheck = recheck;
+}
+
+void audit_set_progress(int (*tick)(uint32_t done, uint32_t total))
+{
+	g_tick = tick;
 }
 
 void audit_set_cap(uint64_t bytes)
