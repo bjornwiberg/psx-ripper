@@ -29,7 +29,9 @@ To install on a console with webMAN MOD (FTP and its web server on, the app's re
 PS3=192.168.1.50 tools/deploy.sh     # or write the address into .ps3host
 ```
 
-`deploy.sh` refuses while the app is ripping: closing it then can leave the lv1 patch on.
+`deploy.sh` builds the package itself, with the build time after the version (`1.0.2-20261103.0835`),
+so the app shows that a local build is installed and when it was made. It refuses while the app
+is ripping: closing it then can leave the lv1 patch on.
 
 ## Tests
 
