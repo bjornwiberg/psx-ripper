@@ -393,6 +393,148 @@ int main()
 		if (g_audit_mb != 256) { printf("FAIL audit_mb=3 gave %d\n", g_audit_mb); bad++; }
 		if (bad) g_fail += bad; else printf("ok   settings in the audit log (changes, source, secrets, undo, audit_mb)\n");
 	}
+	{   // jobs and their sector writes in the audit log, and the check of a rip from its file
+		system("rm -rf out/audit out/t4 && mkdir -p out/t4");
+		audit_init("out/audit", &vf_io);
+		audit_set_hooks(set_setting_hook, recheck_hook);
+		int bad = 0;
+		auto put_file = [](const char *p, const void *d, size_t n) { FILE *f = fopen(p, "wb"); fwrite(d, 1, n, f); fclose(f); };
+		auto get_file = [](const char *p, std::string &s) { s.clear(); FILE *f = fopen(p, "rb"); if (!f) return false; char b[4096]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) s.append(b, n); fclose(f); return true; };
+		static uint8_t img[5 * RAW_SIZE];
+		for (size_t i = 0; i < sizeof img; i++) img[i] = (uint8_t)(i * 7 + i / RAW_SIZE);
+		put_file("out/t4/img.bin", img, sizeof img);
+		reset_all();
+		disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+		Card &k = g_cards[0];
+		{
+			OnCard o(0);
+			g_leadout = 5;
+			char key[96];
+			disc_key(key, sizeof key);
+			if (strcmp(key, "SLES_011.35:5")) { printf("FAIL disc key \"%s\"\n", key); bad++; }
+			snprintf(k.exist, sizeof(k.exist), "out/t4/img");
+			snprintf(g_base, sizeof(g_base), "out/t4/img");
+			audit_card_begin(0, AU_PAD, "repair");
+			if (!k.audit_job || strcmp(k.rd_before, "unchecked")) { printf("FAIL job begin: job %u, before \"%s\"\n", (unsigned)k.audit_job, k.rd_before); bad++; }
+			// a sector written into an image opened r+b: the new bytes in the file, a sector row with the old ones
+			g_out = vf_open("out/t4/img.bin", "r+b");
+			uint8_t sec[RAW_SIZE];
+			memset(sec, 0xAB, sizeof sec);
+			if (!g_out || write_sector_audited(2, sec) != 0) { printf("FAIL write_sector_audited on r+b\n"); bad++; }
+			// past the end of the image: the old bytes cannot be read, so the write fails and nothing is logged
+			if (g_out && write_sector_audited(40, sec) == 0) { printf("FAIL a sector without readable old bytes was written\n"); bad++; }
+			if (g_out) vf_close(g_out);
+			g_out = NULL;
+			std::string s;
+			get_file("out/t4/img.bin", s);
+			if (s.size() != sizeof img || memcmp(s.data() + 2 * RAW_SIZE, sec, RAW_SIZE) || memcmp(s.data(), img, 2 * RAW_SIZE) || memcmp(s.data() + 3 * RAW_SIZE, img + 3 * RAW_SIZE, 2 * RAW_SIZE))
+				{ printf("FAIL the image after the write (size %zu)\n", s.size()); bad++; }
+			AuditRow r[8];
+			int n = audit_rows(k.audit_job, r, 0, 8), sectors = 0;
+			for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, "sector")) {
+				sectors++;
+				if (r[i].lba != 2 || strcmp(r[i].file, "out/t4/img.bin") || strcmp(r[i].disc, "SLES_011.35:5")) { printf("FAIL sector row: lba %u file %s disc %s\n", (unsigned)r[i].lba, r[i].file, r[i].disc); bad++; }
+			}
+			if (sectors != 1) { printf("FAIL %d sector row(s), want 1\n", sectors); bad++; }
+			char bp[64];
+			snprintf(bp, sizeof bp, "out/audit/job%u.bin", (unsigned)k.audit_job);
+			if (!get_file(bp, s) || s.size() != 2 * RAW_SIZE || memcmp(s.data(), img + 2 * RAW_SIZE, RAW_SIZE) || memcmp(s.data() + RAW_SIZE, sec, RAW_SIZE))
+				{ printf("FAIL the job's sector bytes (old, new): %zu bytes\n", s.size()); bad++; }
+			// the Redump result as a row: before = the rip's earlier line
+			g_rd_result = 1; snprintf(g_rd_result_name, sizeof(g_rd_result_name), "Alundra (Europe)");
+			audit_card_redump(0);
+			uint32_t job = k.audit_job;
+			audit_card_end(0, "finished");
+			n = audit_rows(job, r, 0, 8);
+			bool rd = false, res = false;
+			for (int i = 0; i < n; i++) {
+				if (!strcmp(r[i].kind, "redump") && !strcmp(r[i].before, "unchecked") && !strcmp(r[i].after, "verified Alundra (Europe)")) rd = true;
+				if (!strcmp(r[i].kind, "result") && !strcmp(r[i].after, "finished")) res = true;
+			}
+			if (!rd || !res || k.audit_job) { printf("FAIL redump row %d, result row %d, job cleared %d\n", rd, res, !k.audit_job); bad++; }
+			// the rip's earlier line from its log
+			put_file("out/t4/img.log", "PSX Ripper rip log\nredump=verified Alundra (Europe)\n", 51);
+			audit_card_begin(0, AU_REMOTE, "check");
+			if (strcmp(k.rd_before, "verified Alundra (Europe)") || k.job_src != AU_REMOTE) { printf("FAIL earlier redump line \"%s\"\n", k.rd_before); bad++; }
+			audit_card_end(0, "cancelled");
+			// a rip writes its file w+b: the old bytes can be read back before a sector is written again
+			g_out = vf_open("out/t4/new.bin", "w+b");
+			audit_card_begin(0, AU_APP, "rip");
+			if (!g_out || vf_write(g_out, img, sizeof img) != sizeof img || write_sector_audited(1, sec) != 0) { printf("FAIL write_sector_audited on a w+b rip file\n"); bad++; }
+			if (g_out) vf_close(g_out);
+			g_out = NULL;
+			audit_card_end(0, "finished");
+		}
+		// how each job ends: every way out names its result
+		{
+			OnCard o(0);
+			g_disc_lost[0] = 0; g_abort = 0;
+			const char *a = rip_result(1), *b = rip_result(0);
+			g_abort = 1; const char *c = rip_result(0), *d = repair_result(1);
+			g_disc_lost[0] = 1; const char *e = rip_result(0), *f = repair_result(1);
+			g_disc_lost[0] = 0; g_abort = 0; const char *g = repair_result(0), *h = repair_result(1);
+			if (strcmp(a, "finished") || strcmp(b, "failed") || strcmp(c, "cancelled") || strcmp(d, "cancelled") || strcmp(e, "disc_lost") || strcmp(f, "disc_lost") || strcmp(g, "failed") || strcmp(h, "finished"))
+				{ printf("FAIL job results: %s %s %s %s %s %s %s %s\n", a, b, c, d, e, f, g, h); bad++; }
+		}
+		// a job whose thread cannot start (always on the host) is ended at once: it never stays "running"
+		{
+			snprintf(k.exist, sizeof(k.exist), "out/t4/img");
+			k.job = 0;
+			rip_job_start(0, AU_PAD, 0);
+			repair_job_start(0, AU_APP);
+			check_job_start(0, AU_REMOTE);
+			AuditRow r[30];
+			int n = audit_events(AU_RIPS, "SLES_011.35:5", r, 30), open = 0;
+			for (int i = 0; i < n; i++) {
+				if (strcmp(r[i].kind, "job")) continue;
+				AuditRow rr[30];
+				int m = audit_rows(r[i].job, rr, 0, 30), ended = 0;
+				for (int j = 0; j < m; j++) if (!strcmp(rr[j].kind, "result")) ended = 1;
+				if (!ended) open++;
+			}
+			if (n != 6 || open || k.audit_job || k.job) { printf("FAIL jobs that could not start: %d events, %d not ended\n", n, open); bad++; }
+		}
+		// check_image: MD5 per track from the cue, the .md5 and the log written
+		{
+			static uint8_t two[5 * RAW_SIZE];
+			for (size_t i = 0; i < sizeof two; i++) two[i] = (uint8_t)(i * 13 + 5);
+			put_file("out/t4/two.bin", two, sizeof two);
+			const char *cue = "FILE \"two.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n  TRACK 02 AUDIO\n    INDEX 00 00:00:03\n    INDEX 01 00:00:04\n";
+			put_file("out/t4/two.cue", cue, strlen(cue));
+			const char *log = "PSX Ripper rip log\ntitle=Two\nsectors=5\ntrack=01 start=0 md5=00000000000000000000000000000000\ntrack=02 start=3 md5=11111111111111111111111111111111\nredump=verified Two (Europe)\nunreadable_count=0\n";
+			put_file("out/t4/two.log", log, strlen(log));
+			char want[2][33];
+			for (int t = 0; t < 2; t++) {
+				Md5 m; uint8_t d[16];
+				md5_init(&m);
+				md5_update(&m, two + (t ? 3 : 0) * RAW_SIZE, (t ? 2 : 3) * RAW_SIZE);
+				md5_final(&m, d);
+				md5_hex(d, want[t]);
+			}
+			int r = check_image("out/t4/two");
+			std::string s;
+			char exp[200];
+			snprintf(exp, sizeof exp, "%s  track 01\n%s  track 02\n", want[0], want[1]);
+			if (r != 0 || !get_file("out/t4/two.md5", s) || s != exp) { printf("FAIL check_image .md5 (%d): \"%s\"\n", r, s.c_str()); bad++; }
+			// the log: the tracks' MD5 and the Redump line now (no local copy on the host: unchecked)
+			get_file("out/t4/two.log", s);
+			char t1[80], t2[80];
+			snprintf(t1, sizeof t1, "track=01 start=0 md5=%s\n", want[0]);
+			snprintf(t2, sizeof t2, "track=02 start=3 md5=%s\n", want[1]);
+			if (s.find(t1) == std::string::npos || s.find(t2) == std::string::npos || s.find("redump=unchecked\n") == std::string::npos || s.find("verified") != std::string::npos || s.find("unreadable_count=0\n") == std::string::npos)
+				{ printf("FAIL check_image log:\n%s", s.c_str()); bad++; }
+			// the audit's recheck hook takes the image's path
+			remove("out/t4/two.md5");
+			recheck_hook("out/t4/two.bin");
+			if (!get_file("out/t4/two.md5", s) || s != exp) { printf("FAIL recheck hook\n"); bad++; }
+			if (check_image("out/t4/none") == 0) { printf("FAIL check_image without an image\n"); bad++; }
+		}
+		audit_set_hooks(set_setting_hook, NULL);
+		system("rm -rf out/audit");
+		audit_init("out/audit", &vf_io);
+		reset_all();
+		if (bad) g_fail += bad; else printf("ok   jobs and sectors in the audit log (sector rows, results, redump, check_image)\n");
+	}
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

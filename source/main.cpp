@@ -130,6 +130,10 @@ struct Card {
 	uint64_t eta_t0, eta_tw; uint32_t eta_pw, eta_p0; double eta_rate;   // time left of the running rip
 	int eta_phase;
 	int pg_scroll, pg_max;            // the page: pixels scrolled down, and how far it can (L2/R2)
+	uint32_t audit_job;               // the running job's id in the audit log, 0 = none
+	AuditSrc job_src;                 // what started it (pad, remote, app)
+	char audit_disc[96];              // its disc key
+	char rd_before[RD_NAME + 16];     // the rip's Redump line before the job ("unchecked" when none)
 };
 static Card g_cards[NCARDS];
 
@@ -1877,6 +1881,34 @@ static int track_of(uint32_t lba)
 	return t;
 }
 
+// The audit's key of the card's disc: its ID (its title when it has none) and its size in sectors.
+static void disc_key(char *out, size_t n)
+{
+	const Card &k = g_cards[cur_card()];
+	snprintf(out, n, "%s:%u", k.serial[0] ? k.serial : k.title, (unsigned)g_leadout);
+}
+
+// Writes one sector into the image (g_out) and logs it in the audit log with the bytes it replaces.
+// Old bytes that cannot be read count as a failed write: no sector is changed without them in the
+// log (a rip opens its file w+b so they can be read back). Returns 0 when written.
+static int write_sector_audited(uint32_t lba, const uint8_t *sec)
+{
+	uint8_t old[RAW_SIZE];
+	uint64_t pos = (uint64_t)lba * RAW_SIZE;
+	if (vf_seek(g_out, pos) || vf_read(g_out, old, RAW_SIZE) != RAW_SIZE) {
+		logf("sector %u: its old bytes cannot be read, not written", lba);
+		return -1;
+	}
+	if (vf_seek(g_out, pos) || vf_write(g_out, sec, RAW_SIZE) != RAW_SIZE) return -1;
+	uint32_t job = g_cards[cur_card()].audit_job;
+	if (job) {   // 0: not started as a job (headless test mode), nothing to log it under
+		char file[300];
+		snprintf(file, sizeof(file), "%s.bin", g_base);   // a rip's .part becomes this file
+		audit_sector(job, file, lba, old, sec);
+	}
+	return 0;
+}
+
 // a sector written into the image: its track's MD5 must be computed again
 static void note_patched(uint32_t lba)
 {
@@ -1911,7 +1943,7 @@ static int verify_pass()
 				int ok = confirm_read(lba, 0, reads, sec);
 				g_rr_max = 0;
 				if (ok && fnv64(sec, RAW_SIZE) != g_uv_hash[k + j]) {
-					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; g_changed++; note_patched(lba); }
+					if (write_sector_audited(lba, sec) == 0) { patched++; g_changed++; note_patched(lba); }
 					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
 				} else if (ok) {
 					rip_event(0xA8B0C8, STR_EV_FIRST_OK, lba);   // the first read was right
@@ -1955,7 +1987,7 @@ static int second_pass()
 				g_suspect_ok[k - g_nhard] = 1;
 				if (memcmp(sec, g_suspect_data + (k - g_nhard) * RAW_SIZE, RAW_SIZE)) {
 					g_changed++;
-					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; note_patched(lba); }
+					if (write_sector_audited(lba, sec) == 0) { patched++; note_patched(lba); }
 					logf("second pass: sector %u confirmed with different data, image updated", lba);
 					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
 				} else {
@@ -1964,7 +1996,7 @@ static int second_pass()
 			} else {
 				logf("second pass: sector %u could not be confirmed", lba);
 			}
-		} else if (ok && vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) {
+		} else if (ok && write_sector_audited(lba, sec) == 0) {
 			patched++;
 			note_patched(lba);
 			g_hard[k] |= HARD_RESOLVED;
@@ -2067,7 +2099,7 @@ static void rip_thread(void *arg)
 	t_card = (int)(long)arg;
 	char path[300];
 	snprintf(path, sizeof(path), "%s.bin.part", g_base);   // renamed to .bin when complete
-	g_out = vf_open(path, "wb");
+	g_out = vf_open(path, "w+b");   // w+b: the passes after the first read a sector back before writing it again
 	if (!g_out) { logf("cannot create %s", path); g_result = -1; g_finished = 1; sysThreadExit(0); }
 
 	g_bufs[0] = (uint8_t *)memalign(128, CHUNK * SECT_Q);
@@ -4495,9 +4527,9 @@ static void draw_page(int c, int y)
 	if (k.pg_scroll < k.pg_max) ui_icon("down", ax, bottom - asz, asz, 0xC8D0E0);
 }
 
-static void rip_job_start(int c, int fresh);
-static void check_job_start(int c);
-static void repair_job_start(int c);
+static void rip_job_start(int c, AuditSrc src, int fresh);
+static void check_job_start(int c, AuditSrc src);
+static void repair_job_start(int c, AuditSrc src);
 
 
 // One frame of the home screen: tabs, the selected drive's page, the general row and the buttons
@@ -4634,10 +4666,10 @@ static int home_screen()
 				if (k.job || !std_or(k.autostart, g_std.autostart) || k.state != DISC_READY || !k.fresh) continue;
 				k.fresh = 0;
 				select_card(list[i]);
-				if (!k.prev_rip) { rip_job_start(list[i], 1); continue; }
+				if (!k.prev_rip) { rip_job_start(list[i], AU_APP, 1); continue; }
 				if (k.repair_n) {
 					prev_rip_check();   // the log as it is now
-					if (g_prev_rip && g_repair_n) { logf("auto repair: %d sector(s)", g_repair_n); repair_job_start(list[i]); }
+					if (g_prev_rip && g_repair_n) { logf("auto repair: %d sector(s)", g_repair_n); repair_job_start(list[i], AU_APP); }
 				}
 			}
 		for (int i = 0; i < nc; i++) eta_tick(list[i]);   // every tab's time left, also those not shown
@@ -4704,12 +4736,12 @@ static int home_screen()
 			}
 			int fr = f.fresh;
 			f.fresh = 0;
-			rip_job_start(sel, fr);   // rip, also over an existing rip (X is always a rip); the card shows it
+			rip_job_start(sel, g_input_src, fr);   // rip, also over an existing rip (X is always a rip); the card shows it
 			g_redraw = 2;
 			continue;
 		}
 		if ((p & B_SQUARE) && st == DISC_READY && f.prev_rip && !f.repair_n && f.rd_state < 0 && !f.job) {   // check the file
-			check_job_start(sel);
+			check_job_start(sel, g_input_src);
 			g_redraw = 2;
 			continue;
 		}
@@ -4717,7 +4749,7 @@ static int home_screen()
 			int shown_prev = g_prev_rip;
 			prev_rip_check();
 			if (g_prev_rip != shown_prev || !g_repair_n) { g_redraw = 2; continue; }
-			repair_job_start(sel);   // on its tab, like a rip; the other drives go on
+			repair_job_start(sel, g_input_src);   // on its tab, like a rip; the other drives go on
 			g_redraw = 2;
 			continue;
 		}
@@ -4825,15 +4857,80 @@ static int prepare_disc(int *err, int *code)
 
 // ---------------------------------------------------------------- remote view and webhooks
 
-static const char *rd_result_str()
+static const char *rd_code(int r)
 {
-	switch (g_rd_result) {
+	switch (r) {
 	case 1: return "verified";
 	case 0: return "no_match";
 	case -1: return "unchecked";
 	case -2: return "not_found";
 	default: return "off";
 	}
+}
+static const char *rd_result_str() { return rd_code(g_rd_result); }
+
+// ---------------------------------------------------------------- jobs in the audit log
+
+// The Redump line of a rip's log ("verified Alundra (Europe)"), "unchecked" when there is none.
+static void redump_line_of(const char *base, char *out, size_t n)
+{
+	snprintf(out, n, "unchecked");
+	if (!base[0]) return;
+	char p[320], b[4096];
+	snprintf(p, sizeof(p), "%s.log", base);
+	VFile *f = vf_open(p, "rb");
+	if (!f) return;
+	int got = (int)vf_read(f, b, sizeof(b) - 1);
+	vf_close(f);
+	b[got > 0 ? got : 0] = 0;
+	const char *rd = strstr(b, "redump=");
+	if (!rd) return;
+	rd += 7;
+	int len = (int)strcspn(rd, "\r\n");
+	if (len) snprintf(out, n, "%.*s", len, rd);
+}
+
+// A job on card c begins: its row in the audit log with what started it, the disc key and the
+// rip's name (a rip: the file it makes; a repair or check: the rip it works on).
+static void audit_card_begin(int c, AuditSrc src, const char *what)
+{
+	Card &k = g_cards[c];
+	OnCard o(c);
+	disc_key(k.audit_disc, sizeof(k.audit_disc));
+	const char *slash = strrchr(k.exist, '/');
+	const char *name = !strcmp(what, "rip") || !k.exist[0] ? k.fname : slash ? slash + 1 : k.exist;
+	redump_line_of(k.exist, k.rd_before, sizeof(k.rd_before));
+	k.job_src = src;
+	k.audit_job = audit_job_begin(src, k.audit_disc, name, what);
+}
+
+// Every way out of a job ends it here, or the audit keeps it running and refuses undo on its disc.
+static void audit_card_end(int c, const char *result)
+{
+	Card &k = g_cards[c];
+	if (k.audit_job) audit_job_end(k.audit_job, result);
+	k.audit_job = 0;
+}
+
+// The job's Redump result (g_rd_result) against the rip's line before it.
+static void audit_card_redump(int c)
+{
+	Card &k = g_cards[c];
+	if (!k.audit_job) return;
+	OnCard o(c);
+	char after[RD_NAME + 16];
+	snprintf(after, sizeof(after), "%s%s%s", rd_result_str(), g_rd_result_name[0] ? " " : "", g_rd_result_name);
+	audit_note(k.audit_job, AU_RIPS, k.audit_disc, "redump", "", k.rd_before, after);
+}
+
+// How a rip or a repair ended (card context): ok is what rip_disc / repair_disc returned.
+static const char *rip_result(int ok)
+{
+	return ok ? "finished" : g_disc_lost[cur_card()] ? "disc_lost" : g_abort ? "cancelled" : "failed";
+}
+static const char *repair_result(int ok)
+{
+	return g_disc_lost[cur_card()] ? "disc_lost" : !ok ? "failed" : g_abort ? "cancelled" : "finished";
 }
 
 // Fields shared by the status page and the webhooks (appended to an open JSON object).
@@ -5091,7 +5188,7 @@ static int rip_disc_inner(int fresh, int autorip)
 	}
 
 	char rdinfo[RD_NAME + 80] = "";
-	if (g_redump != RD_OFF) redump_verify(rdinfo, sizeof(rdinfo));
+	if (g_redump != RD_OFF) { redump_verify(rdinfo, sizeof(rdinfo)); audit_card_redump(cur_card()); }
 
 	// Only discs on the known LibCrypt list get an SBI and a LibCrypt line in the dialog.
 	// Other PAL discs are still checked, but a hit is only logged as a hint.
@@ -5198,17 +5295,14 @@ static int rip_disc(int fresh, int autorip)
 
 static void job_reset(int c);
 
-// Checks an earlier rip against Redump from its file, without the disc: MD5 per track (track
-// bounds from its .cue), compared like after a rip; the result goes into its rip log (made if it
-// has none). Runs as the card's job; the tab and the page show its progress.
-static void check_job_thread(void *arg)
+// Checks a rip from its file, without the disc: MD5 per track (track bounds from its .cue), its
+// .md5 written, the track MD5s and the Redump line of its log rewritten (a small log made when it
+// has none). As the card's job (job = 1) it shows its progress, can be cancelled and compares with
+// Redump as set. Otherwise (the audit's undo, on the UI thread) it touches no card's state and
+// compares with the local copy only (none: unchecked). Returns 0 checked, 1 cancelled, -1 no image.
+static int check_image(const char *base, int job = 0)
 {
-	t_card = (int)(long)arg;
-	Card &k = g_cards[t_card];
-	char base[256], path[320];
-	snprintf(base, sizeof(base), "%s", k.exist);
-	g_phase = 4; g_done = 0; g_total = 0; g_readpos = 0; g_pass2_total = 0;
-	g_rd_result = -1; g_rd_result_name[0] = 0;
+	char path[320];
 	// track starts (sectors) from the cue: INDEX 00 when there is one (the pregap belongs to the track)
 	uint32_t st[MAX_TRACKS + 1];
 	int nt = 0;
@@ -5220,7 +5314,8 @@ static void check_job_thread(void *arg)
 		vf_close(cf);
 		cb[n > 0 ? n : 0] = 0;
 		int i0 = 0;
-		for (char *l = strtok(cb, "\r\n"); l; l = strtok(NULL, "\r\n")) {
+		char *save = NULL;
+		for (char *l = strtok_r(cb, "\r\n", &save); l; l = strtok_r(NULL, "\r\n", &save)) {
 			unsigned idx, m, sec, fr;
 			if (strstr(l, "TRACK ")) { i0 = 0; if (nt < MAX_TRACKS) nt++; continue; }
 			if (nt && sscanf(l, " INDEX %u %u:%u:%u", &idx, &m, &sec, &fr) == 4) {
@@ -5234,70 +5329,128 @@ static void check_job_thread(void *arg)
 	st[0] = 0;
 	snprintf(path, sizeof(path), "%s.bin", base);
 	VFile *f = vf_open(path, "rb");
-	uint64_t size = 0;
-	if (f) {   // size: read to the end once is slow; seek-free estimate from the identification
-		size = (uint64_t)k.mb * 1024 * 1024;
+	if (!f) { if (job) g_total = 1; logf("check %s: no image", base); return -1; }
+	if (job) {   // size: read to the end once is slow; seek-free estimate from the identification
+		uint64_t size = (uint64_t)g_cards[cur_card()].mb * 1024 * 1024;
+		g_total = size ? (uint32_t)(size / RAW_SIZE) : 1;
 	}
-	g_total = size ? (uint32_t)(size / RAW_SIZE) : 1;
 	Md5 md[MAX_TRACKS + 1];
 	for (int t = 0; t < nt; t++) md5_init(&md[t]);
 	uint8_t *buf = (uint8_t *)malloc(512 * RAW_SIZE);
 	uint32_t lba = 0;
 	int t = 0;
-	while (f && buf && !g_abort) {
+	while (buf && !(job && g_abort)) {
 		size_t got = vf_read(f, buf, 512 * RAW_SIZE);
 		uint32_t secs = (uint32_t)(got / RAW_SIZE);
 		for (uint32_t i = 0; i < secs; i++, lba++) {
 			while (t + 1 < nt && lba >= st[t + 1]) t++;
 			md5_update(&md[t], buf + (size_t)i * RAW_SIZE, RAW_SIZE);
 		}
-		g_done = lba;
-		if (lba > g_total) g_total = lba;
+		if (job) { g_done = lba; if (lba > g_total) g_total = lba; }
 		if (got < 512 * RAW_SIZE) break;
 	}
-	if (f) vf_close(f);
+	vf_close(f);
 	free(buf);
-	if (!f) logf("check %s: no image", base);
-	else if (g_abort) logf("check %s: cancelled", base);
-	else {
+	if (job && g_abort) { logf("check %s: cancelled", base); return 1; }
+	uint8_t bin[MAX_TRACKS + 1][16];
+	char hex[MAX_TRACKS + 1][33];
+	for (int i = 0; i < nt; i++) { md5_final(&md[i], bin[i]); md5_hex(bin[i], hex[i]); }
+	int rd;
+	char rdname[RD_NAME] = "";
+	if (job) {
 		g_total = lba;
 		g_ntracks = nt;
-		for (int i = 0; i < nt; i++) { md5_final(&md[i], g_track_md5bin[i]); md5_hex(g_track_md5bin[i], g_track_md5[i]); }
+		memcpy(g_track_md5bin, bin, sizeof(bin[0]) * nt);
+		memcpy(g_track_md5, hex, sizeof(hex[0]) * nt);
 		g_phase = 3;
 		char info[RD_NAME + 80];
 		redump_verify(info, sizeof(info));
-		logf("check %s: %d track(s), redump %s %s", base, nt, rd_result_str(), g_rd_result_name);
-		// into its log: replace the redump= line, or make a small log
-		snprintf(path, sizeof(path), "%s.log", base);
-		static char lb2[65536];
-		int n = 0;
-		VFile *lf = vf_open(path, "rb");
-		if (lf) { n = (int)vf_read(lf, lb2, sizeof(lb2) - 1); vf_close(lf); }
-		lb2[n > 0 ? n : 0] = 0;
-		char rdl[RD_NAME + 32];
-		snprintf(rdl, sizeof(rdl), "redump=%s%s%s\n", rd_result_str(), g_rd_result_name[0] ? " " : "", g_rd_result_name);
-		VFile *of = vf_open(path, "wb");
-		if (of) {
-			if (n > 0) {
-				int put = 0;
-				for (char *l = lb2; *l; ) {
-					char *e = strchr(l, '\n');
-					size_t len = e ? (size_t)(e - l + 1) : strlen(l);
-					if (!strncmp(l, "redump=", 7)) { if (!put) { vf_printf(of, "%s", rdl); put = 1; } }
-					else vf_write(of, l, len);
-					l += len;
+		rd = g_rd_result;
+		snprintf(rdname, sizeof(rdname), "%s", g_rd_result_name);
+	} else {
+		rd_lock();
+		rd = rd_local_verify(bin, nt, rdname, sizeof(rdname));
+		rd_unlock();
+		if (rd < -2 || rd > 1) rd = -1;
+		if (rd != 1) rdname[0] = 0;
+	}
+	logf("check %s: %d track(s), redump %s %s", base, nt, rd_code(rd), rdname);
+	snprintf(path, sizeof(path), "%s.md5", base);
+	VFile *mf = vf_open(path, "wb");
+	if (mf) { for (int i = 0; i < nt; i++) vf_printf(mf, "%s  track %02d\n", hex[i], i + 1); vf_close(mf); }
+	// its log: the tracks' MD5s and the Redump line replaced, or a small log
+	snprintf(path, sizeof(path), "%s.log", base);
+	char *lb = (char *)malloc(65536);
+	int n = 0;
+	VFile *lf = lb ? vf_open(path, "rb") : NULL;
+	if (lf) { n = (int)vf_read(lf, lb, 65535); vf_close(lf); }
+	if (lb) lb[n > 0 ? n : 0] = 0;
+	char rdl[RD_NAME + 32];
+	snprintf(rdl, sizeof(rdl), "redump=%s%s%s\n", rd_code(rd), rdname[0] ? " " : "", rdname);
+	VFile *of = lb ? vf_open(path, "wb") : NULL;
+	if (of) {
+		if (n > 0) {
+			int put = 0;
+			for (char *l = lb; *l; ) {
+				char *e = strchr(l, '\n');
+				size_t len = e ? (size_t)(e - l + 1) : strlen(l);
+				unsigned tn;
+				const char *mp = NULL;
+				if (!strncmp(l, "track=", 6) && sscanf(l, "track=%u", &tn) == 1 && tn >= 1 && (int)tn <= nt) {
+					mp = strstr(l, " md5=");
+					if (mp && mp >= l + len) mp = NULL;   // on a later line
 				}
-				if (!put) vf_printf(of, "%s", rdl);
-			} else {
-				vf_printf(of, "PSX Ripper rip log\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n", k.title, k.serial);
-				vf_printf(of, "sectors=%u\n", lba);
-				for (int i = 0; i < nt; i++) vf_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], g_track_md5[i]);
-				vf_printf(of, "%s", rdl);
+				if (!strncmp(l, "redump=", 7)) { if (!put) { vf_printf(of, "%s", rdl); put = 1; } }
+				else if (mp) {   // the track's MD5 as the image has it now
+					vf_write(of, l, (size_t)(mp + 5 - l));
+					vf_printf(of, "%s\n", hex[tn - 1]);
+				}
+				else vf_write(of, l, len);
+				l += len;
 			}
-			vf_close(of);
+			if (!put) vf_printf(of, "%s", rdl);
+		} else {
+			const Card *k = job ? &g_cards[cur_card()] : NULL;
+			const char *slash = strrchr(base, '/');
+			vf_printf(of, "PSX Ripper rip log\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n",
+			          k ? k->title : slash ? slash + 1 : base, k ? k->serial : "");
+			vf_printf(of, "sectors=%u\n", lba);
+			for (int i = 0; i < nt; i++) vf_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], hex[i]);
+			vf_printf(of, "%s", rdl);
 		}
+		vf_close(of);
+	}
+	free(lb);
+	return 0;
+}
+
+// The audit's recheck after an undo wrote sectors back: `file` is the image (.bin).
+static void recheck_hook(const char *file)
+{
+	char base[320];
+	snprintf(base, sizeof(base), "%s", file);
+	size_t n = strlen(base);
+	if (n > 4 && !strcmp(base + n - 4, ".bin")) base[n - 4] = 0;
+	check_image(base);
+	g_redraw = 2;   // the tabs' Redump icons follow the log
+}
+
+// Checks an earlier rip against Redump from its file, without the disc (check_image). Runs as the
+// card's job; the tab and the page show its progress.
+static void check_job_thread(void *arg)
+{
+	t_card = (int)(long)arg;
+	Card &k = g_cards[t_card];
+	char base[256];
+	snprintf(base, sizeof(base), "%s", k.exist);
+	g_phase = 4; g_done = 0; g_total = 0; g_readpos = 0; g_pass2_total = 0;
+	g_rd_result = -1; g_rd_result_name[0] = 0;
+	int r = check_image(base, 1);
+	if (r == 0) {
+		audit_card_redump(t_card);
 		fire_event("check_finished");
 	}
+	audit_card_end(t_card, r == 0 ? "finished" : r == 1 ? "cancelled" : "failed");
 	prev_rip_check();   // the icon and the status follow the log
 	g_state = ST_HOME;
 	g_phase = 0;
@@ -5307,7 +5460,7 @@ static void check_job_thread(void *arg)
 	sysThreadExit(0);
 }
 
-static void check_job_start(int c)
+static void check_job_start(int c, AuditSrc src)
 {
 	Card &k = g_cards[c];
 	if (k.job || !k.exist[0]) return;
@@ -5318,8 +5471,9 @@ static void check_job_start(int c)
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy (status, deploy); the drive is not used
 	g_abort = 0; g_finished = 0; g_skip = 0;
+	audit_card_begin(c, src, "check");
 	sys_ppu_thread_t t;
-	if (sysThreadCreate(&t, check_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxcheck")) { k.job = 0; g_state = ST_HOME; }
+	if (sysThreadCreate(&t, check_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxcheck")) { audit_card_end(c, "failed"); k.job = 0; g_state = ST_HOME; }
 }
 
 // A rip in the background, for one card: the home screen keeps running and shows it in the card.
@@ -5336,7 +5490,8 @@ static void rip_job_thread(void *arg)
 	if (fresh) usleep(2000 * 1000);   // give the drive a moment to spin up
 	g_done = 0; g_total = 0; g_readpos = 0; g_phase = 0; g_pass2_total = 0;
 	logf("start rip (%s)", fresh ? "disc inserted" : "disc already in drive");
-	rip_disc(fresh, 1);
+	int ok = rip_disc(fresh, 1);
+	audit_card_end(t_card, rip_result(ok));
 	g_state = ST_HOME;     // also after an early failure
 	k.state = DISC_NONE;   // ejected or ripped: identify again
 	k.tried = 0;
@@ -5361,7 +5516,7 @@ static void job_reset(int c)
 	g_md5_total[c] = 0; g_md5_done[c] = 0;
 }
 
-static void rip_job_start(int c, int fresh)
+static void rip_job_start(int c, AuditSrc src, int fresh)
 {
 	Card &k = g_cards[c];
 	if (k.job) return;
@@ -5371,8 +5526,10 @@ static void rip_job_start(int c, int fresh)
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy from now on (status, the poll thread, deploy)
 	g_abort = 0; g_finished = 0; g_skip = 0;
+	audit_card_begin(c, src, "rip");
 	sys_ppu_thread_t t;
 	if (sysThreadCreate(&t, rip_job_thread, (void *)(long)(fresh | c << 8), 1000, 0x10000, 0, (char *)"psxjob")) {
+		audit_card_end(c, "failed");
 		k.job = 0; g_state = ST_HOME;
 	}
 }
@@ -5433,7 +5590,8 @@ static void repair_job_thread(void *arg)
 	t_card = (int)(long)arg;
 	Card &k = g_cards[t_card];
 	logf("start repair");
-	repair_disc();
+	int ok = repair_disc();
+	audit_card_end(t_card, repair_result(ok));
 	g_state = ST_HOME;
 	k.state = DISC_NONE;   // identify again: the log changed
 	k.tried = 0;
@@ -5444,7 +5602,7 @@ static void repair_job_thread(void *arg)
 	sysThreadExit(0);
 }
 
-static void repair_job_start(int c)
+static void repair_job_start(int c, AuditSrc src)
 {
 	Card &k = g_cards[c];
 	if (k.job) return;
@@ -5458,8 +5616,9 @@ static void repair_job_start(int c)
 	OnCard o(c);
 	g_state = ST_RIPPING;   // busy (status, the poll thread, deploy)
 	g_abort = 0; g_finished = 0; g_skip = 0;
+	audit_card_begin(c, src, "repair");
 	sys_ppu_thread_t t;
-	if (sysThreadCreate(&t, repair_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxrepairjob")) { k.job = 0; k.repairing = 0; g_state = ST_HOME; }
+	if (sysThreadCreate(&t, repair_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxrepairjob")) { audit_card_end(c, "failed"); k.job = 0; k.repairing = 0; g_state = ST_HOME; }
 }
 
 static int repair_disc_inner()
@@ -5583,7 +5742,7 @@ static int repair_disc_inner()
 	if (g_use == SRC_BD) lv1_storage_unpatch();
 	for (int t = 0; t < g_ntracks; t++) md5_hex(g_track_md5bin[t], g_track_md5[t]);   // fresh when patched
 	char rdinfo[RD_NAME + 80] = "";
-	if (g_redump != RD_OFF) redump_verify(rdinfo, sizeof(rdinfo));
+	if (g_redump != RD_OFF) { redump_verify(rdinfo, sizeof(rdinfo)); audit_card_redump(cur_card()); }
 	// results, the .md5 file and the log as after a rip
 	g_nres = 0;
 	snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", g_name, g_serial);
@@ -5769,7 +5928,7 @@ int main(int argc, char *argv[])
 	// start-up checks: config, lv1 state after an earlier crash, USB file systems
 	char warn[400] = "";
 	audit_init("/dev_hdd0/tmp/psxrip_audit", &vf_io);
-	audit_set_hooks(set_setting_hook, NULL);
+	audit_set_hooks(set_setting_hook, recheck_hook);
 	int had_cfg = cfg_load();
 	audit_apply_cap();   // also without a config file (the default size)
 	cfg_prime();   // so the first change after the boot is logged
