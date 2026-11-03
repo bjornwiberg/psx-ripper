@@ -329,6 +329,9 @@ static const char *en[STR_COUNT] = {
 	"Redo %s?",
 	"Redo all changes to %s?",
 	"Redoing %s, please wait",
+	"All",
+	"%s is not connected",
+	"More than %d games here: the first %d are shown",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -654,6 +657,9 @@ static const char *sv[STR_COUNT] = {
 	"Gör om %s?",
 	"Gör om alla ändringar på %s?",
 	"Gör om %s, vänta",
+	"Alla",
+	"%s är inte ansluten",
+	"Fler än %d spel här: de första %d visas",
 };
 
 static const char **table = en;

@@ -38,6 +38,7 @@
 #include "vfs.h"
 #include "usbodd.h"
 #include "audit.h"
+#include "library.h"
 #include <sys/mutex.h>
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
@@ -62,6 +63,8 @@ static int g_webhook_hdr_on = 0;               // send them (off keeps them stor
 // File name of a rip: %T title (Redump's name without the language list, else the app's title;
 // with "(Disc 1)" for a disc of several), %R region, %D disc ID, %N Redump's whole name. Text in [ ] does not show in webMAN's game list.
 static char g_name_pat[96] = "%T [%D]";
+static char g_games_source[8] = "all";   // the game list's source: hdd, usbN (USB port) or all
+static GameFilter g_games_filter = {0, 0, 0, 0};   // the game list's filter (games_filter=fmt,redump,errors,other)
 enum { SRC_BD, SRC_USB };
 static char g_outdir_usb[8][64];               // destination per USB drive, by its port ("" = the hard disk)
 // Drive settings: the standard (Settings, START) and a drive's own values (SELECT on its card),
@@ -208,6 +211,18 @@ static int cfg_apply_line(const char *line)
 		for (int i = 0; i < 7; i++) if (wh_steps[i] == v) { g_webhook_step = v; ok = 1; }
 		if (!ok) return 0;
 	}
+	else if (!strncmp(line, "games_source=", 13)) {
+		const char *v = line + 13;
+		if (strcmp(v, "hdd") && strcmp(v, "all") && !(!strncmp(v, "usb", 3) && v[3] >= '0' && v[3] <= '7' && !v[4])) return 0;
+		snprintf(g_games_source, sizeof(g_games_source), "%s", v);
+	}
+	else if (!strncmp(line, "games_filter=", 13)) {
+		GameFilter f;
+		char end;
+		if (sscanf(line + 13, "%d,%d,%d,%d%c", &f.fmt, &f.redump, &f.errors, &f.other, &end) != 4 || f.fmt < 0 || f.fmt > 2 ||
+		    f.redump < 0 || f.redump > 4 || f.errors < 0 || f.errors > 2 || f.other < 0 || f.other > 3) return 0;
+		g_games_filter = f;
+	}
 	else if (!strncmp(line, "audit_mb=", 9)) {
 		int v = atoi(line + 9), mb = 256;   // anything but a listed size is the default
 		for (size_t i = 0; i < sizeof(audit_mb_steps) / sizeof(audit_mb_steps[0]); i++) if (audit_mb_steps[i] == v) mb = v;
@@ -309,6 +324,8 @@ static void cfg_text(char *txt, size_t cap)
 	put("webhook_headers_on=%d\n", g_webhook_hdr_on);
 	for (int i = 0; i < WH_HEADERS; i++) put("webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
 	put("audit_mb=%d\n", g_audit_mb);
+	put("games_source=%s\n", g_games_source);
+	put("games_filter=%d,%d,%d,%d\n", g_games_filter.fmt, g_games_filter.redump, g_games_filter.errors, g_games_filter.other);
 }
 
 // At start: the file may have been edited (over FTP) while the app was off. Every setting whose
@@ -2557,24 +2574,256 @@ static void fit_middle(UiFont font, const char *in, char *out, size_t n, int max
 	}
 }
 
-static void next_target(char *outdir, int dir)
+// The destinations a rip can go to, in order: the hard disk, then by USB port a FAT32 drive the PS3
+// mounts (/dev_usbNNN) or an exFAT drive reached through FatFs. cands = their PSXISO folders,
+// ports = the USB port of each (-1 for the hard disk). Returns how many (at least 1).
+static int dest_candidates(char (*cands)[32], int *ports)
 {
-	char cands[9][32];
 	int nc = 0;
-	snprintf(cands[nc++], 32, "/dev_hdd0/PSXISO");
+	snprintf(cands[nc], 32, "/dev_hdd0/PSXISO");
+	ports[nc++] = -1;
 	VfVolume vols[8];
 	int nv = vf_scan(vols, 8);
 	for (int port = 0; port < 8; port++) {
 		char dev[16];
 		snprintf(dev, sizeof(dev), "/dev_usb%03d", port);
-		struct stat st;
-		if (stat(dev, &st) == 0) { snprintf(cands[nc++], 32, "%s/PSXISO", dev); continue; }
+		if (vf_exists(dev)) { snprintf(cands[nc], 32, "%s/PSXISO", dev); ports[nc++] = port; continue; }
 		for (int i = 0; i < nv && i < 8; i++)
-			if (vols[i].port == port) snprintf(cands[nc++], 32, "%s/PSXISO", vols[i].root);
+			if (vols[i].port == port) { snprintf(cands[nc], 32, "%s/PSXISO", vols[i].root); ports[nc++] = port; }
 	}
+	return nc;
+}
+
+static void next_target(char *outdir, int dir)
+{
+	char cands[9][32];
+	int ports[9];
+	int nc = dest_candidates(cands, ports);
 	int cur = 0;
 	for (int i = 0; i < nc; i++) if (!strcmp(cands[i], outdir)) cur = i;   // not there any more: from the hard disk
 	snprintf(outdir, 64, "%s", cands[(cur + (dir < 0 ? nc - 1 : 1)) % nc]);
+}
+
+// ---------------------------------------------------------------- game list: sources and the background scan
+// The game list shows one source's PSXISO folder or all of them. Building it reads every folder
+// and log, so it runs in a thread of its own at the app's lowest priority (below the rips and the
+// UI); the screen takes the finished result with gl_poll(). The result stays until a source switch,
+// a change (gl_changed: a rip finished, a file action) or, on the hard disk, a newer folder date;
+// FAT32 and exFAT folders do not show changes in their date, so a USB source is read again each
+// time the list is opened.
+#define GL_MAX 1000        // discs per source the list takes; a source with more shows the first 1000 and says so
+#define GL_SRCS 10         // the hard disk, 8 USB ports, All
+#define GL_PRIO 2000       // the scan thread's priority: the app's lowest (rips 1000, polling 1500)
+#define GL_UI __attribute__((unused))   // called by the game list screen and /games.json
+struct GlSource { char key[8], dir[32], name[64]; int port, n; };   // n = its discs in the last scan, -1 unreadable
+struct GlResult {
+	char key[8];               // the source scanned: hdd, usbN, all
+	GlSource src[GL_SRCS];     // the sources there were at the scan (the last one is All)
+	int nsrc;
+	GameDisc *d; int n;        // the discs of the scanned source(s)
+	Game *g; int ng;           // their rows (lib_group)
+	int more;                  // a source had more than GL_MAX discs
+	int gone;                  // the chosen source is not connected (or went away during the scan)
+	time_t t0;                 // when the scan started
+	uint32_t gen;              // change counter: +1 with every result gl_poll takes
+};
+static GlResult g_gl;                  // the list's result; the UI thread owns it (gl_poll swaps it)
+static sys_mutex_t g_gl_mx;            // the hand-over between the UI and the scan thread
+static char g_gl_req[8];               // a scan asked for and not started yet, "" = none
+static int g_gl_running;               // the scan thread runs
+static GlResult *g_gl_next;            // a finished scan gl_poll has not taken yet
+static volatile int g_gl_stale = 1;    // files changed since the last scan started
+
+// The sources: the same candidates as next_target, named "Hard disk" / "USB n (LABEL)", then "All".
+static int gl_sources(GlSource *out, int max)
+{
+	char cands[9][32];
+	int ports[9];
+	int nc = dest_candidates(cands, ports), n = 0;
+	for (int i = 0; i < nc && n < max - 1; i++, n++) {
+		GlSource &s = out[n];
+		memset(&s, 0, sizeof(s));
+		snprintf(s.dir, sizeof(s.dir), "%s", cands[i]);
+		s.port = ports[i];
+		s.n = 0;
+		if (ports[i] < 0) { snprintf(s.key, sizeof(s.key), "hdd"); snprintf(s.name, sizeof(s.name), "%s", T(STR_DEST_HDD)); continue; }
+		snprintf(s.key, sizeof(s.key), "usb%d", ports[i]);
+		char usb[24], label[48] = "";
+		snprintf(usb, sizeof(usb), T(STR_SRC_USB_PORT), ports[i]);
+		if (vf_label(ports[i], label, sizeof(label)) || !label[0]) snprintf(s.name, sizeof(s.name), "%s", usb);
+		else snprintf(s.name, sizeof(s.name), "%s (%s)", usb, label);
+	}
+	if (n < max) {
+		GlSource &s = out[n++];
+		memset(&s, 0, sizeof(s));
+		snprintf(s.key, sizeof(s.key), "all");
+		snprintf(s.name, sizeof(s.name), "%s", T(STR_GL_ALL));
+		s.port = -1;
+	}
+	return n;
+}
+
+// The source a disc is in (its folder starts with the source's), NULL when none.
+GL_UI static const GlSource *gl_place(const GlResult *r, const GameDisc *d)
+{
+	for (int i = 0; i < r->nsrc; i++) {
+		size_t l = strlen(r->src[i].dir);
+		if (l && !strncmp(d->base, r->src[i].dir, l) && d->base[l] == '/') return &r->src[i];
+	}
+	return NULL;
+}
+
+static int gl_io_read(const char *p, char *buf, int max)
+{
+	VFile *f = vf_open(p, "rb");
+	if (!f) return -1;
+	int n = (int)vf_read(f, buf, max);
+	vf_close(f);
+	return n;
+}
+static int gl_io_exists(const char *p) { return vf_exists(p); }
+static int gl_io_lc(const char *id) { return is_libcrypt_disc(id); }
+static LibIo gl_libio() { LibIo io = {vf_listdir, vf_size, gl_io_read, gl_io_exists, gl_io_lc, SBI_DIR}; return io; }
+
+// The source's drive is still connected (the hard disk always is).
+static int gl_drive_there(const GlSource &s)
+{
+	if (s.port < 0) return 1;
+	if (!strncmp(s.dir, "exfat", 5)) {
+		VfVolume v[8];
+		int n = vf_scan(v, 8);
+		for (int i = 0; i < n && i < 8; i++) if (v[i].port == s.port) return 1;
+		return 0;
+	}
+	char dev[16];
+	snprintf(dev, sizeof(dev), "/dev_usb%03d", s.port);
+	return vf_exists(dev);
+}
+
+static void gl_free(GlResult *r)
+{
+	if (!r) return;
+	free(r->d); free(r->g);
+	free(r);
+}
+
+// Scans source `key` (or all of them) into a new result. Each source's folder is read into a
+// buffer for GL_MAX + 1 discs (about 3 MB), kept only as large as what was found.
+static GlResult *gl_build(const char *key, const LibIo *io)
+{
+	GlResult *r = (GlResult *)calloc(1, sizeof(GlResult));
+	if (!r) return NULL;
+	snprintf(r->key, sizeof(r->key), "%s", key);
+	r->t0 = time(NULL);
+	r->nsrc = gl_sources(r->src, GL_SRCS);
+	GameDisc *tmp = (GameDisc *)malloc((GL_MAX + 1) * sizeof(GameDisc));
+	int found = 0;
+	for (int i = 0; tmp && i < r->nsrc; i++) {
+		GlSource &s = r->src[i];
+		if (!s.dir[0] || (strcmp(key, "all") && strcmp(key, s.key))) continue;
+		found = 1;
+		int n = lib_scan(s.dir, io, tmp, GL_MAX + 1);
+		if (n < 0) {   // no PSXISO folder: empty; the drive itself gone (during the scan): gone
+			s.n = -1;
+			if (strcmp(key, "all") && !gl_drive_there(s)) r->gone = 1;
+			continue;
+		}
+		if (n > GL_MAX) { r->more = 1; n = GL_MAX; }
+		s.n = n;
+		GameDisc *d = n ? (GameDisc *)realloc(r->d, (size_t)(r->n + n) * sizeof(GameDisc)) : r->d;
+		if (!d) { s.n = -1; continue; }
+		memcpy(d + r->n, tmp, (size_t)n * sizeof(GameDisc));
+		r->d = d;
+		r->n += n;
+	}
+	free(tmp);
+	if (!found) r->gone = 1;   // the chosen drive is not connected
+	lib_mark_dups(r->d, r->n);
+	r->g = r->n ? (Game *)malloc((size_t)r->n * sizeof(Game)) : NULL;
+	r->ng = r->g ? lib_group(r->d, r->n, r->g, r->n) : 0;
+	logf("game list %s: %d disc(s), %d row(s)%s%s", key, r->n, r->ng, r->more ? ", more than the limit" : "", r->gone ? ", gone" : "");
+	return r;
+}
+
+// The scan thread: scans what was asked until nothing is (a request during a scan is done next).
+// arg != NULL: a thread of its own (it exits); NULL: run in place.
+static void gl_thread(void *arg)
+{
+	for (;;) {
+		char key[8];
+		sysMutexLock(g_gl_mx, 0);
+		if (!g_gl_req[0]) { g_gl_running = 0; sysMutexUnlock(g_gl_mx); break; }
+		snprintf(key, sizeof(key), "%s", g_gl_req);
+		g_gl_req[0] = 0;
+		sysMutexUnlock(g_gl_mx);
+		LibIo io = gl_libio();
+		GlResult *r = gl_build(key, &io);
+		sysMutexLock(g_gl_mx, 0);
+		GlResult *old = g_gl_next;
+		g_gl_next = r;
+		sysMutexUnlock(g_gl_mx);
+		gl_free(old);
+	}
+	if (arg) sysThreadExit(0);
+}
+
+// Asks for a scan of `key`; the thread starts when it is not running (where no thread can be
+// started, the scan runs here and now).
+static void gl_request(const char *key)
+{
+	g_gl_stale = 0;   // a change from here on needs another scan
+	sysMutexLock(g_gl_mx, 0);
+	snprintf(g_gl_req, sizeof(g_gl_req), "%s", key);
+	int start = !g_gl_running;
+	if (start) g_gl_running = 1;
+	sysMutexUnlock(g_gl_mx);
+	if (!start) return;
+	sys_ppu_thread_t t;
+	if (sysThreadCreate(&t, gl_thread, (void *)1, GL_PRIO, 0x10000, 0, (char *)"psxgames")) gl_thread(NULL);
+}
+
+// Files in the sources changed (a rip finished, a game was moved): the next open scans again.
+static void gl_changed() { g_gl_stale = 1; }
+
+// A scan asked for or running, or a result not taken yet: the screen says "Reading ...".
+GL_UI static int gl_busy()
+{
+	sysMutexLock(g_gl_mx, 0);
+	int b = g_gl_running || g_gl_req[0] || g_gl_next;
+	sysMutexUnlock(g_gl_mx);
+	return b;
+}
+
+// Takes a finished scan into g_gl (called by the UI). Returns 1 when it did.
+GL_UI static int gl_poll()
+{
+	sysMutexLock(g_gl_mx, 0);
+	GlResult *r = g_gl_next;
+	g_gl_next = NULL;
+	sysMutexUnlock(g_gl_mx);
+	if (!r) return 0;
+	uint32_t gen = g_gl.gen;
+	free(g_gl.d); free(g_gl.g);
+	g_gl = *r;
+	g_gl.gen = gen + 1;
+	free(r);
+	return 1;
+}
+
+// The list is opened (or its source switched) to `key`: scans unless the result in hand is of that
+// source and still current. Returns 1 when a scan was asked for.
+GL_UI static int gl_open(const char *key)
+{
+	int fresh = g_gl.gen && !g_gl_stale && !strcmp(g_gl.key, key) && !g_gl.gone;
+	for (int i = 0; fresh && i < g_gl.nsrc; i++) {
+		const GlSource &s = g_gl.src[i];
+		if (!s.dir[0] || (strcmp(key, "all") && strcmp(key, s.key))) continue;
+		time_t m;
+		if (vf_mtime(s.dir, &m) || m >= g_gl.t0) fresh = 0;   // a USB folder, or changed since (or in the same second as) the scan
+	}
+	if (fresh) return 0;
+	gl_request(key);
+	return 1;
 }
 
 // ---------------------------------------------------------------- disc identification for the home screen
@@ -2729,7 +2978,7 @@ static void idx_add(const char *name, void *ctx)
 	snprintf(x->e[x->n].name, sizeof(x->e[0].name), "%s", base);
 	x->n++;
 }
-static void idx_stale() { for (int i = 0; i < 2; i++) g_idx[i].stale = 1; }
+static void idx_stale() { for (int i = 0; i < 2; i++) g_idx[i].stale = 1; gl_changed(); }
 // Base path (dir/name) of an earlier rip of serial in dir, "" when there is none.
 static void idx_find(const char *dir, const char *serial, char *out, size_t n)
 {
@@ -6612,7 +6861,7 @@ int main(int argc, char *argv[])
 		t_card = -1;
 		logf("thread-local storage %s (thread saw %d)", g_parallel ? "ok: parallel rips" : "NOT working: one rip at a time", seen);
 	}
-	{ sys_mutex_attr_t ma; sysMutexAttrInitialize(ma); sysMutexCreate(&g_rd_mx, &ma); sysMutexCreate(&g_idx_mx, &ma); }
+	{ sys_mutex_attr_t ma; sysMutexAttrInitialize(ma); sysMutexCreate(&g_rd_mx, &ma); sysMutexCreate(&g_idx_mx, &ma); sysMutexCreate(&g_gl_mx, &ma); }
 	lang_init();
 	netInitialize();
 	// start-up checks: config, lv1 state after an earlier crash, USB file systems

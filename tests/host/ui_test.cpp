@@ -146,6 +146,171 @@ static bool has_text(const char *s)
 	return false;
 }
 
+// ---------------------------------------------------------------- game list: sources, labels, the scan
+// The console's drives under out/gl (the stubs map /dev_... and exfatN:/... there): the hard disk,
+// a FAT32 stick on port 1 and an exFAT drive on port 3, each with a set in its PSXISO.
+static void gl_text(const char *p, const char *s) { put_bin(p, s, strlen(s)); }
+static void gl_set(const char *dir, const char *name)
+{
+	char p[300], cue[400];
+	snprintf(p, sizeof p, "%s/%s.bin", dir, name);
+	static uint8_t sec[2 * RAW_SIZE];
+	put_bin(p, sec, sizeof sec);
+	snprintf(p, sizeof p, "%s/%s.cue", dir, name);
+	snprintf(cue, sizeof cue, "FILE \"%s.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n", name);
+	gl_text(p, cue);
+}
+static void gl_drives()
+{
+	system("rm -rf out/gl && mkdir -p out/gl/dev_hdd0/PSXISO out/gl/dev_usb001/PSXISO out/gl/exfat3/PSXISO");
+	snprintf(host_root, 256, "out/gl");
+	memset(host_exfat, 0, sizeof(int) * 8);
+	host_exfat[3] = 1;
+	for (int i = 0; i < 8; i++) host_label[i][0] = 0;
+	snprintf(host_label[1], 24, "RIPS");
+	snprintf(host_label[3], 24, "GAMES");
+	gl_set("out/gl/dev_hdd0/PSXISO", "Alundra (Europe) [SLES_011.35]");
+	gl_set("out/gl/dev_usb001/PSXISO", "Croc 2 (Europe) [SLES_020.88]");
+	gl_set("out/gl/exfat3/PSXISO", "Motorhead (USA) [SLUS_007.17]");
+}
+static void gl_old(const char *dir) { struct timeval tv[2] = {{time(NULL) - 3600, 0}, {time(NULL) - 3600, 0}}; utimes(dir, tv); }
+static int gl_take(const char *key) { gl_open(key); gl_poll(); return g_gl.n; }   // the host has no threads: the scan runs at once
+static int gl_has(const char *title)
+{
+	for (int i = 0; i < g_gl.n; i++) if (strstr(g_gl.d[i].base, title)) return i;
+	return -1;
+}
+// A file interface that removes the folder it scans after the first file it reads (a stick pulled
+// in the middle of a scan).
+static const char *g_gl_pull;
+static int gl_pull_read(const char *p, char *buf, int max)
+{
+	if (g_gl_pull) { char c[300]; snprintf(c, sizeof c, "rm -rf %s", g_gl_pull); system(c); g_gl_pull = NULL; }
+	VFile *f = vf_open(p, "rb");
+	if (!f) return -1;
+	int n = (int)vf_read(f, buf, max);
+	vf_close(f);
+	return n;
+}
+
+static void game_source_tests()
+{
+	int bad = 0;
+	host_lang = PS3_LANG_ENGLISH_US; lang_init();
+	gl_drives();
+	{   // the sources: the same candidates as next_target, each with its label, then "All"
+		GlSource s[GL_SRCS];
+		int n = gl_sources(s, GL_SRCS);
+		const char *keys[] = {"hdd", "usb1", "usb3", "all"};
+		const char *dirs[] = {"/dev_hdd0/PSXISO", "/dev_usb001/PSXISO", "exfat3:/PSXISO", ""};
+		const char *names[] = {"Hard disk", "USB 1 (RIPS)", "USB 3 (GAMES)", "All"};
+		if (n != 4) { printf("FAIL %d game sources, want 4\n", n); bad++; }
+		else for (int i = 0; i < 4; i++)
+			if (strcmp(s[i].key, keys[i]) || strcmp(s[i].dir, dirs[i]) || strcmp(s[i].name, names[i]))
+				{ printf("FAIL source %d: %s %s \"%s\", want %s %s \"%s\"\n", i, s[i].key, s[i].dir, s[i].name, keys[i], dirs[i], names[i]); bad++; }
+		char od[64] = "/dev_hdd0/PSXISO";
+		for (int i = 1; i < 4 && n == 4; i++) {
+			next_target(od, 1);
+			if (strcmp(od, i < 3 ? dirs[i] : dirs[0])) { printf("FAIL next_target step %d: %s\n", i, od); bad++; }
+		}
+		host_label[1][0] = 0;   // a stick without a label: just its port
+		n = gl_sources(s, GL_SRCS);
+		if (n != 4 || strcmp(s[1].name, "USB 1")) { printf("FAIL a source without a label: \"%s\"\n", n > 1 ? s[1].name : ""); bad++; }
+		snprintf(host_label[1], 24, "RIPS");
+		host_lang = PS3_LANG_SWEDISH; lang_init();
+		n = gl_sources(s, GL_SRCS);
+		if (n != 4 || strcmp(s[0].name, "Hårddisk") || strcmp(s[3].name, "Alla")) { printf("FAIL Swedish source names: \"%s\" \"%s\"\n", s[0].name, n > 3 ? s[3].name : ""); bad++; }
+		host_lang = PS3_LANG_ENGLISH_US; lang_init();
+	}
+	{   // All: every source's sets, each with its place; one source: only its own
+		int n = gl_take("all");
+		int a = gl_has("Alundra"), c = gl_has("Croc 2"), m = gl_has("Motorhead");
+		if (n != 3 || a < 0 || c < 0 || m < 0 || g_gl.gone || g_gl.more || strcmp(g_gl.key, "all") || g_gl.ng != 3)
+			{ printf("FAIL All: %d discs, %d rows, gone %d\n", n, g_gl.ng, g_gl.gone); bad++; }
+		else {
+			const GlSource *pa = gl_place(&g_gl, &g_gl.d[a]), *pc = gl_place(&g_gl, &g_gl.d[c]), *pm = gl_place(&g_gl, &g_gl.d[m]);
+			if (!pa || !pc || !pm || strcmp(pa->key, "hdd") || strcmp(pc->key, "usb1") || strcmp(pm->key, "usb3"))
+				{ printf("FAIL the place of each disc in All: %s %s %s\n", pa ? pa->key : "-", pc ? pc->key : "-", pm ? pm->key : "-"); bad++; }
+		}
+		n = gl_take("usb3");
+		if (n != 1 || gl_has("Motorhead") < 0 || g_gl.gone || strcmp(g_gl.key, "usb3")) { printf("FAIL one source: %d discs\n", n); bad++; }
+	}
+	{   // the cache: rescanned on a source switch, after a change, and when the hard disk's folder
+		// changed; not when nothing did
+		gl_old("out/gl/dev_hdd0/PSXISO");
+		gl_take("hdd");
+		uint32_t gen = g_gl.gen;
+		gl_old("out/gl/dev_hdd0/PSXISO");
+		if (gl_open("hdd")) { printf("FAIL the hard disk rescanned with nothing changed\n"); bad++; }
+		gl_changed();
+		if (!gl_open("hdd")) { printf("FAIL no rescan after a change\n"); bad++; }
+		gl_poll();
+		if (g_gl.gen != gen + 1) { printf("FAIL change counter %u, want %u\n", (unsigned)g_gl.gen, (unsigned)gen + 1); bad++; }
+		gl_old("out/gl/dev_hdd0/PSXISO");
+		if (!gl_open("usb1")) { printf("FAIL no rescan on a source switch\n"); bad++; }
+		gl_poll();
+		if (!gl_open("usb1")) { printf("FAIL a USB source is not rescanned on open (its folder dates are not kept)\n"); bad++; }
+		gl_poll();
+		gl_take("hdd");
+		gl_old("out/gl/dev_hdd0/PSXISO");
+		gl_set("out/gl/dev_hdd0/PSXISO", "Croc (Europe) [SLES_008.95]");   // copied in over FTP: the folder's date moves
+		if (!gl_open("hdd")) { printf("FAIL no rescan after the folder changed\n"); bad++; }
+		gl_poll();
+		if (g_gl.n != 2) { printf("FAIL after the folder changed: %d discs\n", g_gl.n); bad++; }
+	}
+	{   // a source that disappears: gone, no crash; All goes on without it
+		system("rm -rf out/gl/dev_usb001");
+		int n = gl_take("usb1");
+		if (n != 0 || !g_gl.gone) { printf("FAIL a pulled stick: %d discs, gone %d\n", n, g_gl.gone); bad++; }
+		n = gl_take("all");
+		if (n != 3 || g_gl.gone || gl_has("Croc 2") >= 0) { printf("FAIL All without the stick: %d discs, gone %d\n", n, g_gl.gone); bad++; }
+		// the folder goes away in the middle of the scan (the drive itself is still there)
+		gl_set("out/gl/exfat3/PSXISO", "Croc 2 (Europe) [SLES_020.88]");
+		g_gl_pull = "out/gl/exfat3/PSXISO";
+		LibIo io = gl_libio();
+		io.read = gl_pull_read;
+		GlResult *r = gl_build("usb3", &io);
+		if (!r || r->n > 2 || r->gone) { printf("FAIL a folder removed mid-scan: %d discs, gone %d\n", r ? r->n : -1, r ? r->gone : -1); bad++; }
+		gl_free(r);
+		system("rm -rf out/gl/exfat3");
+		host_exfat[3] = 0;   // and then the drive itself
+		n = gl_take("usb3");
+		if (n != 0 || !g_gl.gone) { printf("FAIL a pulled exFAT drive: %d discs, gone %d\n", n, g_gl.gone); bad++; }
+	}
+	{   // more than 1000 sets in a source: the first 1000, and it says so
+		system("mkdir -p out/gl/dev_usb001/PSXISO");
+		for (int i = 0; i < GL_MAX + 5; i++) {
+			char p[96];
+			snprintf(p, sizeof p, "out/gl/dev_usb001/PSXISO/Game %04d.iso", i);
+			put_bin(p, "", 0);
+		}
+		int n = gl_take("usb1");
+		if (n != GL_MAX || !g_gl.more) { printf("FAIL more than %d sets: %d discs, more %d\n", GL_MAX, n, g_gl.more); bad++; }
+	}
+	{   // the config keys round-trip, and wrong values change nothing
+		snprintf(g_games_source, sizeof g_games_source, "all");
+		g_games_filter = GameFilter{0, 0, 0, 0};
+		int ok = cfg_apply_line("games_source=usb3") && cfg_apply_line("games_filter=1,2,0,3");
+		int rej = !cfg_apply_line("games_source=usb9") && !cfg_apply_line("games_source=dvd") && !cfg_apply_line("games_filter=3,0,0,0") &&
+		          !cfg_apply_line("games_filter=0,5,0,0") && !cfg_apply_line("games_filter=0,0,3,0") && !cfg_apply_line("games_filter=0,0,0,4") &&
+		          !cfg_apply_line("games_filter=1,2");
+		char txt[4096];
+		cfg_text(txt, sizeof txt);
+		if (!ok || !rej || strcmp(g_games_source, "usb3") || g_games_filter.fmt != 1 || g_games_filter.redump != 2 || g_games_filter.other != 3 ||
+		    !strstr(txt, "\ngames_source=usb3\n") || !strstr(txt, "\ngames_filter=1,2,0,3\n"))
+			{ printf("FAIL games_source/games_filter: ok %d, rejected %d, %s\n", ok, rej, txt); bad++; }
+		snprintf(g_games_source, sizeof g_games_source, "hdd");
+		g_games_filter = GameFilter{0, 0, 0, 0};
+		int back = cfg_apply_line("games_source=usb3") && cfg_apply_line("games_source=all") && cfg_apply_line("games_source=hdd") && cfg_apply_line("games_filter=0,0,0,0");
+		if (!back || strcmp(g_games_source, "hdd")) { printf("FAIL games_source back to hdd\n"); bad++; }
+	}
+	host_root[0] = 0;
+	memset(host_exfat, 0, sizeof(int) * 8);
+	gl_take("hdd");   // nothing (the console's paths do not exist here)
+	host_lang = PS3_LANG_SWEDISH; lang_init();
+	if (bad) g_fail += bad; else printf("ok   game list sources, labels, All, the cache, a source that goes, games_* config keys\n");
+}
+
 // A prepared log: Alundra (a rip, and a repair that wrote 1015 sectors: 1017 rows), Final Fantasy IX
 // (a rip, a check, and a rip that was cancelled after writing a sector), and settings from every source.
 static void audit_scenarios()
@@ -966,6 +1131,7 @@ int main()
 		audit_set_hooks(set_setting_hook, NULL);
 		if (bad) g_fail += bad; else printf("ok   undoing an audit_mb row applies the cap at once\n");
 	}
+	game_source_tests();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;
