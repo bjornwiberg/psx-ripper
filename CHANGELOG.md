@@ -5,6 +5,26 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.1.0](https://github.com/bjornwiberg/psx-ripper/compare/v1.0.2...v1.1.0) (2026-11-03)
+
+
+### Features
+
+* local builds show their build time; the version sits under the title ([#8](https://github.com/bjornwiberg/psx-ripper/issues/8)) ([acac095](https://github.com/bjornwiberg/psx-ripper/commit/acac095325fdf53de95bd3044dc970a87fd4f30f))
+* webhook event disc_lost when a rip or repair stops because the disc left the drive ([#19](https://github.com/bjornwiberg/psx-ripper/issues/19)) ([0cccd5e](https://github.com/bjornwiberg/psx-ripper/commit/0cccd5ec7c7e092825872dd0c214423c3d9f6a14))
+
+
+### Bug fixes
+
+* a drive's page shows the last rip only for that disc, not for the next one put in ([#14](https://github.com/bjornwiberg/psx-ripper/issues/14)) ([d6ca98f](https://github.com/bjornwiberg/psx-ripper/commit/d6ca98f5471f76031ab03f3f3196edd196042dd0))
+* a job on a SuperDrive stops when the disc is gone instead of re-reading every sector ([#17](https://github.com/bjornwiberg/psx-ripper/issues/17)) ([3d1ba51](https://github.com/bjornwiberg/psx-ripper/commit/3d1ba510f5ae7091e973d04221a56f65cb3849bb))
+* a SuperDrive reads the pregap before the first audio track instead of re-reading it for an hour ([#11](https://github.com/bjornwiberg/psx-ripper/issues/11)) ([e0fd317](https://github.com/bjornwiberg/psx-ripper/commit/e0fd31787785958ef97600391193227934887691))
+* Castlevania Chronicles (USA) is named right despite the Tennis ID on its disc ([#15](https://github.com/bjornwiberg/psx-ripper/issues/15)) ([728b3d4](https://github.com/bjornwiberg/psx-ripper/commit/728b3d487cf0ba4b1df07e789b7ea42def37e991))
+* find the disc ID when SYSTEM.CNF writes it in lower case ([#10](https://github.com/bjornwiberg/psx-ripper/issues/10)) ([6afdbdb](https://github.com/bjornwiberg/psx-ripper/commit/6afdbdb5a37622ca5c527a29b4cdefb844446697))
+* putting a disc in repairs an older rip's junk pregap sector ([#16](https://github.com/bjornwiberg/psx-ripper/issues/16)) ([44721f8](https://github.com/bjornwiberg/psx-ripper/commit/44721f8f699638769aed361a6195166152a2c24c))
+* the first pregap sector before the first audio track is stored as silence, not as the drive's junk ([#13](https://github.com/bjornwiberg/psx-ripper/issues/13)) ([65376d5](https://github.com/bjornwiberg/psx-ripper/commit/65376d5d66e757f61ff76b4ad7ed07d103befd3e))
+* time and time left count for every drive, not only from when its tab is opened ([#9](https://github.com/bjornwiberg/psx-ripper/issues/9)) ([33fb201](https://github.com/bjornwiberg/psx-ripper/commit/33fb201b3747768e765fb90ecdfe4ac9650b2c91))
+
 ## [1.0.2](https://github.com/bjornwiberg/psx-ripper/compare/v1.0.1...v1.0.2) (2026-11-03)
 
 
