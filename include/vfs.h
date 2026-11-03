@@ -42,5 +42,7 @@ int vf_mtime(const char *path, time_t *t);
 // The volume label of the drive on a USB port (FAT32 or exFAT), as found by the last vf_scan;
 // "" = it has none or it could not be read. -1 for a port without a drive.
 int vf_label(int port, char *out, size_t n);
+// A drive is connected on the USB port (asks the system now; FAT32 or exFAT alike).
+int vf_drive_present(int port);
 
 #endif

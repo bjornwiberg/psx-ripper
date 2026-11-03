@@ -41,7 +41,10 @@ struct Lk {
 			sys_mutex_attr_t a;
 			sysMutexAttrInitialize(a);
 			a.attr_recursive = SYS_MUTEX_ATTR_RECURSIVE;
-			sysMutexCreate(&g_lock, &a);
+			// priority inheritance: a rip waiting for the lock lifts a low-priority holder (the
+			// game list's scan) to its own priority; plain priority order if lv2 refuses it
+			a.attr_protocol = SYS_MUTEX_PROTOCOL_PRIO_INHERIT;
+			if (sysMutexCreate(&g_lock, &a)) { a.attr_protocol = SYS_MUTEX_PROTOCOL_PRIO; sysMutexCreate(&g_lock, &a); }
 			g_lock_made = 1;
 		}
 		sysMutexLock(g_lock, 0);
@@ -260,18 +263,35 @@ int vf_listdir(const char *dir, void (*cb)(const char *name, void *ctx), void *c
 		closedir(d);
 		return n;
 	}
-	Lk lk;
+	// The lock is taken per entry, not for the whole folder: a big folder takes long to read from
+	// a USB drive and a rip writing to an exFAT drive must not wait for it. A volume unmounted in
+	// between (drive pulled) makes the next f_readdir fail (FatFs checks the object's mount id).
 	FF_DIR d;
-	if (f_opendir(&d, fp) != FR_OK) return -1;
+	{ Lk lk; if (f_opendir(&d, fp) != FR_OK) return -1; }
 	int n = 0;
 	FILINFO fi;
-	while (f_readdir(&d, &fi) == FR_OK && fi.fname[0]) {
-		if (fi.fname[0] == '.') continue;
-		cb(fi.fname, ctx);
+	char name[sizeof(fi.fname)];
+	for (;;) {
+		{
+			Lk lk;
+			if (f_readdir(&d, &fi) != FR_OK || !fi.fname[0]) break;
+			memcpy(name, fi.fname, sizeof(name));
+		}
+		if (name[0] == '.') continue;
+		cb(name, ctx);
 		n++;
 	}
-	f_closedir(&d);
+	{ Lk lk; f_closedir(&d); }
 	return n;
+}
+
+int vf_drive_present(int port)
+{
+	if (port < 0 || port > 7) return 0;
+	Lk lk;   // usb_info's buffer is shared
+	uint64_t sectors;
+	uint32_t ss;
+	return usb_info(port, &sectors, &ss) == 0;
 }
 
 int vf_size(const char *path, uint64_t *size)

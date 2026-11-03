@@ -193,6 +193,20 @@ static int gl_pull_read(const char *p, char *buf, int max)
 	return n;
 }
 
+// A listing after which the drive is pulled (exFAT on port 3 gone, its folder with it).
+static int gl_pull_list(const char *dir, void (*cb)(const char *, void *), void *ctx)
+{
+	int n = vf_listdir(dir, cb, ctx);
+	if (g_gl_pull && strstr(dir, "exfat3")) {
+		char c[300];
+		snprintf(c, sizeof c, "rm -rf %s", g_gl_pull);
+		system(c);
+		g_gl_pull = NULL;
+		host_exfat[3] = 0;
+	}
+	return n;
+}
+
 static void game_source_tests()
 {
 	int bad = 0;
@@ -272,6 +286,37 @@ static void game_source_tests()
 		GlResult *r = gl_build("usb3", &io);
 		if (!r || r->n > 2 || r->gone) { printf("FAIL a folder removed mid-scan: %d discs, gone %d\n", r ? r->n : -1, r ? r->gone : -1); bad++; }
 		gl_free(r);
+		// the drive is pulled after its folder was listed: gone, no phantom broken sets; in All
+		// the other sources stay and that one has none
+		system("mkdir -p out/gl/dev_usb001/PSXISO");
+		gl_set("out/gl/dev_usb001/PSXISO", "Croc 2 (Europe) [SLES_020.88]");
+		gl_set("out/gl/exfat3/PSXISO", "Croc 2 (Europe) [SLES_020.88]");
+		io.read = gl_io_read;
+		io.list = gl_pull_list;
+		g_gl_pull = "out/gl/exfat3/PSXISO";
+		r = gl_build("usb3", &io);
+		if (!r || r->n || !r->gone || r->oom) { printf("FAIL a drive pulled after its listing: %d discs, gone %d\n", r ? r->n : -1, r ? r->gone : -1); bad++; }
+		gl_free(r);
+		system("mkdir -p out/gl/exfat3/PSXISO");
+		gl_set("out/gl/exfat3/PSXISO", "Croc 2 (Europe) [SLES_020.88]");
+		host_exfat[3] = 1;
+		g_gl_pull = "out/gl/exfat3/PSXISO";
+		r = gl_build("all", &io);
+		int u3 = -1;
+		for (int i = 0; r && i < r->nsrc; i++) if (!strcmp(r->src[i].key, "usb3")) u3 = r->src[i].n;
+		if (!r || r->n != 3 || r->gone || u3 != -1) { printf("FAIL All with a drive pulled after its listing: %d discs, gone %d, usb3 n %d\n", r ? r->n : -1, r ? r->gone : -1, u3); bad++; }
+		for (int i = 0; r && i < r->n; i++) if (!strncmp(r->d[i].base, "exfat3:", 7)) { printf("FAIL a disc of the pulled drive in All: %s\n", r->d[i].base); bad++; }
+		gl_free(r);
+		// out of memory: its own state, not gone
+		g_gl_alloc_max = 1024;
+		host_exfat[3] = 1;
+		system("mkdir -p out/gl/exfat3/PSXISO");
+		io = gl_libio();
+		r = gl_build("hdd", &io);
+		if (!r || !r->oom || r->gone || r->n) { printf("FAIL out of memory: oom %d, gone %d, %d discs\n", r ? r->oom : -1, r ? r->gone : -1, r ? r->n : -1); bad++; }
+		gl_free(r);
+		g_gl_alloc_max = (size_t)-1;
+		system("rm -rf out/gl/dev_usb001/PSXISO/*");
 		system("rm -rf out/gl/exfat3");
 		host_exfat[3] = 0;   // and then the drive itself
 		n = gl_take("usb3");

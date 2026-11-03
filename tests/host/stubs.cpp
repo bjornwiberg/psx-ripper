@@ -194,6 +194,14 @@ int vf_mtime(const char *path, time_t *t)
 	*t = st.st_mtime;
 	return 0;
 }
+int vf_drive_present(int port)
+{
+	if (port < 0 || port > 7) return 0;
+	char dev[32], b[512];
+	snprintf(dev, sizeof dev, "/dev_usb%03d", port);
+	struct stat st;
+	return host_exfat[port] || (host_root[0] && stat(hp(dev, b, sizeof b), &st) == 0);
+}
 int vf_label(int port, char *out, size_t n) { if (port < 0 || port > 7) return -1; snprintf(out, n, "%s", host_label[port]); return 0; }
 
 // Redump, the remote view and webhooks: no network on the host
