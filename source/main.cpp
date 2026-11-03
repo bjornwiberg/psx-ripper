@@ -1691,6 +1691,26 @@ static int confirm_read(uint32_t lba, int need_edc, int max_reads, uint8_t *out)
 	return 0;
 }
 
+// A repair: the tracks' MD5s from the earlier rip's log, and which tracks the repair wrote to. Only
+// those are hashed again (a whole image took minutes; a repaired pregap sector is in a small track).
+static uint8_t g_md5_known[NCARDS][MAX_TRACKS + 1], g_md5_dirty[NCARDS][MAX_TRACKS + 1];
+// sectors hashed of how many while MD5s are recomputed (the page shows it); 0 total = not now
+static volatile uint32_t g_md5_done[NCARDS], g_md5_total[NCARDS];
+
+static int track_of(uint32_t lba)
+{
+	int t = 0;
+	while (t + 1 < g_ntracks && lba >= g_tstart[t + 1]) t++;
+	return t;
+}
+
+// a sector written into the image: its track's MD5 must be computed again
+static void note_patched(uint32_t lba)
+{
+	if (lba < g_patch_min) g_patch_min = lba;
+	g_md5_dirty[cur_card()][track_of(lba)] = 1;
+}
+
 // Verify pass (bit-perfect mode): re-reads the sectors without EDC in long runs at full speed and
 // compares them with their first-pass fingerprint. A sector that differs is read until three reads
 // agree and written into the image. Returns the number of sectors written.
@@ -1718,7 +1738,7 @@ static int verify_pass()
 				int ok = confirm_read(lba, 0, reads, sec);
 				g_rr_max = 0;
 				if (ok && fnv64(sec, RAW_SIZE) != g_uv_hash[k + j]) {
-					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; g_changed++; if (lba < g_patch_min) g_patch_min = lba; }
+					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; g_changed++; note_patched(lba); }
 					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
 				} else if (ok) {
 					rip_event(0xA8B0C8, STR_EV_FIRST_OK, lba);   // the first read was right
@@ -1762,7 +1782,7 @@ static int second_pass()
 				g_suspect_ok[k - g_nhard] = 1;
 				if (memcmp(sec, g_suspect_data + (k - g_nhard) * RAW_SIZE, RAW_SIZE)) {
 					g_changed++;
-					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; if (lba < g_patch_min) g_patch_min = lba; }
+					if (vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) { patched++; note_patched(lba); }
 					logf("second pass: sector %u confirmed with different data, image updated", lba);
 					rip_event(0x7CE0A0, STR_EV_DIFFER, lba);
 				} else {
@@ -1773,7 +1793,7 @@ static int second_pass()
 			}
 		} else if (ok && vf_seek(g_out, (uint64_t)lba * RAW_SIZE) == 0 && vf_write(g_out, sec, RAW_SIZE) == RAW_SIZE) {
 			patched++;
-			if (lba < g_patch_min) g_patch_min = lba;
+			note_patched(lba);
 			g_hard[k] |= HARD_RESOLVED;
 			if (edc_bad) g_badsect--; else g_readerrs--;
 			g_recovered++;
@@ -1788,11 +1808,50 @@ static int second_pass()
 	return patched;
 }
 
+// Only the written tracks, when every other track's MD5 is known. 1 = done, 0 = hash the whole image.
+static int md5_dirty_tracks(VFile *f, uint8_t *b)
+{
+	int c = cur_card(), any = 0;
+	uint64_t todo = 0, done = 0;
+	for (int t = 0; t < g_ntracks; t++) {
+		if (!g_md5_dirty[c][t] && !g_md5_known[c][t]) return 0;
+		uint32_t end = t + 1 < g_ntracks ? g_tstart[t + 1] : g_leadout;
+		if (g_md5_dirty[c][t]) { todo += end - g_tstart[t]; any = 1; }
+	}
+	if (!any) return 0;
+	g_md5_total[c] = (uint32_t)todo; g_md5_done[c] = 0;
+	for (int t = 0; t < g_ntracks; t++) {
+		if (!g_md5_dirty[c][t]) continue;
+		uint32_t lba = g_tstart[t], end = t + 1 < g_ntracks ? g_tstart[t + 1] : g_leadout;
+		Md5 m;
+		md5_init(&m);
+		if (vf_seek(f, (uint64_t)lba * RAW_SIZE)) return 0;
+		while (lba < end) {
+			uint32_t n = end - lba < 256 ? end - lba : 256;
+			if (vf_read(f, b, (size_t)RAW_SIZE * n) != (size_t)RAW_SIZE * n) return 0;
+			md5_update(&m, b, (size_t)n * RAW_SIZE);
+			lba += n; done += n;
+			g_md5_done[c] = (uint32_t)done;
+		}
+		md5_final(&m, g_track_md5bin[t]);
+		logf("md5 of track %d recomputed (%u sectors), the other tracks' from the log", g_tracks[t].num, end - g_tstart[t]);
+	}
+	return 1;
+}
+
 // Recomputes the per-track MD5s from the finished image (after the second pass patched it).
 static void md5_from_file(const char *path)
 {
 	VFile *f = vf_open(path, "rb");
 	if (!f) return;
+	g_phase = 3;   // the page says "Recomputing MD5" with the percentage
+	{
+		uint8_t *b = (uint8_t *)malloc(256 * RAW_SIZE);
+		int ok = b && md5_dirty_tracks(f, b);
+		free(b);
+		if (ok) { vf_close(f); g_md5_total[cur_card()] = 0; return; }
+	}
+	g_md5_total[cur_card()] = g_leadout; g_md5_done[cur_card()] = 0;
 	uint8_t *b = (uint8_t *)malloc(256 * RAW_SIZE);
 	uint32_t lba = 0;
 	int t = 0;
@@ -1821,10 +1880,12 @@ static void md5_from_file(const char *path)
 			i += cnt;
 		}
 		lba += n;
+		g_md5_done[cur_card()] = lba;
 	}
 	while (t < g_ntracks) { md5_final(&g_md5[t], g_track_md5bin[t]); if (++t < g_ntracks) md5_init(&g_md5[t]); }
 	free(b);
 	vf_close(f);
+	g_md5_total[cur_card()] = 0;
 	logf("md5 recomputed from %s", path);
 }
 
@@ -2447,6 +2508,20 @@ static void idx_find(const char *dir, const char *serial, char *out, size_t n)
 }
 
 // Counts the sectors in <g_base>.log that are still wrong (unreadable, bad, unconfirmed).
+// An earlier rip (before 1.0.3) may hold the drive's junk in the first pregap sector of track 2
+// (see pregap_transition): that sector not silent, the one after it silent. Returns that sector,
+// 0 when the image is fine. `log` is the rip's log, `bin` its open image.
+static uint32_t pregap_junk_in(VFile *bin, const char *log)
+{
+	const char *t2 = strstr(log, "track=02 start=");
+	unsigned s = 0;
+	if (!t2 || sscanf(t2, "track=02 start=%u", &s) != 1 || !s) return 0;
+	static uint8_t sec[NCARDS][2 * RAW_SIZE];
+	uint8_t *b = sec[cur_card()];
+	if (vf_seek(bin, (uint64_t)s * RAW_SIZE) || vf_read(bin, b, 2 * RAW_SIZE) != 2 * RAW_SIZE) return 0;
+	return !sector_zero(b) && sector_zero(b + RAW_SIZE) ? s : 0;
+}
+
 static int riplog_open_count()
 {
 	char path[320];
@@ -2460,6 +2535,11 @@ static int riplog_open_count()
 	int n = (int)vf_read(f, buf, sizeof(buf) - 1), cnt = 0;
 	vf_close(f);
 	buf[n > 0 ? n : 0] = 0;
+	{   // and the junk sector of an older rip, which its log does not list
+		snprintf(path, sizeof(path), "%s.bin", g_base);
+		VFile *bf = vf_open(path, "rb");
+		if (bf) { if (pregap_junk_in(bf, buf)) cnt++; vf_close(bf); }
+	}
 	for (char *l = strtok(buf, "\n"); l; l = strtok(NULL, "\n"))
 		if (!strncmp(l, "unreadable=", 11) || !strncmp(l, "bad=", 4) || (!strncmp(l, "uncertain=", 10) && strstr(l, "unconfirmed")))
 			cnt++;
@@ -4055,6 +4135,7 @@ static int draw_page_body(int c, int y)
 		uint32_t pct = (uint32_t)((uint64_t)pos * 100 / tot);
 		int inpass = g_pass2_total && (k.repairing || g_phase == 1 || g_phase == 2);   // the verify pass, the re-reads, a repair: their own progress
 		if (inpass) pct = (uint32_t)((uint64_t)g_pass2_done * 100 / g_pass2_total);
+		if (g_phase == 3 && g_md5_total[c]) pct = (uint32_t)((uint64_t)g_md5_done[c] * 100 / g_md5_total[c]);   // MD5s being recomputed
 		if (pct > 100) pct = 100;
 		int bh = ls * 2 / 3;
 		ui_rect(L, y, R - L, bh, 0x50FFFFFF);
@@ -4071,6 +4152,7 @@ static int draw_page_body(int c, int y)
 		if (g_abort) snprintf(ph, sizeof(ph), "%s", T(STR_CANCELLING));
 		else if (g_skip && (g_phase == 1 || g_phase == 2)) snprintf(ph, sizeof(ph), "%s", T(STR_SKIPPING));
 		else if (g_phase == 4) snprintf(ph, sizeof(ph), T(STR_CHECKING), pos, g_total);
+		else if (g_phase == 3 && g_md5_total[c]) snprintf(ph, sizeof(ph), "%s", T(STR_MD5_PROGRESS));   // the percentage is on the right
 		else if (g_phase == 3) snprintf(ph, sizeof(ph), "%s", T(STR_FINISHING));
 		else if (g_pass2_total) snprintf(ph, sizeof(ph), "%s", T(g_phase == 1 ? STR_VERIFY_PASS : STR_PASS2));   // the count goes on the line below
 		else snprintf(ph, sizeof(ph), T(STR_PROGRESS), pos, g_total);
@@ -5045,6 +5127,8 @@ static void job_reset(int c)
 	g_readerrs = 0; g_recovered = 0; g_badsect = 0;
 	g_cards[c].pg_scroll = 0;
 	g_cards[c].eta_t0 = 0;
+	memset(g_md5_known[c], 0, sizeof(g_md5_known[0])); memset(g_md5_dirty[c], 0, sizeof(g_md5_dirty[0]));
+	g_md5_total[c] = 0; g_md5_done[c] = 0;
 }
 
 static void rip_job_start(int c, int fresh)
@@ -5204,6 +5288,9 @@ static int repair_disc_inner()
 	g_nhard = 0; g_nsuspect = 0; g_confirmed = 0; g_changed = 0; g_readerrs = 0; g_badsect = 0; g_recovered = 0;
 	g_pass2_total = 0; g_pass2_done = 0; g_abort = 0; g_finished = 0; g_rd_result = -3; g_rd_result_name[0] = 0;
 	tstart_init();
+	uint32_t junk = pregap_junk_in(g_out, buf);   // before strtok cuts the log up
+	memset(g_md5_known[cur_card()], 0, sizeof(g_md5_known[0]));
+	memset(g_md5_dirty[cur_card()], 0, sizeof(g_md5_dirty[0]));
 	for (char *l = strtok(buf, "\n"); l; l = strtok(NULL, "\n")) {
 		unsigned v, tn, st;
 		if (sscanf(l, "unreadable=%u", &v) == 1) { note_hard(v, 0); g_readerrs++; }
@@ -5216,8 +5303,22 @@ static int repair_disc_inner()
 			}
 		}
 		else if (sscanf(l, "track=%u start=%u", &tn, &st) == 2) {
-			for (int t = 0; t < g_ntracks; t++) if (g_tracks[t].num == (int)tn) g_tstart[t] = st;
+			char hex[40] = "";
+			const char *mp = strstr(l, " md5=");
+			if (mp) sscanf(mp + 5, "%32s", hex);
+			for (int t = 0; t < g_ntracks; t++) if (g_tracks[t].num == (int)tn) {
+				g_tstart[t] = st;
+				// the earlier rip's MD5 of this track: kept unless the repair writes into the track
+				if (strlen(hex) == 32) {
+					for (int i = 0; i < 16; i++) { unsigned v; sscanf(hex + i * 2, "%2x", &v); g_track_md5bin[t][i] = (uint8_t)v; }
+					g_md5_known[cur_card()][t] = 1;
+				}
+			}
 		}
+	}
+	if (junk) {   // an older rip's junk pregap sector: read it again, it is stored as silence now
+		note_hard(junk, 0); g_readerrs++;
+		logf("repair: sector %u is junk from the drive (first pregap sector of track 2), reading it again", junk);
 	}
 	// confirmed sectors need no new reads: keep only the unconfirmed ones for the pass
 	uint32_t keep = 0;
