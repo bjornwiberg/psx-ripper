@@ -164,6 +164,20 @@ int main()
 		if (bad) g_fail += bad; else printf("ok   disc ID from SYSTEM.CNF (upper and lower case)\n");
 	}
 
+	{   // the earliest discs have no SYSTEM.CNF: the ID comes from the volume name
+		struct { const char *vol, *want; } c[] = {
+			{"SLPS00002", "SLPS_000.02"}, {"SLPS_00002", "SLPS_000.02"}, {"slus-01234", "SLUS_012.34"},
+			{"WIPEOUT2", ""}, {"SLPS000021", ""}, {"", ""}, {"MEGAMAN_LEGENDS2", ""},
+		};
+		int bad = 0;
+		for (auto &t : c) {
+			char out[16];
+			serial_from_volume(t.vol, out);
+			if (strcmp(out, t.want)) { printf("FAIL serial from volume \"%s\": got \"%s\", want \"%s\"\n", t.vol, out, t.want); bad++; }
+		}
+		if (bad) g_fail += bad; else printf("ok   disc ID from the volume name when there is no SYSTEM.CNF\n");
+	}
+
 	{   // a disc pressed with another game's ID: Castlevania Chronicles says SLUS_013.48 (Tennis)
 		const char *a = title_override("SLUS_013.48", "KONAMI"), *b = title_override("SLUS_013.48", "AGETEC");
 		const char *c = lookup_title("SLUS_013.48");
