@@ -6,6 +6,9 @@
 #include <unistd.h>
 #include <time.h>
 #include <set>
+#include <signal.h>
+#include <sys/resource.h>
+#include <sys/stat.h>
 #include <string>
 #include "sys/mutex.h"
 #include "../../include/audit.h"
@@ -839,6 +842,36 @@ static void undo_refused_after_rerip(int &bad)
 	audit_set_hooks(NULL, NULL);
 }
 
+// M4: an append cut short (disk full) leaves a fragment without a newline; the next row must not be
+// glued onto it (it would be read with the fragment's id)
+static void short_write_not_glued(int &bad)
+{
+	fresh();
+	audit_note(0, AU_FILES, "", "file", "x", "", "");
+	char p[256];
+	snprintf(p, sizeof p, "%s/audit.log", DIR);
+	struct stat st;
+	CHECK(stat(p, &st) == 0);
+	signal(SIGXFSZ, SIG_IGN);   // a write past the limit fails with EFBIG instead
+	struct rlimit old, lim;
+	getrlimit(RLIMIT_FSIZE, &old);
+	lim = old;
+	lim.rlim_cur = (rlim_t)st.st_size + 30;
+	setrlimit(RLIMIT_FSIZE, &lim);
+	audit_note(0, AU_FILES, "", "file", "y", "", "");   // only its first 30 bytes reach the file
+	setrlimit(RLIMIT_FSIZE, &old);
+	CHECK(stat(p, &st) == 0 && st.st_size > 0);
+	audit_note(0, AU_FILES, "", "file", "z", "", "");
+	AuditRow r[8];
+	int n = audit_events(AU_FILES, NULL, r, 8);
+	CHECK(n == 2 && r[0].id == 3 && !strcmp(r[0].what, "z") && !strcmp(r[1].what, "x"));
+	audit_init(DIR, &IO);   // and after a reload
+	n = audit_events(AU_FILES, NULL, r, 8);
+	CHECK(n == 2 && r[0].id == 3 && !strcmp(r[0].what, "z"));
+	audit_note(0, AU_FILES, "", "file", "w", "", "");
+	CHECK(audit_events(AU_FILES, NULL, r, 8) == 3 && r[0].id == 4);
+}
+
 int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
@@ -854,7 +887,7 @@ int main()
 		{"undo_refused_while_disc_busy", undo_refused_while_disc_busy}, {"undo_row_lost", undo_row_lost},
 		{"cap_keeps_running_job", cap_keeps_running_job}, {"cap_lowered_prunes_now", cap_lowered_prunes_now},
 		{"reason_codes", reason_codes}, {"reversible_queries", reversible_queries},
-		{"undo_refused_after_rerip", undo_refused_after_rerip},
+		{"undo_refused_after_rerip", undo_refused_after_rerip}, {"short_write_not_glued", short_write_not_glued},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {

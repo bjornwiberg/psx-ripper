@@ -26,6 +26,8 @@ static int g_mx_made;
 static char g_dir[200];
 static AuditIo g_io;
 static uint32_t g_next_id = 1, g_next_job = 1;
+// the last append failed: it may have left a fragment without a newline, which the next row ends
+static bool g_append_failed;
 
 // what the running jobs need on every row: where they came from and how many sectors they have
 struct JobSlot { uint32_t job; AuditSrc src; char disc[96]; uint32_t blobs; char file[256]; };
@@ -260,6 +262,7 @@ void audit_init(const char *dir, const AuditIo *io)
 	if (io) g_io = *io;
 	mkdirs(g_dir);
 	g_next_id = g_next_job = 1;
+	g_append_failed = false;   // a half line at the end is dropped or ended below
 	memset(g_slots, 0, sizeof g_slots);
 	memset(g_running, 0, sizeof g_running);
 	g_results.clear();
@@ -334,10 +337,14 @@ static uint32_t write_row(uint32_t job, AuditSrc src, AuditDom dom, const char *
 	path_log(p, sizeof p);
 	bool ok = false;
 	if (FILE *fp = fopen(p, "ab")) {
-		ok = fwrite(line, 1, n, fp) == n;   // one write of the whole line
+		// a fragment of the last row (disk full) would glue onto this one and lend it its id; an
+		// empty line is no row
+		ok = !g_append_failed || fputc('\n', fp) == '\n';
+		if (fwrite(line, 1, n, fp) != n) ok = false;   // one write of the whole line
 		if (fflush(fp) != 0) ok = false;
 		if (fclose(fp) != 0) ok = false;
 	}
+	g_append_failed = !ok;
 	return ok ? id : 0;
 }
 
