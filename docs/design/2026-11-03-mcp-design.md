@@ -34,8 +34,9 @@ The server is for **every user** of the app, not a developer build.
    allowed values with the app's labels (both languages), and change it.
 4. Low-level insight and control of running jobs (phase 2) and raw drive commands (phase 3), so
    that drive problems can be diagnosed with the console as the lab.
-5. File access to the rips (phase 4) and safe changes to them (phase 5): rename, delete into a
-   trash, with an audit log that can roll any change back.
+5. An audit log of every change, with rollback (phase 0, built before MCP).
+6. File access to the rips (phase 4) and safe changes to them (phase 5): rename, delete into a
+   trash, both through the audit log.
 
 ## Non-goals
 
@@ -92,10 +93,42 @@ The server is for **every user** of the app, not a developer build.
 - An **audit log** in the app records every change with its state before and after (for a sector:
   its old and new bytes; for a setting: old and new value; for a rename: old and new names), and
   any entry can be **rolled back**; the rollback is logged too.
-- Phase order: phase 1 is app control (below). All other parts follow in the order of this
-  document.
+- Phase order: **the audit log comes first, as its own project before MCP** (phase 0). Then
+  phase 1, app control. All other parts follow in the order of this document, and everything
+  MCP changes is written to the audit log from its first day.
 
 ## Phases
+
+### Phase 0 — audit log (its own plan, built before MCP)
+
+Decided by the user: as soon as anything other than a person with the pad can change things
+(automatic starts and repairs, the remote view's pad, and later MCP), every change must be
+traceable and reversible. The audit log is therefore built first, as a project of its own, and
+covers what the app already changes today: sectors written by repairs, settings, rips created,
+cancelled or failed, Redump checks. Every row records its **source**: the pad, the remote view's
+pad, the app itself (automatic rip or repair on insert), and later MCP.
+
+- **Audit log** of every change, whoever made it (MCP, pad, remote view, the app itself during a
+  repair): time, source, what, state before and after. **One row per change, and one row per
+  sector**: a repair that wrote 1000 sectors is 1000 rows, each with that sector's old and new
+  bytes (2352 each). Settings keep their old value, renames the old names, trash moves the old
+  place.
+- **Grouping** (decided by the user): every row has a domain, and where it applies a disc and a
+  job, so the log reads as a tree:
+  1. **Domain**: rips (the discs), settings, files and trash, MCP (raw commands, steering of jobs).
+  2. **Disc** (under rips): one line per rip, e.g. "Tekken 2 [SCES_002.55]", with its number of
+     events and the latest date. A disc is identified by its disc ID and its rip, not only by the
+     file name, so its history stays together after a rename.
+  3. **Events on the disc**: the rip, each repair, renames, trash moves, rollbacks, each with time
+     and source.
+  4. **Details**: the rows of an event, e.g. every sector a repair wrote, with before and after.
+- **Rollback at every level**: one row, one job (all its rows, e.g. a whole repair), or everything
+  on a disc since a point in time. Afterwards the app recomputes the MD5 of the tracks touched and
+  updates the rip's `.md5`, `.log` and its Redump result, so the files always agree with the
+  image. A rollback is itself logged (and can be rolled back). A rollback that no longer fits the
+  current state (the file changed since) is refused with the reason.
+- **On the console**: a menu with the same tree (domain → disc → event → details), reached from
+  the settings. **Over MCP**: the same queries, e.g. everything that happened to Tekken 2.
 
 ### Phase 1 — app control
 
@@ -159,33 +192,14 @@ The agent can do everything the pad can on the app's own screens, and see the re
   compute an MD5 of a range or a track.
 - Paths are limited to the app's destinations and its own files (`/dev_hdd0/tmp/psxrip.*`).
 
-### Phase 5 — changing files, audit log, rollback, trash
+### Phase 5 — changing files, trash
 
 - **Rename a rip**: all its files, and the file name inside its .cue.
 - **Delete a rip**: move all its files into `.trash` in the same destination (a move on the same
   disk, fast). **Restore** moves them back. **Empty the trash** deletes for real; possible on the
   console (new Trash menu under the settings: what is in it, restore one, empty) and over MCP.
-- **Audit log** of every change, whoever made it (MCP, pad, remote view, the app itself during a
-  repair): time, source, what, state before and after. **One row per change, and one row per
-  sector**: a repair that wrote 1000 sectors is 1000 rows, each with that sector's old and new
-  bytes (2352 each). Settings keep their old value, renames the old names, trash moves the old
-  place.
-- **Grouping** (decided by the user): every row has a domain, and where it applies a disc and a
-  job, so the log reads as a tree:
-  1. **Domain**: rips (the discs), settings, files and trash, MCP (raw commands, steering of jobs).
-  2. **Disc** (under rips): one line per rip, e.g. "Tekken 2 [SCES_002.55]", with its number of
-     events and the latest date. A disc is identified by its disc ID and its rip, not only by the
-     file name, so its history stays together after a rename.
-  3. **Events on the disc**: the rip, each repair, renames, trash moves, rollbacks, each with time
-     and source.
-  4. **Details**: the rows of an event, e.g. every sector a repair wrote, with before and after.
-- **Rollback at every level**: one row, one job (all its rows, e.g. a whole repair), or everything
-  on a disc since a point in time. Afterwards the app recomputes the MD5 of the tracks touched and
-  updates the rip's `.md5`, `.log` and its Redump result, so the files always agree with the
-  image. A rollback is itself logged (and can be rolled back). A rollback that no longer fits the
-  current state (the file changed since) is refused with the reason.
-- **On the console**: a menu with the same tree (domain → disc → event → details), reached from
-  the settings. **Over MCP**: the same queries, e.g. everything that happened to Tekken 2.
+- Every rename, trash move, restore and emptying of the trash is written to the audit log
+  (phase 0) and can be rolled back from there, like any other change.
 
 ## Protocol and connection
 
