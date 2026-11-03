@@ -59,7 +59,8 @@ struct AuditRow {
 	// file = that sector's
 	char key[48];
 	int undone, reversible;
-	int redo;    // an undo row whose change is undone now: undoing it applies the change again
+	int redo;    // undoing this row applies a change again: an undone sector or setting row, or an
+	             // undo row whose change is undone now
 	int norev;   // the row was written with rev=0: its value is not in the log, it can never be undone
 	AuditWhy why;       // not reversible: why (AW_NONE when it is)
 	uint32_t why_job;   // for AW_RUNNING / AW_JOB_ON_DISC / AW_UNFINISHED / AW_DROPPED: the job meant
@@ -101,6 +102,9 @@ int audit_rows(uint32_t job, AuditRow *out, int first, int max);
 // same guards (a sector: the image still has the bytes the undo put back; a setting: it still has
 // the value the undo set), and a new `undo` row names it, so the chain goes on. A row is undone
 // after an odd number of undos in its chain; an undo row is undone once a newer one follows it.
+// Undoing an undone sector or setting row redoes it: the newest undo row of its chain is undone
+// (rs and why[] then name that row), so it can be undone and redone by its own id any number of
+// times.
 // A job or disc whose sector rows are all undone is redone by its undo: oldest row first, stopping
 // at the first refusal the same way.
 // Returns 0 when done, -1 when refused; why[] then names the row and the reason.

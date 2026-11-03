@@ -616,14 +616,24 @@ static bool chain_sector(const AuditRow &u, const UndoState &s, AuditRow &out)
 	return true;
 }
 
+// A sector or setting row that is undone now (an odd number of undos in its chain): undoing it
+// again redoes it, through the newest undo row of its chain.
+static bool root_undone(const AuditRow &r, const UndoState &s)
+{
+	if (strcmp(r.kind, "sector") && strcmp(r.kind, "setting")) return false;
+	auto it = s.chains.find(r.id);
+	return it != s.chains.end() && it->second.k % 2;
+}
+
 // Why a row cannot be undone now, or NULL. Caller holds the lock.
 static const char *row_block(const AuditRow &r, const UndoState &s, char *msg, size_t n, AuditReason *rs = NULL)
 {
-	if (s.is_undone(r.id)) { reason(rs, AW_ALREADY, r); snprintf(msg, n, "already undone"); return msg; }
-	if (!strcmp(r.kind, "sector")) { bool restored; return sector_block(r, msg, n, &restored, rs); }
+	bool redo = root_undone(r, s);   // an undone sector or setting row: its undo is a redo
+	if (s.is_undone(r.id) && !redo) { reason(rs, AW_ALREADY, r); snprintf(msg, n, "already undone"); return msg; }
+	if (!strcmp(r.kind, "sector")) { bool restored; return sector_block(r, msg, n, &restored, rs, redo); }
 	if (!strcmp(r.kind, "setting")) {
 		if (r.norev) { reason(rs, AW_SECRET, r); snprintf(msg, n, "the value is not kept in the log"); return msg; }
-		return setting_block(r, s, r.what, r.after, msg, n, rs);
+		return setting_block(r, s, r.what, redo ? r.before : r.after, msg, n, rs);
 	}
 	if (!strcmp(r.kind, "undo")) {   // the newest undo of its chain: undoing it flips the root again
 		const UndoState::Link *l = s.link(r.id);
@@ -650,7 +660,7 @@ static void mark(AuditRow &r, const UndoState &s)
 	r.reversible = !row_block(r, s, msg, sizeof msg, &rs);
 	r.why = rs.code;
 	r.why_job = rs.code == AW_RUNNING || rs.code == AW_JOB_ON_DISC || rs.code == AW_UNFINISHED || rs.code == AW_DROPPED ? rs.job : 0;
-	r.redo = 0;
+	r.redo = root_undone(r, s);
 	if (strcmp(r.kind, "undo")) return;
 	const UndoState::Link *l = s.link(r.id);
 	r.redo = l && !r.undone && l->k % 2;
@@ -914,6 +924,13 @@ int audit_undo_row(uint32_t id, char *why, size_t n, AuditReason *rs)
 	lock();
 	build_state(st);
 	scan_log([&](const AuditRow &r) { if (r.id == id) { row = r; found = true; } });
+	// an undone sector or setting row is redone: the newest undo row of its chain is undone
+	if (found && root_undone(row, st)) {
+		uint32_t tip = st.tip(id);
+		found = false;
+		scan_log([&](const AuditRow &r) { if (r.id == tip) { row = r; found = true; } });
+		id = tip;
+	}
 	undone = found && st.is_undone(id);
 	if (found && !undone && !strcmp(row.kind, "undo")) {
 		const UndoState::Link *l = st.link(id);

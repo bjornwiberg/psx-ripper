@@ -230,6 +230,10 @@ static void audit_scenarios()
 		char nm[64];
 		snprintf(nm, sizeof nm, "audit-undoing%s", g_sfx_sv ? "-sv" : "");
 		g_boxes.clear(); audit_wait_draw("Alundra (Europe) (En,Fr,De,Es,It,Nl,Sv) [SLES-01135]", 2, STR_AUDIT_UNDOING); save(nm); size_t b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+		snprintf(nm, sizeof nm, "audit-redoing%s", g_sfx_sv ? "-sv" : "");
+		g_boxes.clear(); audit_wait_draw("Alundra (Europe) (En,Fr,De,Es,It,Nl,Sv) [SLES-01135]", 2, STR_AUDIT_REDOING); save(nm); b0 = g_fail; check(nm); printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+		if (!has_text(g_sfx_sv ? "Gör om" : "Redoing")) { printf("FAIL the redo's wait screen does not say so\n"); bad++; }
+		if (audit_wait_what(1) != STR_AUDIT_REDOING || audit_wait_what(0) != STR_AUDIT_UNDOING) { printf("FAIL the wait text of an undo / redo\n"); bad++; }
 		if (audit_undo_tick(0, 100) != 0) { printf("FAIL the undo tick stops without an exit request\n"); bad++; }
 		exit_requested = 1;
 		if (audit_undo_tick(64, 100) == 0) { printf("FAIL the undo tick does not stop on exit\n"); bad++; }
@@ -249,11 +253,20 @@ static void audit_scenarios()
 		FILE *f = fopen("out/t5/alundra.bin", "rb");
 		uint8_t got[RAW_SIZE] = {1};
 		if (f) { fseek(f, (long)lba * RAW_SIZE, SEEK_SET); if (fread(got, 1, RAW_SIZE, f) != RAW_SIZE) got[0] = 1; fclose(f); }
-		if (memcmp(got, zero, RAW_SIZE) || !r || !r->undone || audit_can_undo(v)) { printf("FAIL after the undo: bytes back %d, row undone %d\n", !memcmp(got, zero, RAW_SIZE), r ? r->undone : -1); bad++; }
+		if (memcmp(got, zero, RAW_SIZE) || !r || !r->undone || !audit_can_undo(v)) { printf("FAIL after the undo: bytes back %d, row undone %d, redo offered %d\n", !memcmp(got, zero, RAW_SIZE), r ? r->undone : -1, audit_can_undo(v)); bad++; }
 		if (!vf_exists("out/t5/alundra.md5")) { printf("FAIL the rip was not checked again after the undo\n"); bad++; }
 		if (k.rd_state != -1 || strcmp(k.exist, "out/t5/alundra")) { printf("FAIL the card after the undo: redump state %d, exist \"%s\"\n", k.rd_state, k.exist); bad++; }
 		aframe("audit-rows-undone", v);
-		if (has_text(T(STR_HINT_REDO))) { printf("FAIL an undone sector row offers a redo\n"); bad++; }
+		if (!has_text(T(STR_HINT_REDO)) || (g_sfx_sv && !has_text("Gör om"))) { printf("FAIL the undone sector row does not offer \"%s\"\n", T(STR_HINT_REDO)); bad++; }
+		// △ on the undone row redoes it: the new bytes again, the row not undone, △ undoes again
+		if (audit_undo(v, why, sizeof why) != 0) { printf("FAIL redo of the sector row from the screen: %s\n", why); bad++; }
+		r = audit_focused(v);
+		f = fopen("out/t5/alundra.bin", "rb");
+		if (f) { fseek(f, (long)lba * RAW_SIZE, SEEK_SET); if (fread(got, 1, RAW_SIZE, f) != RAW_SIZE) got[0] ^= 1; fclose(f); }
+		if (memcmp(got, img.data() + (size_t)lba * RAW_SIZE, RAW_SIZE) || !r || r->undone || !audit_can_undo(v)) { printf("FAIL after the redo of the row: row undone %d\n", r ? r->undone : -1); bad++; }
+		aframe("audit-rows-redone", v);
+		if (!has_text(T(STR_HINT_UNDO)) || has_text(T(STR_HINT_REDO))) { printf("FAIL the redone row's hint is not \"%s\"\n", T(STR_HINT_UNDO)); bad++; }
+		if (audit_undo(v, why, sizeof why) != 0 || !(r = audit_focused(v)) || !r->undone) { printf("FAIL undo again of the sector row: %s\n", why); bad++; }
 		reset_all();
 	}
 	{   // the whole repair undone: its undo is now a redo, and says so; then redone from the screen

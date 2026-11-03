@@ -4198,7 +4198,7 @@ static void audit_draw(const AuditView &v)
 	if (v.why_key[0] && !strcmp(v.why_key, key)) { av_reason(v.why, rtx, sizeof(rtx)); snprintf(det, sizeof(det), T(STR_AUDIT_REFUSED), rtx); }
 	else if (!audit_can_undo(v) && (v.level == 1 && v.dom == AU_RIPS ? v.n > 0 : r && !strcmp(r->kind, "job") && v.level == 2))
 		av_reason(v.no_undo, det, sizeof(det));   // a disc or a job: the core's answer
-	else if (r && !r->undone && !r->reversible) av_reason(av_row_reason(*r), det, sizeof(det));
+	else if (r && (!r->undone || r->redo) && !r->reversible) av_reason(av_row_reason(*r), det, sizeof(det));   // an undone row: why no redo
 	else if (r && (!strcmp(r->kind, "sector") || (!strcmp(r->kind, "undo") && r->file[0]))) { const char *s = strrchr(r->file, '/'); snprintf(det, sizeof(det), "%s", s ? s + 1 : r->file); }
 	if (det[0]) footer_note(det);
 	const char *b[5], *l[5];
@@ -4233,13 +4233,17 @@ static void audit_wait_tick(uint32_t sectors)
 	flip_frame();   // both buffers
 	flip_frame();
 }
+// What the wait of a big undo says: undoing, or redoing (applying undone changes again).
+static StrId audit_wait_what(int redo) { return redo ? STR_AUDIT_REDOING : STR_AUDIT_UNDOING; }
+static int g_wait_redo;   // the audit screen's undo running now is a redo
+
 // The audit's undo of a job or disc, every AUDIT_TICK sectors: the screen says how far (the audit
 // screen only) and the system's callbacks run; closing the app stops the undo.
 static int audit_undo_tick(uint32_t done, uint32_t total)
 {
 	(void)total;
 	if (g_check_ui) {
-		audit_wait_draw(g_wait_name, (uint32_t)((uint64_t)done * RAW_SIZE >> 20), STR_AUDIT_UNDOING);
+		audit_wait_draw(g_wait_name, (uint32_t)((uint64_t)done * RAW_SIZE >> 20), audit_wait_what(g_wait_redo));
 		g_drawn = 2;
 		g_backdrop_shown = 0;
 		flip_frame();
@@ -4274,8 +4278,9 @@ static void audit_screen()
 				char why[200];
 				snprintf(g_wait_name, sizeof(g_wait_name), "%s", label);   // a big undo shows it while it writes
 				g_check_ui = 1;
+				g_wait_redo = redo;
 				int rc = audit_undo(v, why, sizeof(why));
-				g_check_ui = 0;
+				g_check_ui = g_wait_redo = 0;
 				if (rc != 0) {
 					char m[300], rtx[200];
 					av_reason(v.why, rtx, sizeof(rtx));

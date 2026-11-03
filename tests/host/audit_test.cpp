@@ -294,6 +294,18 @@ static int undo_rows_naming(uint32_t job, uint32_t id)
 	return k;
 }
 
+// the newest undo row naming `id` among the rows of `job` (0 = none)
+static uint32_t undo_row_of(uint32_t job, uint32_t id)
+{
+	static AuditRow r[64];
+	char w[16];
+	snprintf(w, sizeof w, "%u", (unsigned)id);
+	int n = audit_rows(job, r, 0, 64);
+	uint32_t u = 0;
+	for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, "undo") && !strcmp(r[i].what, w)) u = r[i].id;
+	return u;
+}
+
 static void undo_sector(int &bad)
 {
 	fresh();
@@ -311,10 +323,12 @@ static void undo_sector(int &bad)
 	CHECK(audit_undo_row(id, why, sizeof why) == 0);
 	CHECK(img_is(2, 0x11));
 	CHECK(undo_rows_naming(job, id) == 1);
-	CHECK(row_of(job, id, &r) && r.undone == 1 && r.reversible == 0);
-	// a second undo of the same row is refused and changes nothing
-	CHECK(audit_undo_row(id, why, sizeof why) == -1 && why[0]);
-	CHECK(img_is(2, 0x11) && undo_rows_naming(job, id) == 1);
+	CHECK(row_of(job, id, &r) && r.undone == 1 && r.reversible == 1 && r.redo == 1);
+	// a second undo of the same row is a redo: the new bytes again, through its undo row
+	uint32_t u = undo_row_of(job, id);
+	CHECK(audit_undo_row(id, why, sizeof why) == 0 && img_is(2, 0x22));
+	CHECK(undo_rows_naming(job, id) == 1 && undo_rows_naming(job, u) == 1);
+	CHECK(row_of(job, id, &r) && r.undone == 0 && r.reversible == 1 && r.redo == 0);
 }
 
 static void undo_refused_when_changed(int &bad)
@@ -441,8 +455,10 @@ static void undo_setting(int &bad)
 	CHECK(g_set_calls == 1 && !strcmp(g_set_key, "speed") && !strcmp(g_set_val, "0"));
 	// the setting row reads undone; its undo row is an event of the settings domain
 	int n = audit_events(AU_SETTINGS, NULL, r, 4);
-	CHECK(n == 2 && !strcmp(r[0].kind, "undo") && r[1].id == id && r[1].undone == 1 && r[1].reversible == 0);
-	CHECK(audit_undo_row(id, why, sizeof why) == -1 && g_set_calls == 1);
+	CHECK(n == 2 && !strcmp(r[0].kind, "undo") && r[1].id == id && r[1].undone == 1 && r[1].reversible == 1 && r[1].redo == 1);
+	// undone again: a redo, the row's value again
+	CHECK(audit_undo_row(id, why, sizeof why) == 0 && g_set_calls == 2 && !strcmp(g_set_val, "3"));
+	CHECK(audit_events(AU_SETTINGS, NULL, r, 4) == 3 && r[2].id == id && r[2].undone == 0 && r[2].reversible == 1 && r[2].redo == 0);
 	// a setting changed again since is not undone
 	audit_setting(AU_PAD, "speed", "0", "3");
 	uint32_t id2 = newest_setting_id();
@@ -450,7 +466,7 @@ static void undo_setting(int &bad)
 	CHECK(audit_events(AU_SETTINGS, NULL, r, 4) >= 2 && r[1].id == id2 && r[1].reversible == 0 && r[0].reversible == 1);
 	char want[24];
 	snprintf(want, sizeof want, "row %u", (unsigned)id2);
-	CHECK(audit_undo_row(id2, why, sizeof why) == -1 && strstr(why, want) && g_set_calls == 1);
+	CHECK(audit_undo_row(id2, why, sizeof why) == -1 && strstr(why, want) && g_set_calls == 2);
 	audit_set_hooks(NULL, NULL);
 }
 
@@ -733,8 +749,12 @@ static void reason_codes(int &bad)
 	// already undone
 	uint32_t s3 = sector_id(run, 0);
 	CHECK(audit_undo_row(s3, why, sizeof why, &rs) == 0 && rs.code == AW_NONE);
-	CHECK(row_of(run, s3, &r) && r.why == AW_ALREADY);
-	CHECK(audit_undo_row(s3, why, sizeof why, &rs) == -1 && rs.code == AW_ALREADY);
+	CHECK(row_of(run, s3, &r) && r.why == AW_NONE && r.undone == 1 && r.redo == 1);   // undone: its undo is a redo
+	uint32_t su = undo_row_of(run, s3);
+	CHECK(audit_undo_row(s3, why, sizeof why, &rs) == 0 && rs.code == AW_NONE);
+	// the undo row the redo reversed is history: already undone
+	CHECK(row_of(run, su, &r) && r.why == AW_ALREADY);
+	CHECK(audit_undo_row(su, why, sizeof why, &rs) == -1 && rs.code == AW_ALREADY);
 	// kept bytes dropped by the size cap
 	uint32_t old = audit_job_begin(AU_PAD, "X:8", "X", "repair");
 	repair_write(old, 4, 0x11, 0x22);
@@ -945,18 +965,6 @@ static void undo_progress(int &bad)
 	audit_set_hooks(NULL, NULL);
 }
 
-// the newest undo row naming `id` among the rows of `job` (0 = none)
-static uint32_t undo_row_of(uint32_t job, uint32_t id)
-{
-	static AuditRow r[64];
-	char w[16];
-	snprintf(w, sizeof w, "%u", (unsigned)id);
-	int n = audit_rows(job, r, 0, 64);
-	uint32_t u = 0;
-	for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, "undo") && !strcmp(r[i].what, w)) u = r[i].id;
-	return u;
-}
-
 // an undo is itself logged and can be undone (a redo), and that again: X -> U1 -> U2 -> U3
 static void redo_sector_chain(int &bad)
 {
@@ -987,7 +995,7 @@ static void redo_sector_chain(int &bad)
 	CHECK(audit_undo_row(u2, why, sizeof why) == 0 && img_is(2, 0x11) && g_recheck_redo == 0);
 	uint32_t u3 = undo_row_of(job, u2);
 	CHECK(u3 > u2);
-	CHECK(row_of(job, x, &r) && r.undone == 1 && r.reversible == 0);
+	CHECK(row_of(job, x, &r) && r.undone == 1 && r.reversible == 1 && r.redo == 1);
 	CHECK(row_of(job, u2, &r) && r.undone == 1 && r.reversible == 0);
 	CHECK(row_of(job, u3, &r) && r.undone == 0 && r.reversible == 1 && r.redo == 1);
 	// the state survives a reload
@@ -1147,6 +1155,50 @@ static void redo_disc(int &bad)
 	audit_set_hooks(NULL, NULL);
 }
 
+// the user never has to find the undo row: the undone row itself is redone, any number of times
+static void redo_original_row(int &bad)
+{
+	fresh();
+	hooks_reset();
+	img_make(4);
+	uint32_t job = audit_job_begin(AU_PAD, "U:4", "U", "repair");
+	repair_write(job, 1, 0x11, 0x22);
+	audit_job_end(job, "finished");
+	uint32_t x = sector_id(job, 0);
+	char why[160] = "";
+	AuditReason rs;
+	AuditRow r;
+	for (int i = 0; i < 6; i++) {   // undo, redo, undo, redo, ...: a chain of 6 on the same row id
+		bool undo = i % 2 == 0;
+		CHECK(audit_undo_row(x, why, sizeof why, &rs) == 0 && rs.code == AW_NONE);
+		CHECK(img_is(1, undo ? 0x11 : 0x22));
+		CHECK(g_recheck_redo == (undo ? 0 : 1) && g_recheck_calls == i + 1);
+		CHECK(row_of(job, x, &r) && r.undone == (undo ? 1 : 0) && r.reversible == 1 && r.redo == (undo ? 1 : 0));
+	}
+	CHECK(undo_rows_naming(job, x) == 3);   // each undo names the row, each redo the undo it reverses
+	// an undone row whose sector changed since: the redo is refused and says why
+	CHECK(audit_undo_row(x, why, sizeof why) == 0 && img_is(1, 0x11));
+	uint8_t c[2352];
+	sector_fill(c, 0x33);
+	img_put(1, c);
+	CHECK(row_of(job, x, &r) && r.undone == 1 && r.reversible == 0 && r.why == AW_SECTOR_CHANGED && r.redo == 1);
+	CHECK(audit_undo_row(x, why, sizeof why, &rs) == -1 && rs.code == AW_SECTOR_CHANGED && rs.lba == 1 && img_is(1, 0x33));
+	// a setting the same way
+	audit_setting(AU_PAD, "speed", "0", "3");
+	uint32_t s = newest_setting_id();
+	g_set_calls = 0;
+	for (int i = 0; i < 3; i++) {
+		bool undo = i % 2 == 0;
+		CHECK(audit_undo_row(s, why, sizeof why) == 0 && g_set_calls == i + 1 && !strcmp(g_set_val, undo ? "0" : "3"));
+		AuditRow e[8];
+		int n = audit_events(AU_SETTINGS, NULL, e, 8);
+		CHECK(n == 2 + i && e[n - 1].id == s && e[n - 1].undone == (undo ? 1 : 0) && e[n - 1].reversible == 1);
+	}
+	audit_setting(AU_PAD, "speed", "0", "5");   // changed since the undo: no redo
+	CHECK(audit_undo_row(s, why, sizeof why, &rs) == -1 && rs.code == AW_SETTING_CHANGED && !strcmp(rs.what, "speed") && g_set_calls == 3);
+	audit_set_hooks(NULL, NULL);
+}
+
 int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
@@ -1165,7 +1217,7 @@ int main()
 		{"undo_refused_after_rerip", undo_refused_after_rerip}, {"short_write_not_glued", short_write_not_glued},
 		{"setting_values", setting_values}, {"undo_progress", undo_progress},
 		{"redo_sector_chain", redo_sector_chain}, {"redo_refused", redo_refused}, {"redo_setting_chain", redo_setting_chain},
-		{"redo_job", redo_job}, {"redo_disc", redo_disc},
+		{"redo_job", redo_job}, {"redo_disc", redo_disc}, {"redo_original_row", redo_original_row},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {
