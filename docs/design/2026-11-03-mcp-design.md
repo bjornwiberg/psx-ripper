@@ -166,13 +166,26 @@ The agent can do everything the pad can on the app's own screens, and see the re
   disk, fast). **Restore** moves them back. **Empty the trash** deletes for real; possible on the
   console (new Trash menu under the settings: what is in it, restore one, empty) and over MCP.
 - **Audit log** of every change, whoever made it (MCP, pad, remote view, the app itself during a
-  repair): time, source, what, state before and after. Sector writes keep the sector's old bytes
-  (2352 each), settings their old value, renames the old names, trash moves the old place.
-- **Rollback** of any entry restores the state before it, and is itself an entry (so it can be
-  rolled back). A rollback that no longer fits the current state (the file changed since) is
-  refused with the reason.
-- Readable over MCP and visible on the console (at least as a list in the Trash/Remote control
-  area; the builder may choose where).
+  repair): time, source, what, state before and after. **One row per change, and one row per
+  sector**: a repair that wrote 1000 sectors is 1000 rows, each with that sector's old and new
+  bytes (2352 each). Settings keep their old value, renames the old names, trash moves the old
+  place.
+- **Grouping** (decided by the user): every row has a domain, and where it applies a disc and a
+  job, so the log reads as a tree:
+  1. **Domain**: rips (the discs), settings, files and trash, MCP (raw commands, steering of jobs).
+  2. **Disc** (under rips): one line per rip, e.g. "Tekken 2 [SCES_002.55]", with its number of
+     events and the latest date. A disc is identified by its disc ID and its rip, not only by the
+     file name, so its history stays together after a rename.
+  3. **Events on the disc**: the rip, each repair, renames, trash moves, rollbacks, each with time
+     and source.
+  4. **Details**: the rows of an event, e.g. every sector a repair wrote, with before and after.
+- **Rollback at every level**: one row, one job (all its rows, e.g. a whole repair), or everything
+  on a disc since a point in time. Afterwards the app recomputes the MD5 of the tracks touched and
+  updates the rip's `.md5`, `.log` and its Redump result, so the files always agree with the
+  image. A rollback is itself logged (and can be rolled back). A rollback that no longer fits the
+  current state (the file changed since) is refused with the reason.
+- **On the console**: a menu with the same tree (domain → disc → event → details), reached from
+  the settings. **Over MCP**: the same queries, e.g. everything that happened to Tekken 2.
 
 ## Protocol and connection
 
@@ -200,10 +213,9 @@ The agent can do everything the pad can on the app's own screens, and see the re
 - **Marking steered jobs.** A rip or repair that was changed over MCP while it ran (phase 2) or
   got raw commands on its drive (phase 3) says so in its `.log` (a line per change: what, when)
   and in its result line. Redump verification is unaffected (it compares the image's hashes).
-- **A repair in the audit log** is one entry: every sector it wrote (old bytes) plus the rip's
-  `.md5` and `.log` as they were before. Rolling it back restores all of them together, never a
-  part. If the size cap has dropped any of that entry's old sectors, its rollback is refused as a
-  whole (the entry stays in the log, marked as no longer reversible).
+- **Size cap.** If the cap has dropped a row's old sector bytes, that row (and a job or disc
+  rollback that includes it) is refused with the reason; the row stays in the log, marked as no
+  longer reversible.
 
 ## Left to the builder
 
