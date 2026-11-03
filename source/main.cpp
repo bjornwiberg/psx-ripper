@@ -2793,22 +2793,45 @@ static void fmt_dur(char *out, size_t n, long secs)
 }
 
 // "Time 2:14 · about 1:35 left · 2.6 MB/s": speed over the last ~20 s (the drive is faster on the
-// outer part of the disc and slow in damaged areas), remaining time from that speed.
-struct Eta { uint64_t t0, tw; uint32_t pw; double rate; };
-static void eta_start(Eta *e) { e->t0 = e->tw = now_ms(); e->pw = 0; e->rate = 0; }
-static void eta_line(Eta *e, uint32_t pos, uint32_t total, char *out, size_t n)
+// outer part of the disc and slow in damaged areas), remaining time from that speed. Runs in the
+// card's context (OnCard): the main read, or the pass after it (verify, re-reads, repair).
+static void eta_pos(uint32_t *pos, uint32_t *total)
 {
+	if (g_pass2_total && g_phase) { *pos = g_pass2_done; *total = g_pass2_total; return; }
+	*pos = g_readpos > g_done ? g_readpos : g_done;
+	*total = g_total;
+}
+
+// Sampled every frame for every ripping card, not only the one on screen: a tab opened later
+// would otherwise start from nothing (no time counted, "1 second left").
+static void eta_tick(int c)
+{
+	Card &k = g_cards[c];
+	if (!k.job) return;
+	OnCard o(c);
+	uint32_t pos, total;
+	eta_pos(&pos, &total);
 	uint64_t t = now_ms();
-	if (t - e->tw >= 2000) {   // sample every 2 s, smooth over ~20 s
-		double r = (double)(pos - e->pw) * 1000.0 / (double)(t - e->tw);
-		e->rate = e->rate > 0 ? e->rate * 0.9 + r * 0.1 : r;
-		e->tw = t; e->pw = pos;
+	if (!k.eta_t0 || g_phase != k.eta_phase) {   // a new job or a new pass: start measuring here
+		k.eta_t0 = k.eta_tw = t; k.eta_pw = pos; k.eta_rate = 0; k.eta_phase = g_phase;
+		return;
 	}
+	if (t - k.eta_tw >= 2000) {   // sample every 2 s, smooth over ~20 s
+		double r = pos >= k.eta_pw ? (double)(pos - k.eta_pw) * 1000.0 / (double)(t - k.eta_tw) : 0;
+		k.eta_rate = k.eta_rate > 0 ? k.eta_rate * 0.9 + r * 0.1 : r;
+		k.eta_tw = t; k.eta_pw = pos;
+	}
+}
+
+static void eta_text(const Card &k, char *out, size_t n)
+{
+	uint32_t pos, total;
+	eta_pos(&pos, &total);
 	char el[16], left[16];
-	fmt_dur(el, sizeof(el), (long)((t - e->t0) / 1000));
-	if (e->rate > 1 && t - e->t0 > 6000) {
-		fmt_dur(left, sizeof(left), (long)((total - pos) / e->rate));
-		unsigned kbs = (unsigned)(e->rate * RAW_SIZE / 1024);
+	fmt_dur(el, sizeof(el), g_rip_t0 ? (long)(time(NULL) - g_rip_t0) : 0);   // since the job started
+	if (k.eta_rate > 1 && now_ms() - k.eta_t0 > 6000 && total > pos) {
+		fmt_dur(left, sizeof(left), (long)((total - pos) / k.eta_rate));
+		unsigned kbs = (unsigned)(k.eta_rate * RAW_SIZE / 1024);
 		if (g_phase) snprintf(out, n, T(STR_TIME_LEFT), el, left);   // later passes: no meaningful speed
 		else snprintf(out, n, T(STR_TIME_ETA), el, left, kbs / 1024, (kbs % 1024) * 10 / 1024);
 	} else {
@@ -3958,12 +3981,8 @@ static int draw_page_body(int c, int y)
 		ui_rect(L, y, R - L, bh, 0x50FFFFFF);
 		ui_rect(L, y, (int)((uint64_t)(R - L) * (pct > 100 ? 100 : pct) / 100), bh, 0xFFC8E05A);
 		y += bh + ls / 2;
-		Eta e = {k.eta_t0, k.eta_tw, k.eta_pw, k.eta_rate};
-		if (!k.eta_t0 || g_phase != k.eta_phase) { uint64_t t0 = k.eta_t0; eta_start(&e); if (t0) e.t0 = t0; k.eta_phase = g_phase; }
 		char tl[96], pc[140];
-		if (g_pass2_total && g_phase) eta_line(&e, g_pass2_done, g_pass2_total, tl, sizeof(tl));
-		else eta_line(&e, pos, g_total, tl, sizeof(tl));
-		k.eta_t0 = e.t0; k.eta_tw = e.tw; k.eta_pw = e.pw; k.eta_rate = e.rate;
+		eta_text(k, tl, sizeof(tl));
 		// percentage and time on the right of the phase line (the tab shows the percentage too)
 		snprintf(pc, sizeof(pc), "%u %%  ·  %s", pct, tl);
 		int pcw = ui_text_width(UI_BODY, pc);
@@ -4235,6 +4254,7 @@ static int home_screen()
 					if (g_prev_rip && g_repair_n) { logf("auto repair: %d sector(s)", g_repair_n); repair_job_start(list[i]); }
 				}
 			}
+		for (int i = 0; i < nc; i++) eta_tick(list[i]);   // every tab's time left, also those not shown
 		Card &f = g_cards[sel];
 		int st = f.state;
 		g_backdrop_shown = 0;   // a dialog opened later must redraw its backdrop
