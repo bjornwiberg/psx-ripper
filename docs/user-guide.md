@@ -172,9 +172,11 @@ started it, and undo it. Open it from the settings (*Audit log*; *Ändringslogg*
 
 **What is logged**
 
-- **Rips**: every rip, repair and Redump check with its result, and for a repair each sector it
-  changed (the old and the new bytes).
-- **Settings**: every change, with the old and the new value.
+- **Rips**: every rip, repair and Redump check with its result, and each sector a repair changed
+  or a rip corrected in its later passes (verify, second pass): the old and the new
+  bytes.
+- **Settings**: every change, with the old and the new value. A change made in the config file
+  while the app was off (over FTP) is logged at the next start, from the app itself.
 - **Source**: each entry says what did it: the console's pad, the remote view's pad, the app
   itself (automatic mode), or an undo.
 
@@ -192,13 +194,19 @@ selected item after a question: one row, one job, or everything on a disc.
   in the image is still what the repair wrote and the saved copy has not been removed. The rip
   is then checked again (MD5 and Redump) and the sectors that were unreadable or bad before go
   back into the rip's `.log`, so *Repair* can try them again.
-- Not a rip, a check or a Redump result: they are records, not changes. Delete a rip yourself.
+- The sectors a **finished rip** corrected in its later passes, the same way: the image gets the
+  first read back. Undoing a disc includes them.
+- Not the rip itself, a check or a Redump result: they are records, not changes. Delete a rip
+  yourself.
 - Not a secret setting, since its value was never stored.
-- Not a job that is still running, or a rip that was not finished.
+- Not a job that is still running, or the sectors of a rip that was not finished.
+- Not the sectors of a file that was ripped again since: the new rip replaced the image they
+  belonged to.
 
 If something cannot be undone the screen says why. Undoing goes from the newest row backwards
 and stops at the first row that cannot be undone; the rows undone before stay undone. Every
-undo is itself logged.
+undo is itself logged. A large undo shows how far it got; closing the app stops it, and what was
+undone until then stays undone.
 
 The sector copies are the only large part. They are limited by *Audit log sector data*; when
 the limit is passed the oldest copies are removed. Their rows stay in the log, but can no longer
