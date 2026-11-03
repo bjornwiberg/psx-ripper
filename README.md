@@ -37,6 +37,8 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
 - **Destinations**: the internal hard disk or USB drives (FAT32 and exFAT), a file name pattern
   (`%T` title, `%R` region, `%D` disc ID, `%N` Redump name) and detection of discs already
   ripped there.
+- **Audit log with undo**: every rip, repair and setting change is logged with what started it;
+  settings and a repair's sectors can be undone. See the user guide.
 - **Automatic mode**: rip (or repair) when a disc is inserted, eject when done.
 - **Remote view**: the screen as a web page on port 8090 with a pad whose buttons press the
   console's, `/status.json`, and **webhooks** (for example to Home Assistant) for every event.

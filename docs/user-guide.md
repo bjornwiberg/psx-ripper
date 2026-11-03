@@ -161,7 +161,48 @@ everything, ○ goes back.
 | Local Redump copy | ✕ downloads Redump's PlayStation list (about 4 MB) for the local mode |
 | Remote view | The web page on port 8090 (see below) |
 | Webhooks | ✕ opens the address, headers, events and a test |
+| Audit log | ✕ opens the audit log (see below) |
+| Audit log sector data | How much disk space the log may use for undoing repairs: 1 to 256 MB, default 256 |
 | About PSX RiPPER | The version, who made it, the source and the libraries |
+
+## Audit log
+
+PSX RiPPER writes down every change it makes, so you can see what changed, when, and what
+started it, and undo it. Open it from the settings (*Audit log*; *Ändringslogg* in Swedish).
+
+**What is logged**
+
+- **Rips**: every rip, repair and Redump check with its result, and for a repair each sector it
+  changed (the old and the new bytes).
+- **Settings**: every change, with the old and the new value.
+- **Source**: each entry says what did it: the console's pad, the remote view's pad, the app
+  itself (automatic mode), or an undo.
+
+Secrets are never stored. Of a webhook address or header the log only says that it was set or
+cleared, never the value.
+
+**Using the screen**: four levels, ✕ opens and ○ goes back. First the kind (*Rips*, *Settings*),
+then the discs or the settings changes, then a disc's jobs, then one job's rows. △ undoes the
+selected item after a question: one row, one job, or everything on a disc from a point in time.
+
+**What can be undone**
+
+- A **setting**: it is put back, as long as it still has the value the change gave it.
+- A **repair's sectors**: the old bytes are written back into the image, as long as the sector
+  in the image is still what the repair wrote and the saved copy has not been removed. The rip
+  is then checked again (MD5 and Redump) and the sectors that were unreadable or bad before go
+  back into the rip's `.log`, so *Repair* can try them again.
+- Not a rip, a check or a Redump result: they are records, not changes. Delete a rip yourself.
+- Not a secret setting, since its value was never stored.
+- Not a job that is still running, or a rip that was not finished.
+
+If something cannot be undone the screen says why. Undoing goes from the newest row backwards
+and stops at the first row that cannot be undone; the rows undone before stay undone. Every
+undo is itself logged.
+
+The sector copies are the only large part. They are limited by *Audit log sector data*; when
+the limit is passed the oldest copies are removed. Their rows stay in the log, but can no longer
+be undone.
 
 ## Remote view and webhooks
 
