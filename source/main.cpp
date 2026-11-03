@@ -271,8 +271,8 @@ static void cfg_audit_diff(AuditSrc src, const char *was, const char *now)
 					if (cfg_key_secret(key)) {
 						snprintf(a, sizeof(a), "%s", a[0] ? "set" : "cleared");
 						snprintf(b, sizeof(b), "%s", b[0] ? "set" : "cleared");
-					}
-					audit_setting(src, key, a, b);
+						audit_setting_private(src, key, a, b);
+					} else audit_setting(src, key, a, b);
 				}
 			}
 			p += (e ? (size_t)(e - p) + 1 : strlen(p));
@@ -280,18 +280,16 @@ static void cfg_audit_diff(AuditSrc src, const char *was, const char *now)
 	}
 }
 
-static void cfg_save_src(AuditSrc src)
+// The config text, as it is written to the file.
+static void cfg_text(char *txt, size_t cap)
 {
-	FILE *f = fopen(CFG_PATH, "w");
-	if (!f) return;
-	char txt[sizeof(g_cfg_last)];
 	size_t n = 0;
 	auto put = [&](const char *fmt, ...) {
 		va_list ap;
 		va_start(ap, fmt);
-		if (n < sizeof(txt)) n += vsnprintf(txt + n, sizeof(txt) - n, fmt, ap);
+		if (n < cap) n += vsnprintf(txt + n, cap - n, fmt, ap);
 		va_end(ap);
-		if (n >= sizeof(txt)) n = sizeof(txt) - 1;
+		if (n >= cap) n = cap - 1;
 	};
 	const DriveCfg &k = g_std;   // the standard drive settings (the globals follow the card in use)
 	put("outdir=%s\nretries=%d\nspeed=%d\neject=%d\nautostart=%d\nredump=%d\nremote=%d\nwebhook_on=%d\nwebhook=%s\ncheck=%d\nwebhook_events=%d\nwebhook_step=%d\n",
@@ -306,6 +304,22 @@ static void cfg_save_src(AuditSrc src)
 	put("webhook_headers_on=%d\n", g_webhook_hdr_on);
 	for (int i = 0; i < WH_HEADERS; i++) put("webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
 	put("audit_mb=%d\n", g_audit_mb);
+}
+
+// At start, after the config was read: the text the next save is compared with, so that the first
+// real change after a boot is logged too.
+static void cfg_prime()
+{
+	cfg_text(g_cfg_last, sizeof(g_cfg_last));
+	g_cfg_primed = true;
+}
+
+static void cfg_save_src(AuditSrc src)
+{
+	FILE *f = fopen(CFG_PATH, "w");
+	if (!f) return;
+	char txt[sizeof(g_cfg_last)];
+	cfg_text(txt, sizeof(txt));
 	fputs(txt, f);
 	fclose(f);
 	if (g_cfg_primed) cfg_audit_diff(src, g_cfg_last, txt);
@@ -313,6 +327,8 @@ static void cfg_save_src(AuditSrc src)
 	g_cfg_primed = true;
 }
 static void cfg_save() { cfg_save_src(g_input_src); }
+
+static void setting_applied(const char *key);   // below: what the screens do besides changing the value
 
 // The audit's undo of a setting row: the value goes through the config parser like a line in the
 // file, and the save records the change as an undo.
@@ -322,6 +338,7 @@ static int set_setting_hook(const char *key, const char *value)
 	char line[700];
 	snprintf(line, sizeof(line), "%s=%s", key, value);
 	if (!cfg_apply_line(line)) return -1;
+	setting_applied(key);
 	cfg_save_src(AU_UNDO);
 	return 0;
 }
@@ -4023,7 +4040,7 @@ static int card_list(int *out)
 }
 
 // A destination was chosen for card c: remember it (per USB port for the USB drives) and save.
-static void card_set_outdir(int c, const char *dir)
+static void card_apply_outdir(int c, const char *dir)
 {
 	Card &k = g_cards[c];
 	snprintf(k.outdir, sizeof(k.outdir), "%s", dir);
@@ -4031,8 +4048,29 @@ static void card_set_outdir(int c, const char *dir)
 	if (c == 0) snprintf(g_outdir, sizeof(g_outdir), "%s", dir);
 	else if (usbodd_port(c - 1) >= 0) snprintf(g_outdir_usb[usbodd_port(c - 1)], sizeof(g_outdir_usb[0]), "%s", dir);
 	k.recheck = 1;
+}
+static void card_set_outdir(int c, const char *dir)
+{
+	card_apply_outdir(c, dir);
 	cfg_save();
 	logf("card %d: destination %s", c, dir);
+}
+
+// After the audit's undo changed a setting: the same follow-ups as the settings screens (the web
+// view, the cards' own copies of the drive settings and destinations, the cards' re-check).
+static void setting_applied(const char *key)
+{
+	if (!strcmp(key, "remote")) remote_set(g_remote);
+	else if (!strcmp(key, "drive_bd")) card_from(g_cards[0], g_bdcfg);
+	else if (!strncmp(key, "drive_usb", 9) && key[9] >= '0' && key[9] <= '7' && !key[10]) {
+		for (int c = 1; c < NCARDS; c++) if (usbodd_port(c - 1) == key[9] - '0') card_from(g_cards[c], g_usbcfg[key[9] - '0']);
+	}
+	else if (!strcmp(key, "outdir")) card_apply_outdir(0, g_outdir);
+	else if (!strncmp(key, "outdir_usb", 10) && key[10] >= '0' && key[10] <= '7' && !key[11]) {
+		for (int c = 1; c < NCARDS; c++)
+			if (usbodd_port(c - 1) == key[10] - '0') card_apply_outdir(c, g_outdir_usb[key[10] - '0'][0] ? g_outdir_usb[key[10] - '0'] : HDD_DIR);
+	}
+	for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
 }
 
 // The system reports discs only for its own drive and nothing about USB drives coming and going.
@@ -5734,6 +5772,7 @@ int main(int argc, char *argv[])
 	audit_set_hooks(set_setting_hook, NULL);
 	int had_cfg = cfg_load();
 	audit_apply_cap();   // also without a config file (the default size)
+	cfg_prime();   // so the first change after the boot is logged
 	card_defaults(g_cards[0]);
 	if (g_bdcfg.set) card_from(g_cards[0], g_bdcfg);
 	if (!had_cfg) { mkdir("/dev_hdd0/tmp", 0777); cfg_save(); logf("startup: no config, defaults written"); }   // editable over FTP

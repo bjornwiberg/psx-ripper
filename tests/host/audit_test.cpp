@@ -441,6 +441,27 @@ static void undo_setting(int &bad)
 	audit_set_hooks(NULL, NULL);
 }
 
+// a secret setting's row (rev=0) is never reversible, also after a reload, and says why
+static void private_setting_not_reversible(int &bad)
+{
+	fresh();
+	hooks_reset();
+	audit_setting_private(AU_PAD, "webhook_header1", "cleared", "set");
+	AuditRow r[4];
+	CHECK(audit_events(AU_SETTINGS, NULL, r, 4) == 1 && r[0].reversible == 0 && r[0].norev == 1);
+	uint32_t id = r[0].id;
+	char why[128] = "";
+	CHECK(audit_undo_row(id, why, sizeof why) == -1 && strstr(why, "the value is not kept in the log") && g_set_calls == 0);
+	audit_init(DIR, &IO);   // reload from the log
+	hooks_reset();
+	CHECK(audit_events(AU_SETTINGS, NULL, r, 4) == 1 && r[0].reversible == 0);
+	why[0] = 0;
+	CHECK(audit_undo_row(id, why, sizeof why) == -1 && strstr(why, "not kept") && g_set_calls == 0);
+	audit_setting(AU_PAD, "speed", "0", "1");
+	CHECK(audit_events(AU_SETTINGS, NULL, r, 4) == 2 && r[0].reversible == 1 && r[1].reversible == 0);
+	audit_set_hooks(NULL, NULL);
+}
+
 static void recheck_called_once_per_file(int &bad)
 {
 	fresh();
@@ -595,7 +616,7 @@ int main()
 		{"discs_grouping", discs_grouping},
 		{"undo_sector", undo_sector}, {"undo_refused_when_changed", undo_refused_when_changed},
 		{"undo_job_newest_first", undo_job_newest_first}, {"undo_job_stops_at_refusal", undo_job_stops_at_refusal},
-		{"undo_missing_blob", undo_missing_blob}, {"undo_setting", undo_setting},
+		{"undo_missing_blob", undo_missing_blob}, {"undo_setting", undo_setting}, {"private_setting_not_reversible", private_setting_not_reversible},
 		{"recheck_called_once_per_file", recheck_called_once_per_file}, {"undo_disc_since", undo_disc_since},
 		{"undo_refused_while_disc_busy", undo_refused_while_disc_busy}, {"undo_row_lost", undo_row_lost},
 		{"cap_keeps_running_job", cap_keeps_running_job}, {"cap_lowered_prunes_now", cap_lowered_prunes_now},

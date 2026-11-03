@@ -343,7 +343,49 @@ int main()
 		n = rows();
 		for (int i = 0; i < n; i++) if (!strcmp(r[i].what, "webhook_header1")) hid = r[i].id;
 		if (set_setting_hook("webhook_header1", "cleared") == 0 || strcmp(g_webhook_hdr[0], "X-Token: topsecret")) { printf("FAIL the hook accepted a header\n"); bad++; }
-		if (audit_undo_row(hid, why, sizeof why) == 0 || strcmp(g_webhook_hdr[0], "X-Token: topsecret") || !strstr(why, "webhook_header1")) { printf("FAIL undo of a header row: \"%s\"\n", why); bad++; }
+		if (audit_undo_row(hid, why, sizeof why) == 0 || strcmp(g_webhook_hdr[0], "X-Token: topsecret") || !strstr(why, "not kept in the log")) { printf("FAIL undo of a header row: \"%s\"\n", why); bad++; }
+		for (int i = 0; i < n; i++)
+			if (!strcmp(r[i].what, "webhook_header1") || !strcmp(r[i].what, "webhook")) if (r[i].reversible) { printf("FAIL a secret row reads reversible\n"); bad++; }
+		// a boot with a config: the first change after it is logged, and so is an undo as the first one
+		{
+			system("rm -rf out/audit");
+			audit_init("out/audit", &vf_io);
+			audit_set_hooks(set_setting_hook, NULL);
+			g_std.retries = 4; g_std.speed = 0; g_remote = 0;
+			cfg_save();   // the config of the "earlier run"
+			g_std.retries = 9; g_cfg_primed = false;
+			cfg_load(); cfg_prime();   // boot: reads the file (retries=4 again)
+			if (g_std.retries != 4) { printf("FAIL boot read the config\n"); bad++; }
+			g_std.speed = 3;
+			cfg_save();
+			n = rows();
+			if (n != 1 || strcmp(r[0].what, "speed") || strcmp(r[0].after, "3")) { printf("FAIL first change after boot not logged (%d rows)\n", n); bad++; }
+			// the same for an undo as the very first action after a boot
+			g_cfg_primed = false; cfg_load(); cfg_prime();
+			if (set_setting_hook("speed", "2") != 0) { printf("FAIL hook speed\n"); bad++; }
+			n = rows();
+			if (n != 2 || r[0].src != AU_UNDO || strcmp(r[0].what, "speed") || strcmp(r[0].before, "3") || strcmp(r[0].after, "2")) { printf("FAIL first undo after boot not logged (%d rows)\n", n); bad++; }
+			// the cards follow an undo like they follow the screens
+			g_bdcfg = {1, 5, 1, 1, 0, 1};
+			cfg_save();
+			g_bdcfg = {1, 6, 2, 0, 1, 0};
+			cfg_save();
+			card_from(g_cards[0], g_bdcfg);
+			if (set_setting_hook("drive_bd", "5,1,1,0,1") != 0 || g_cards[0].retries != 5 || g_cards[0].speed != 1 || g_cards[0].eject != 1 || g_cards[0].autostart != 0 || g_cards[0].check != 1)
+				{ printf("FAIL card copy after drive_bd undo (retries %d)\n", g_cards[0].retries); bad++; }
+			g_cards[0].recheck = 0;
+			snprintf(g_outdir, sizeof(g_outdir), "/dev_hdd0/PSXISO");
+			if (set_setting_hook("outdir", "/dev_hdd0/OTHER") != 0 || strcmp(g_cards[0].outdir, "/dev_hdd0/OTHER") || strcmp(g_cards[0].dest, "/dev_hdd0/OTHER") || !g_cards[0].recheck)
+				{ printf("FAIL card outdir after undo\n"); bad++; }
+			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 0;
+			set_setting_hook("name_pattern", "%D");
+			bool all = true;
+			for (int c = 0; c < NCARDS; c++) if (!g_cards[c].recheck) all = false;
+			if (!all || strcmp(g_name_pat, "%D")) { printf("FAIL recheck after name_pattern undo\n"); bad++; }
+			g_remote = 0;
+			if (set_setting_hook("remote", "1") != 0 || g_remote != 1) { printf("FAIL remote undo\n"); bad++; }
+			set_setting_hook("remote", "0");
+		}
 		// audit_mb: the listed sizes, anything else is 256
 		cfg_apply_line("audit_mb=16");
 		if (g_audit_mb != 16) { printf("FAIL audit_mb=16 gave %d\n", g_audit_mb); bad++; }

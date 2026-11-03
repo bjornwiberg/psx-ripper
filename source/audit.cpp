@@ -127,6 +127,7 @@ static bool parse_line(char *line, AuditRow *r)
 			else if (!strcmp(k, "what")) copyn(r->what, sizeof r->what, v);
 			else if (!strcmp(k, "before")) copyn(r->before, sizeof r->before, v);
 			else if (!strcmp(k, "after")) copyn(r->after, sizeof r->after, v);
+			else if (!strcmp(k, "rev")) r->norev = !strcmp(v, "0");
 			else if (!strcmp(k, "end")) has_end = true;
 			else if (!strcmp(k, "file")) copyn(r->file, sizeof r->file, v);
 		}
@@ -289,7 +290,7 @@ static JobSlot *slot_of(uint32_t job)
 // Appends one row; the caller holds the lock. Returns the id, 0 when the row could not be written.
 static uint32_t write_row(uint32_t job, AuditSrc src, AuditDom dom, const char *disc, const char *kind,
                           const char *what, const char *before, const char *after,
-                          const char *file, bool sector, uint32_t lba, uint32_t blob)
+                          const char *file, bool sector, uint32_t lba, uint32_t blob, bool norev = false)
 {
 	static char line[LINE_MAX_LEN];
 	uint32_t id = g_next_id++;
@@ -308,6 +309,7 @@ static uint32_t write_row(uint32_t job, AuditSrc src, AuditDom dom, const char *
 		n = put_esc(line, n, sizeof line - 24, file, 255);
 		n += (size_t)snprintf(line + n, sizeof line - n, "\tlba=%u\tblob=%u", (unsigned)lba, (unsigned)blob);
 	}
+	if (norev) n += (size_t)snprintf(line + n, sizeof line - n, "\trev=0");
 	n += (size_t)snprintf(line + n, sizeof line - n, "\tend=1\n");
 	char p[256];
 	path_log(p, sizeof p);
@@ -393,6 +395,13 @@ void audit_setting(AuditSrc src, const char *key, const char *before, const char
 	unlock();
 }
 
+void audit_setting_private(AuditSrc src, const char *key, const char *before, const char *after)
+{
+	lock();
+	write_row(0, src, AU_SETTINGS, "", "setting", key, before, after, NULL, false, 0, 0, true);
+	unlock();
+}
+
 // ---- undo state ----
 
 // What the log says about undo: which rows were undone, and the value each setting has now.
@@ -467,6 +476,7 @@ static const char *row_block(const AuditRow &r, const UndoState &s, char *msg, s
 	if (s.is_undone(r.id)) { snprintf(msg, n, "already undone"); return msg; }
 	if (!strcmp(r.kind, "sector")) { bool restored; return sector_block(r, msg, n, &restored); }
 	if (!strcmp(r.kind, "setting")) {
+		if (r.norev) { snprintf(msg, n, "the value is not kept in the log"); return msg; }
 		auto it = s.cur.find(r.what);
 		if (it == s.cur.end() || it->second != r.after) { snprintf(msg, n, "setting %.100s changed since", r.what); return msg; }
 		return NULL;

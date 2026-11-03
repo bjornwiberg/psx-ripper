@@ -26,6 +26,7 @@ struct AuditRow {
 	AuditDom dom;
 	char disc[96], kind[12], what[160], before[192], after[192], file[256];
 	int undone, reversible;
+	int norev;   // the row was written with rev=0: its value is not in the log, it can never be undone
 };
 
 // Creates the directory and reads the next row id and job id from the log. A half-written last
@@ -39,6 +40,8 @@ void audit_note(uint32_t job, AuditDom dom, const char *disc, const char *kind,
 // Logs one changed sector: old and new bytes go to job<N>.bin (4704 bytes per row).
 void audit_sector(uint32_t job, const char *file, uint32_t lba, const uint8_t *old2352, const uint8_t *new2352);
 void audit_setting(AuditSrc src, const char *key, const char *before, const char *after);
+// Same for a secret setting: `before`/`after` are only labels (set / cleared); the row is never reversible.
+void audit_setting_private(AuditSrc src, const char *key, const char *before, const char *after);
 
 // Queries; each returns how many it wrote into out.
 // One entry per disc that has rows, newest activity first.
