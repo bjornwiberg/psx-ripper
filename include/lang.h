@@ -328,6 +328,7 @@ enum StrId {
 	STR_GL_ALL,
 	STR_GL_GONE,
 	STR_GL_MORE,
+	STR_GL_OOM,
 	STR_COUNT
 };
 

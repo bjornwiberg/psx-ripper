@@ -2576,14 +2576,15 @@ static void fit_middle(UiFont font, const char *in, char *out, size_t n, int max
 
 // The destinations a rip can go to, in order: the hard disk, then by USB port a FAT32 drive the PS3
 // mounts (/dev_usbNNN) or an exFAT drive reached through FatFs. cands = their PSXISO folders,
-// ports = the USB port of each (-1 for the hard disk). Returns how many (at least 1).
-static int dest_candidates(char (*cands)[32], int *ports)
+// ports = the USB port of each (-1 for the hard disk). vols/nv: the exFAT drives from a vf_scan
+// the caller made (NULL: scanned here). Returns how many (at least 1).
+static int dest_candidates(char (*cands)[32], int *ports, const VfVolume *vols = NULL, int nv = 0)
 {
 	int nc = 0;
 	snprintf(cands[nc], 32, "/dev_hdd0/PSXISO");
 	ports[nc++] = -1;
-	VfVolume vols[8];
-	int nv = vf_scan(vols, 8);
+	VfVolume own[8];
+	if (!vols) { nv = vf_scan(own, 8); vols = own; }
 	for (int port = 0; port < 8; port++) {
 		char dev[16];
 		snprintf(dev, sizeof(dev), "/dev_usb%03d", port);
@@ -2624,6 +2625,7 @@ struct GlResult {
 	Game *g; int ng;           // their rows (lib_group)
 	int more;                  // a source had more than GL_MAX discs
 	int gone;                  // the chosen source is not connected (or went away during the scan)
+	int oom;                   // not enough memory for the list (not the same as gone)
 	time_t t0;                 // when the scan started
 	uint32_t gen;              // change counter: +1 with every result gl_poll takes
 };
@@ -2633,13 +2635,16 @@ static char g_gl_req[8];               // a scan asked for and not started yet, 
 static int g_gl_running;               // the scan thread runs
 static GlResult *g_gl_next;            // a finished scan gl_poll has not taken yet
 static volatile int g_gl_stale = 1;    // files changed since the last scan started
+static GlResult g_gl_oom = {};         // handed over when not even a result could be allocated
+static size_t g_gl_alloc_max = (size_t)-1;   // the largest block the scan asks for (the tests lower it)
 
 // The sources: the same candidates as next_target, named "Hard disk" / "USB n (LABEL)", then "All".
-static int gl_sources(GlSource *out, int max)
+// vols/nv as for dest_candidates.
+static int gl_sources(GlSource *out, int max, const VfVolume *vols = NULL, int nv = 0)
 {
 	char cands[9][32];
 	int ports[9];
-	int nc = dest_candidates(cands, ports), n = 0;
+	int nc = dest_candidates(cands, ports, vols, nv), n = 0;
 	for (int i = 0; i < nc && n < max - 1; i++, n++) {
 		GlSource &s = out[n];
 		memset(&s, 0, sizeof(s));
@@ -2685,24 +2690,15 @@ static int gl_io_exists(const char *p) { return vf_exists(p); }
 static int gl_io_lc(const char *id) { return is_libcrypt_disc(id); }
 static LibIo gl_libio() { LibIo io = {vf_listdir, vf_size, gl_io_read, gl_io_exists, gl_io_lc, SBI_DIR}; return io; }
 
-// The source's drive is still connected (the hard disk always is).
-static int gl_drive_there(const GlSource &s)
-{
-	if (s.port < 0) return 1;
-	if (!strncmp(s.dir, "exfat", 5)) {
-		VfVolume v[8];
-		int n = vf_scan(v, 8);
-		for (int i = 0; i < n && i < 8; i++) if (v[i].port == s.port) return 1;
-		return 0;
-	}
-	char dev[16];
-	snprintf(dev, sizeof(dev), "/dev_usb%03d", s.port);
-	return vf_exists(dev);
-}
+// The source's drive is still connected (the hard disk always is). Asks the system, no mount.
+static int gl_drive_there(const GlSource &s) { return s.port < 0 || vf_drive_present(s.port); }
+
+static void *gl_malloc(size_t n) { return n > g_gl_alloc_max ? NULL : malloc(n); }
+static void *gl_realloc(void *p, size_t n) { return n > g_gl_alloc_max ? NULL : realloc(p, n); }
 
 static void gl_free(GlResult *r)
 {
-	if (!r) return;
+	if (!r || r == &g_gl_oom) return;
 	free(r->d); free(r->g);
 	free(r);
 }
@@ -2715,33 +2711,43 @@ static GlResult *gl_build(const char *key, const LibIo *io)
 	if (!r) return NULL;
 	snprintf(r->key, sizeof(r->key), "%s", key);
 	r->t0 = time(NULL);
-	r->nsrc = gl_sources(r->src, GL_SRCS);
-	GameDisc *tmp = (GameDisc *)malloc((GL_MAX + 1) * sizeof(GameDisc));
+	VfVolume vols[8];
+	int nv = vf_scan(vols, 8);   // once per scan: it takes the FatFs lock across all ports
+	r->nsrc = gl_sources(r->src, GL_SRCS, vols, nv);
+	GameDisc *tmp = (GameDisc *)gl_malloc((GL_MAX + 1) * sizeof(GameDisc));
+	if (!tmp) r->oom = 1;
 	int found = 0;
 	for (int i = 0; tmp && i < r->nsrc; i++) {
 		GlSource &s = r->src[i];
 		if (!s.dir[0] || (strcmp(key, "all") && strcmp(key, s.key))) continue;
 		found = 1;
 		int n = lib_scan(s.dir, io, tmp, GL_MAX + 1);
-		if (n < 0) {   // no PSXISO folder: empty; the drive itself gone (during the scan): gone
+		// a drive pulled during the scan: its files could not be read, which would look like
+		// broken sets. Gone (one source), or left out (All). No PSXISO folder: empty.
+		if (!gl_drive_there(s)) {
 			s.n = -1;
-			if (strcmp(key, "all") && !gl_drive_there(s)) r->gone = 1;
+			if (strcmp(key, "all")) r->gone = 1;
 			continue;
 		}
+		if (n < 0) { s.n = -1; continue; }
 		if (n > GL_MAX) { r->more = 1; n = GL_MAX; }
 		s.n = n;
-		GameDisc *d = n ? (GameDisc *)realloc(r->d, (size_t)(r->n + n) * sizeof(GameDisc)) : r->d;
-		if (!d) { s.n = -1; continue; }
+		GameDisc *d = n ? (GameDisc *)gl_realloc(r->d, (size_t)(r->n + n) * sizeof(GameDisc)) : r->d;
+		if (!d) { s.n = -1; r->oom = 1; continue; }
 		memcpy(d + r->n, tmp, (size_t)n * sizeof(GameDisc));
 		r->d = d;
 		r->n += n;
 	}
 	free(tmp);
-	if (!found) r->gone = 1;   // the chosen drive is not connected
+	if (!found && !r->oom) r->gone = 1;   // the chosen drive is not connected
+	if (r->gone) { free(r->d); r->d = NULL; r->n = 0; }
 	lib_mark_dups(r->d, r->n);
-	r->g = r->n ? (Game *)malloc((size_t)r->n * sizeof(Game)) : NULL;
+	r->g = r->n ? (Game *)gl_malloc((size_t)r->n * sizeof(Game)) : NULL;
+	if (r->n && !r->g) r->oom = 1;
 	r->ng = r->g ? lib_group(r->d, r->n, r->g, r->n) : 0;
-	logf("game list %s: %d disc(s), %d row(s)%s%s", key, r->n, r->ng, r->more ? ", more than the limit" : "", r->gone ? ", gone" : "");
+	if (r->oom) { free(r->d); free(r->g); r->d = NULL; r->g = NULL; r->n = r->ng = 0; }
+	logf("game list %s: %d disc(s), %d row(s)%s%s%s", key, r->n, r->ng, r->more ? ", more than the limit" : "", r->gone ? ", gone" : "",
+	     r->oom ? ", OUT OF MEMORY" : "");
 	return r;
 }
 
@@ -2758,6 +2764,7 @@ static void gl_thread(void *arg)
 		sysMutexUnlock(g_gl_mx);
 		LibIo io = gl_libio();
 		GlResult *r = gl_build(key, &io);
+		if (!r) { logf("game list %s: OUT OF MEMORY", key); r = &g_gl_oom; snprintf(g_gl_oom.key, sizeof(g_gl_oom.key), "%s", key); }
 		sysMutexLock(g_gl_mx, 0);
 		GlResult *old = g_gl_next;
 		g_gl_next = r;
@@ -2806,7 +2813,7 @@ GL_UI static int gl_poll()
 	free(g_gl.d); free(g_gl.g);
 	g_gl = *r;
 	g_gl.gen = gen + 1;
-	free(r);
+	if (r == &g_gl_oom) { g_gl.oom = 1; g_gl.t0 = time(NULL); } else free(r);
 	return 1;
 }
 
@@ -2814,7 +2821,7 @@ GL_UI static int gl_poll()
 // source and still current. Returns 1 when a scan was asked for.
 GL_UI static int gl_open(const char *key)
 {
-	int fresh = g_gl.gen && !g_gl_stale && !strcmp(g_gl.key, key) && !g_gl.gone;
+	int fresh = g_gl.gen && !g_gl_stale && !strcmp(g_gl.key, key) && !g_gl.gone && !g_gl.oom;
 	for (int i = 0; fresh && i < g_gl.nsrc; i++) {
 		const GlSource &s = g_gl.src[i];
 		if (!s.dir[0] || (strcmp(key, "all") && strcmp(key, s.key))) continue;
