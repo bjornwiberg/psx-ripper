@@ -28,7 +28,12 @@ app writes the whole file again.
 
 Webhook event bits: 0 `disc_identified`, 1 `rip_started`, 2 `rip_progress`, 3 `rip_finished`,
 4 `rip_cancelled`, 5 `rip_failed`, 6 `repair_finished`, 7 `disc_ejected`,
-8 `disc_not_identified`, 9 `app_started`.
+8 `disc_not_identified`, 9 `app_started`, 10 `disc_lost`.
+
+`disc_lost` is sent instead of `rip_cancelled` / `repair_finished` when a rip or repair stopped
+because the disc left the drive without O being pressed (a USB SuperDrive pushes out a disc it
+cannot read; the drive then answers "medium not present"). A rip removes its unfinished file; a
+repair keeps the sectors it already wrote.
 
 ## Remote view and webhooks
 
