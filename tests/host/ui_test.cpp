@@ -356,6 +356,298 @@ static void game_source_tests()
 	if (bad) g_fail += bad; else printf("ok   game list sources, labels, All, the cache, a source that goes, games_* config keys\n");
 }
 
+// ---------------------------------------------------------------- game list: the screen
+// A hard disk with one of every kind: a verified rip with its cover, unchecked rips, a game of four
+// discs (one with errors, one a LibCrypt disc with its .sbi), a rip with errors, a 2048 .iso, a
+// MediEvil that does not match (LibCrypt, no .sbi), a .bin without its cue, two copies of one disc,
+// and a name that is not ASCII. Croc 2 also on a stick (USB 1, "RIPS").
+static const char *GS_MD5 = "4f1c7d0b9e2a3c5d6e7f8091a2b3c4d5";
+static void gs_set(const char *dir, const char *name, int sectors, const char *log)
+{
+	char p[300], cue[400];
+	std::vector<uint8_t> img((size_t)sectors * RAW_SIZE);
+	snprintf(p, sizeof p, "%s/%s.bin", dir, name);
+	put_bin(p, img.data(), img.size());
+	snprintf(p, sizeof p, "%s/%s.cue", dir, name);
+	snprintf(cue, sizeof cue, "FILE \"%s.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n", name);
+	gl_text(p, cue);
+	if (!log) return;
+	snprintf(p, sizeof p, "%s/%s.log", dir, name);
+	gl_text(p, log);
+}
+static std::string gs_log(const char *title, const char *serial, const char *redump, const char *errors = "")
+{
+	char b[1200];
+	snprintf(b, sizeof b, "PSX Ripper rip log\ntitle=%s\nserial=%s\ndate=2026-10-02 18:41 UTC\nsectors=3\ncheck=bitperfect\nretries=4\n"
+	         "track=01 start=0 md5=%s\n%s%s%sunreadable_count=0\nbad_count=0\nfixed_count=0\n%s",
+	         title, serial, GS_MD5, redump ? "redump=" : "", redump ? redump : "", redump ? "\n" : "", errors);
+	return b;
+}
+static void gs_library()
+{
+	system("rm -rf out/gl && mkdir -p out/gl/dev_hdd0/PSXISO out/gl/dev_usb001/PSXISO out/gl/dev_hdd0/tmp/sbi");
+	snprintf(host_root, 256, "out/gl");
+	memset(host_exfat, 0, sizeof(int) * 8);
+	for (int i = 0; i < 8; i++) host_label[i][0] = 0;
+	snprintf(host_label[1], 24, "RIPS");
+	const char *H = "out/gl/dev_hdd0/PSXISO";
+	gs_set(H, "Alundra (Europe) [SLES_011.35]", 3, gs_log("Alundra", "SLES_011.35", "verified Alundra (Europe)").c_str());
+	put_bin("out/gl/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].jpg", "jpg", 3);
+	gs_set(H, "Ape Escape (Europe) [SCES_011.15]", 3, NULL);
+	put_bin("out/gl/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso", std::vector<uint8_t>(3 * 2048).data(), 3 * 2048);
+	gs_set(H, "Croc 2 (Europe) [SLES_020.88]", 3, NULL);
+	gs_set("out/gl/dev_usb001/PSXISO", "Croc 2 (Europe) [SLES_020.88]", 3, NULL);
+	const char *ff[] = {"SLES_029.65", "SLES_129.65", "SLES_229.65", "SLES_329.65"};
+	for (int i = 0; i < 4; i++) {
+		char n[96], t[64], r[96];
+		snprintf(n, sizeof n, "Final Fantasy IX (Europe) (Disc %d) [%s]", i + 1, ff[i]);
+		snprintf(t, sizeof t, "Final Fantasy IX (Disc %d)", i + 1);
+		snprintf(r, sizeof r, "verified Final Fantasy IX (Europe) (Disc %d)", i + 1);
+		gs_set(H, n, 3, gs_log(t, ff[i], i == 1 ? NULL : r, i == 1 ? "unreadable=120344\nunreadable=120345\nbad=130001\n" : "").c_str());
+	}
+	for (const char *id : ff) {   // every disc of it is a LibCrypt disc: their .sbi files are installed
+		char p[96];
+		snprintf(p, sizeof p, "out/gl/dev_hdd0/tmp/sbi/%s.sbi", id);
+		put_bin(p, "sbi", 3);
+	}
+	gs_set(H, "MediEvil (Europe) [SCES_003.11]", 3, gs_log("MediEvil", "SCES_003.11", "no_match").c_str());
+	gs_set(H, "Motorhead (USA) [SLUS_007.17]", 3, gs_log("Motorhead", "SLUS_007.17", NULL, "unreadable=1000\nunreadable=1001\nbad=2000\nuncertain=2100 unconfirmed\nuncertain=2101 confirmed\n").c_str());
+	put_bin("out/gl/dev_hdd0/PSXISO/Tekken 3 (Europe) [SCES_012.37].bin", std::vector<uint8_t>(3 * RAW_SIZE).data(), 3 * RAW_SIZE);
+	gs_set(H, "WipEout 3 (Europe) [SCES_028.45]", 3, NULL);
+	gs_set(H, "WipEout 3 (Europe) (Copy) [SCES_028.45]", 3, NULL);
+	gs_set(H, "\xC3\x89" "chapp\xC3\xA9" "e (France) [SLES_000.01]", 3, NULL);
+	for (const char *n : {"Bushido Blade", "Driver", "Gran Turismo", "Hogs of War", "Klonoa", "Legend of Dragoon", "Oddworld", "Parasite Eve", "Rayman", "Spyro"})
+		gs_set(H, n, 3, NULL);
+}
+static void gframe(const char *name, const GamesView &v)
+{
+	char nm[96];
+	snprintf(nm, sizeof nm, "%s%s", name, g_sfx_sv ? "-sv" : "");
+	g_boxes.clear();
+	games_draw(v);
+	save(nm);
+	size_t before = g_fail;
+	check(nm);
+	printf("%s %s\n", g_fail == (int)before ? "ok  " : "FAIL", nm);
+}
+static const char *gs_focus(const GamesView &v) { return v.nshown ? g_gl.g[v.shown[v.row]].name : ""; }
+static bool gs_at(const GamesView &v, const char *name) { return !strncmp(gs_focus(v), name, strlen(name)); }
+static int gs_find(GamesView &v, const char *name)
+{
+	for (int i = 0; i < v.nshown; i++) if (!strncmp(g_gl.g[v.shown[i]].name, name, strlen(name))) { v.row = i; gv_fix(v); return 1; }
+	return 0;
+}
+static void games_scenarios()
+{
+	int bad = 0, sv = g_sfx_sv;
+	auto want = [&](bool ok, const char *what) { if (!ok) { printf("FAIL games (%s): %s\n", sv ? "sv" : "en", what); bad++; } };
+	gs_library();
+	system("rm -f out/psxrip.cfg");
+	g_cfg_primed = false;
+	snprintf(g_games_source, sizeof g_games_source, "hdd");
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	g_gl_stale = 1;
+	GamesView v;
+	gv_open(v);
+	want(!gv_ready(v), "ready before the scan was taken");
+	gframe("games-reading", v);
+	want(has_text(sv ? "Läser spelen" : "Reading the games"), "the reading text");
+	gv_poll(v);
+	want(gv_ready(v) && v.nshown == 21, "21 rows on the hard disk");
+	gframe("games-list", v);
+	want(has_text(sv ? "21 spel" : "21 games") && has_text(sv ? "1 verifierat" : "1 verified") && has_text(sv ? "2 med fel" : "2 with errors") &&
+	     has_text(sv ? "1 rippa om" : "1 re-rip") && has_text(sv ? "1 trasigt" : "1 broken"),
+	     "the summary");
+	want(has_text(sv ? "Alla spel" : "All games"), "no criteria: all games");
+	want(has_text(sv ? "4 skivor" : "4 discs"), "the multi-disc row");
+	want(gs_at(v, "Alundra"), "first row Alundra");
+	// statuses further down: errors, no match, broken, the duplicates
+	gs_find(v, "MediEvil");
+	gframe("games-list-statuses", v);
+	want(has_text(sv ? "Matchar inte" : "Does not match") && has_text(sv ? "3 fel" : "3 errors") && has_text(sv ? ".sbi saknas" : ".sbi missing"),
+	     "no match, errors, LibCrypt");
+	gs_find(v, "WipEout 3");
+	gframe("games-list-end", v);
+	want(has_text(sv ? "Trasig" : "Broken") && has_text(sv ? "Dubblett" : "Duplicate") && has_text(sv ? "4 fel" : "4 errors") && has_text("(Copy) [SCES_028.45]"), "broken, duplicate (the other's file), errors");
+	// jump by letter: R2 to the next letter, L2 back
+	gs_find(v, "Alundra");
+	gv_input(v, B_R2);
+	want(gs_at(v, "Bushido Blade"), "R2 jumps from A to B");
+	gv_input(v, B_R2); gv_input(v, B_R2);
+	want(gs_at(v, "Driver"), "R2 twice more: D");
+	gv_input(v, B_L2);
+	want(gs_at(v, "Castlevania Chronicles"), "L2: the first of C");
+	// each criterion
+	struct { GameFilter f; int n; const char *line_en, *line_sv; } fc[] = {
+		{{2, 0, 0, 0}, 1, "2048", "2048"},
+		{{0, 1, 0, 0}, 2, "Verified", "Verifierad"},
+		{{0, 3, 0, 0}, 1, "Does not match", "Matchar inte"},
+		{{0, 0, 1, 0}, 2, "With errors", "Med fel"},
+		{{0, 0, 0, 1}, 1, "Broken sets", "Trasiga"},
+		{{0, 0, 0, 2}, 2, "Duplicates", "Dubbletter"},
+		{{0, 0, 0, 3}, 1, "LibCrypt .sbi missing", "LibCrypt .sbi saknas"},
+		{{1, 2, 0, 0}, 0, "2352 · Not checked", "2352 · Ej kontrollerad"},
+	};
+	for (auto &c : fc) {
+		g_games_filter = c.f;
+		gv_refilter(v);
+		int n = lib_filter(g_gl.g, g_gl.ng, g_gl.d, &c.f, std::vector<int>(g_gl.ng).data());
+		g_boxes.clear(); games_draw(v);
+		char w[160];
+		snprintf(w, sizeof w, "filter %d,%d,%d,%d: %d rows (lib %d), line \"%s\"", c.f.fmt, c.f.redump, c.f.errors, c.f.other, v.nshown, n, sv ? c.line_sv : c.line_en);
+		want(v.nshown == n && (c.n == 0 || n == c.n) && has_text(sv ? c.line_sv : c.line_en), w);
+	}
+	g_games_filter = GameFilter{2, 0, 0, 0};
+	gv_refilter(v);
+	gframe("games-criteria", v);
+	g_games_filter = GameFilter{0, 0, 1, 3};
+	gv_refilter(v);
+	gframe("games-no-match", v);
+	want(v.nshown == 0 && has_text(sv ? "Inga spel matchar filtret" : "No games match the filter"), "nothing matches");
+	gv_input(v, B_L1);   // L1: every criterion back to any, saved
+	{
+		char txt[4096];
+		cfg_text(txt, sizeof txt);
+		want(v.nshown == 21 && !g_games_filter.fmt && !g_games_filter.other && strstr(txt, "\ngames_filter=0,0,0,0\n"), "L1 resets and saves");
+	}
+	// the filter panel: R1 opens, right increases, O applies and saves
+	gv_input(v, B_R1);
+	want(v.mode == GV_FILTER, "R1 opens the filter panel");
+	gv_input(v, B_RIGHT); gv_input(v, B_RIGHT);   // Format: 2048
+	gv_input(v, B_DOWN); gv_input(v, B_RIGHT); gv_input(v, B_RIGHT);   // Redump: not checked
+	gframe("games-filter", v);
+	want(has_text("Format") && has_text("Redump") && has_text(sv ? "Övrigt" : "Other") && has_text(sv ? "Visa" : "Show"), "the panel's rows");
+	want(g_games_filter.fmt == 0, "the panel applies only when closed");
+	gv_input(v, B_CIRCLE);
+	{
+		char txt[4096];
+		cfg_text(txt, sizeof txt);
+		want(v.mode == GV_LIST && g_games_filter.fmt == 2 && g_games_filter.redump == 2 && strstr(txt, "\ngames_filter=2,2,0,0\n"), "O applies and saves");
+	}
+	gframe("games-criteria-two", v);
+	want(has_text(sv ? "2048 · Ej kontrollerad" : "2048 · Not checked"), "the criteria line");
+	gv_input(v, B_L1);
+	// the detail view of an app rip: tracks and their MD5, Redump's name, the cover
+	gs_find(v, "Alundra");
+	gv_input(v, B_CROSS);
+	want(v.mode == GV_DETAIL, "X opens the detail view");
+	gframe("games-detail-rip", v);
+	want(has_text(GS_MD5) && has_text("Alundra (Europe)") && has_text("SLES_011.35") && has_text(sv ? "Omslagsbild" : "Cover picture"), "the rip's details");
+	gv_input(v, B_CIRCLE);
+	want(v.mode == GV_LIST && gs_at(v, "Alundra"), "O back to the same row");
+	gs_find(v, "Castlevania Chronicles");
+	gv_input(v, B_CROSS);
+	gframe("games-detail-iso", v);
+	want(has_text(sv ? "Rippa om för att verifiera" : "Re-rip to verify") && has_text("2048"), "the .iso's details");
+	gv_input(v, B_CIRCLE);
+	gs_find(v, "Final Fantasy IX");
+	gv_input(v, B_CROSS);
+	gframe("games-detail-discs", v);
+	want(has_text(sv ? "Skiva 1" : "Disc 1") && has_text(sv ? ".sbi finns" : ".sbi present"), "the group's first disc");
+	want(!has_text("120344"), "disc 2's sectors not on the first page");
+	for (int i = 0; i < 60 && !has_text("120344"); i++) { gv_input(v, B_DOWN); g_boxes.clear(); games_draw(v); }
+	gframe("games-detail-discs-down", v);
+	want(has_text("120344") && has_text(sv ? "Skiva 2" : "Disc 2"), "disc 2's sectors further down");
+	gv_input(v, B_CIRCLE);
+	gs_find(v, "Motorhead");
+	gv_input(v, B_CROSS);
+	gframe("games-detail-errors", v);
+	gv_input(v, B_CIRCLE);
+	gs_find(v, "Tekken 3");
+	gv_input(v, B_CROSS);
+	gframe("games-detail-broken", v);
+	gv_input(v, B_CIRCLE);
+	// SELECT: the next source (USB 1 (RIPS)), then All: each row with its place
+	gv_input(v, B_SELECT);
+	want(!strcmp(v.key, "usb1") && !strcmp(g_games_source, "usb1"), "SELECT: USB 1, remembered");
+	gv_poll(v);
+	gframe("games-usb", v);
+	want(v.nshown == 1 && has_text("USB 1 (RIPS)"), "the stick's list and name");
+	gv_input(v, B_SELECT);
+	gv_poll(v);
+	want(!strcmp(v.key, "all") && v.nshown == 22, "SELECT: All (Croc 2 twice: two places)");
+	gs_find(v, "Croc 2");
+	gframe("games-all", v);
+	want(has_text(sv ? "Hårddisk" : "Hard disk") && has_text("USB 1 (RIPS)"), "All: the focused row's place and its duplicate's");
+	// the trash view: "Show: Trash" in the panel; empty, then with a set
+	gv_input(v, B_SELECT);
+	gv_poll(v);
+	want(!strcmp(v.key, "hdd"), "SELECT round to the hard disk");
+	gv_input(v, B_R1);
+	for (int i = 0; i < 4; i++) gv_input(v, B_DOWN);
+	gv_input(v, B_RIGHT);
+	gframe("games-filter-trash", v);
+	gv_input(v, B_CIRCLE);
+	want(v.trash == 1, "Show: Trash");
+	gv_poll(v);
+	gframe("games-trash-empty", v);
+	want(gv_ready(v) && has_text(sv ? "Papperskorgen" : "trash"), "the empty trash");
+	system("mkdir -p out/gl/dev_hdd0/PSXISO/.trash");
+	gs_set("out/gl/dev_hdd0/PSXISO/.trash", "Croc (Europe) [SLES_008.95]", 3, NULL);
+	gv_switch(v);   // read again (the actions of a later step do this after a move)
+	gv_poll(v);
+	gframe("games-trash", v);
+	want(v.nshown == 1 && gs_at(v, "Croc"), "the trash's set");
+	gv_input(v, B_R1);
+	for (int i = 0; i < 4; i++) gv_input(v, B_DOWN);
+	gv_input(v, B_LEFT);
+	gv_input(v, B_CIRCLE);
+	gv_poll(v);
+	want(!v.trash && v.nshown == 21, "back to the games");
+	// another requester's scan handed over to the screen (as /games.json will): it asks for its own
+	// source again and shows it; a new result closes the detail view; no redraws without news
+	gs_find(v, "Alundra");
+	gv_input(v, B_CROSS);
+	gl_request("usb1");
+	gv_poll(v);
+	want(!gv_ready(v) && !strcmp(g_gl.key, "usb1"), "another source's result is not shown");
+	want(gv_poll(v) && gv_ready(v) && !strcmp(g_gl.key, "hdd") && v.nshown == 21, "the screen asks for its source again");
+	want(v.mode == GV_LIST, "a new result closes the detail view");
+	want(!gv_poll(v) && !gv_poll(v), "no redraw without a new result");
+	// the two settings in the audit log: by their name, values in words
+	{
+		char av[160];
+		want(!strcmp(av_key_label("games_source"), sv ? "Spellistan: källa" : "Game list: source") &&
+		     !strcmp(av_key_label("games_filter"), sv ? "Spellistan: filter" : "Game list: filter"), "the audit's names of the settings");
+		av_setting_val("games_filter", "2,2,0,0", av, sizeof av);
+		want(!strcmp(av, sv ? "2048 · Ej kontrollerad" : "2048 · Not checked"), "the audit's filter value");
+		av_setting_val("games_filter", "0,0,0,0", av, sizeof av);
+		want(!strcmp(av, sv ? "Alla spel" : "All games"), "the audit's empty filter");
+		av_setting_val("games_source", "usb5", av, sizeof av);
+		want(!strcmp(av, "USB 5"), "the audit's source");
+		av_setting_val("games_source", "hdd", av, sizeof av);
+		want(!strcmp(av, sv ? "Hårddisk" : "Hard disk"), "the audit's hard disk");
+	}
+	// an empty source, a gone one, not enough memory
+	system("rm -rf out/gl/dev_usb001/PSXISO/*");
+	snprintf(v.key, sizeof v.key, "usb1");
+	gv_switch(v);
+	gv_poll(v);
+	gframe("games-empty", v);
+	want(has_text(sv ? "Inga spel på USB 1 (RIPS)" : "No games on USB 1 (RIPS)"), "the empty source");
+	snprintf(v.key, sizeof v.key, "usb5");
+	gv_switch(v);
+	gv_poll(v);
+	gframe("games-gone", v);
+	want(g_gl.gone && has_text(sv ? "USB 5 är inte ansluten" : "USB 5 is not connected"), "the gone source by its key");
+	g_gl_alloc_max = 1024;
+	snprintf(v.key, sizeof v.key, "hdd");
+	gv_switch(v);
+	gv_poll(v);
+	g_gl_alloc_max = (size_t)-1;
+	gframe("games-oom", v);
+	want(g_gl.oom && v.nshown == 0 && has_text(sv ? "Inte tillräckligt med minne" : "Not enough memory"), "out of memory");
+	gv_input(v, B_CROSS);
+	want(v.mode == GV_LIST, "no detail view without a list");
+	// closing frees the list
+	gv_close(v);
+	want(!g_gl.d && !g_gl.g && !v.shown && !g_gl.key[0], "closing frees the list");
+	host_root[0] = 0;
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	snprintf(g_games_source, sizeof g_games_source, "all");
+	if (bad) g_fail += bad; else printf("ok   game list screen (%s): reading, list, statuses, letters, filters, panel, detail, sources, trash, gone, memory\n", sv ? "sv" : "en");
+}
+
 // A prepared log: Alundra (a rip, and a repair that wrote 1015 sectors: 1017 rows), Final Fantasy IX
 // (a rip, a check, and a rip that was cancelled after writing a sector), and settings from every source.
 static void audit_scenarios()
@@ -760,20 +1052,27 @@ int main()
 	disc(2, "Motorhead", "", "SLUS_007.17", 647); ripped(2, 0, 277);
 	frame("readme-tabs", 0);
 	frame("readme-ripping", 1);
-	{   // the settings: the first row, and the About row at the end
+	{   // the settings: the first row (the game list), and the About row at the end
 		DriveCfg sd = g_std; sd.autostart = 1;
 		const time_t when = 1793530800;   // 2026-11-01, when the local copy was downloaded
-		g_boxes.clear(); settings_draw(0, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings"); size_t b0 = g_fail; check("settings");
-		printf("%s settings\n", g_fail == (int)b0 ? "ok  " : "FAIL");
-		g_boxes.clear(); settings_draw(12, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings-about-row"); b0 = g_fail; check("settings-about-row");
-		printf("%s settings-about-row\n", g_fail == (int)b0 ? "ok  " : "FAIL");
+		auto sframe = [&](const char *name, int row, const char *must) {
+			g_boxes.clear(); settings_draw(row, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save(name); size_t b0 = g_fail; check(name);
+			if (must && !has_text(must)) { printf("FAIL %s: no \"%s\"\n", name, must); g_fail++; }
+			printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", name);
+		};
+		sframe("settings", SR_GAMES, "Games");
+		if (!has_text("Open") || has_text("‹  ›")) { printf("FAIL settings: the Games row is opened with X\n"); g_fail++; }
+		sframe("settings-speed-row", SR_SPEED, "Read speed");
+		sframe("settings-about-row", SR_ABOUT, "About");
 		// the audit log rows, just above About: the log (X opens it) and the size of its sector data
 		g_audit_mb = 64;
-		g_boxes.clear(); settings_draw(11, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings-audit-row"); b0 = g_fail; check("settings-audit-row");
-		printf("%s settings-audit-row\n", g_fail == (int)b0 ? "ok  " : "FAIL");
-		g_boxes.clear(); settings_draw(10, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); save("settings-audit-log-row"); b0 = g_fail; check("settings-audit-log-row");
-		printf("%s settings-audit-log-row\n", g_fail == (int)b0 ? "ok  " : "FAIL");
+		sframe("settings-audit-row", SR_AUDIT_MB, "64 MB");
+		sframe("settings-audit-log-row", SR_AUDIT, "Open");
 		g_audit_mb = 256;
+		host_lang = PS3_LANG_SWEDISH; lang_init();
+		sframe("settings-sv", SR_GAMES, "Spel");
+		host_lang = PS3_LANG_ENGLISH_US; lang_init();
+		if (SR_COUNT != 14 || SR_GAMES != 0 || SR_ABOUT != SR_COUNT - 1) { printf("FAIL settings: 14 rows, Games first, About last\n"); g_fail++; }
 	}
 
 	{   // settings in the audit log: what changed, where it came from, no secrets
@@ -1177,6 +1476,11 @@ int main()
 		if (bad) g_fail += bad; else printf("ok   undoing an audit_mb row applies the cap at once\n");
 	}
 	game_source_tests();
+	// the game list screen, in both languages
+	host_lang = PS3_LANG_SWEDISH; lang_init(); g_sfx_sv = 1;
+	games_scenarios();
+	host_lang = PS3_LANG_ENGLISH_US; lang_init(); g_sfx_sv = 0;
+	games_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;
