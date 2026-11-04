@@ -963,6 +963,302 @@ static void games_check_scenarios()
 	if (bad) g_fail += bad; else printf("ok   game list checks (%s): .iso without cue, 2048 refused, app rip, busy, check all + cancel, audit, Redump off, focus\n", sv ? "sv" : "en");
 }
 
+
+// ---------------------------------------------------------------- game list: rename, trash, restore, empty
+static void fframe(const char *name, const FnView &f)
+{
+	char nm[96];
+	snprintf(nm, sizeof nm, "%s%s", name, g_sfx_sv ? "-sv" : "");
+	g_boxes.clear();
+	fn_draw(f);
+	save(nm);
+	size_t before = g_fail;
+	check(nm);
+	printf("%s %s\n", g_fail == (int)before ? "ok  " : "FAIL", nm);
+}
+static void gm_files_of(const char *dir, const char *name, const char *const *exts, int n)
+{
+	for (int i = 0; i < n; i++) { char p[400]; snprintf(p, sizeof p, "%s/%s%s", dir, name, exts[i]); put_bin(p, exts[i], strlen(exts[i])); }
+}
+static uint32_t gm_job(const char *disc, const char *what)
+{
+	AuditRow e[32];
+	int n = audit_events(AU_FILES, disc, e, 32);
+	for (int i = 0; i < n; i++) if (!strcmp(e[i].kind, "job") && !strcmp(e[i].what, what)) return e[i].job;
+	return 0;
+}
+static void games_file_scenarios()
+{
+	int bad = 0, sv = g_sfx_sv;
+	auto want = [&](bool ok, const char *what) { if (!ok) { printf("FAIL games files (%s): %s\n", sv ? "sv" : "en", what); bad++; } };
+	system("rm -rf out/gl out/audit && mkdir -p out/gl/dev_hdd0/PSXISO");
+	audit_init("out/audit", &vf_io);
+	audit_set_move_hooks(gm_moved_hook, gm_busy_hook);
+	snprintf(host_root, 256, "out/gl");
+	memset(host_exfat, 0, sizeof(int) * 8);
+	reset_all();
+	const char *H = "out/gl/dev_hdd0/PSXISO";
+	const char *AL = "Alundra (Europe) [SLES_011.35]";
+	gs_set(H, AL, 3, gs_log("Alundra", "SLES_011.35", "verified Alundra (Europe)").c_str());
+	const char *ext[] = {".md5", ".jpg"};
+	gm_files_of(H, AL, ext, 2);
+	gs_set(H, "Croc 2 (Europe) [SLES_020.88]", 3, gs_log("Croc 2", "SLES_020.88", NULL).c_str());
+	gs_set(H, "Driver", 3, NULL);
+	{   // Klonoa: a cue too big for the app to rewrite (its rename fails at the cue and is put back)
+		std::vector<uint8_t> img(3 * RAW_SIZE);
+		put_bin("out/gl/dev_hdd0/PSXISO/Klonoa.bin", img.data(), img.size());
+		std::string cue = "FILE \"Klonoa.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n";
+		while (cue.size() < 40000) cue += "REM padding padding padding\n";
+		gl_text("out/gl/dev_hdd0/PSXISO/Klonoa.cue", cue.c_str());
+	}
+	{   // Rayman: two tracks in their own files, named after the set
+		std::vector<uint8_t> img(2 * RAW_SIZE);
+		put_bin("out/gl/dev_hdd0/PSXISO/Rayman (Track 1).bin", img.data(), img.size());
+		put_bin("out/gl/dev_hdd0/PSXISO/Rayman (Track 2).bin", img.data(), img.size());
+		gl_text("out/gl/dev_hdd0/PSXISO/Rayman.cue", "FILE \"Rayman (Track 1).bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n"
+		                                              "FILE \"Rayman (Track 2).bin\" BINARY\n  TRACK 02 AUDIO\n    INDEX 01 00:00:00\n");
+	}
+	g_redump = RD_OFF;
+	g_cfg_primed = false;
+	system("rm -f out/psxrip.cfg");
+	snprintf(g_games_source, sizeof g_games_source, "hdd");
+	snprintf(g_name_pat, sizeof g_name_pat, "%%T [%%D]");
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	g_gl_stale = 1;
+	g_input_src = AU_PAD;
+	disc(0, "Motorhead", "Motorhead (USA)", "SLUS_007.17", 400);   // a disc in a drive: not the rename's preview
+	GamesView v;
+	gv_open(v);
+	gv_poll(v);
+	want(gv_listed(v) && v.nshown == 5, "five games");
+	// the list: △ to the trash
+	gs_find(v, "Alundra");
+	want(gv_can_trash(v) && !gv_can_empty(v), "△ offered on the games, START does not empty");
+	gframe("games-files-hints", v);
+	want(has_text(T(STR_HINT_TRASH)), "the list's △ hint");
+	// the detail view: △ to the trash, X rename
+	gv_input(v, B_CROSS);
+	gframe("games-files-detail", v);
+	want(v.mode == GV_DETAIL && has_text(T(STR_HINT_TRASH)) && has_text(T(STR_HINT_RENAME)), "the detail view's △ and X hints");
+	gv_input(v, B_CROSS);
+	want(v.want_rename == 1 && v.mode == GV_DETAIL, "X in the detail view asks for the file name view");
+	v.want_rename = 0;
+	// the file name view with the game as its preview (not the disc in the drive)
+	{
+		const Game &g = g_gl.g[v.shown[v.row]];
+		FnView f;
+		fn_open(f, &g);
+		fframe("games-rename-preview", f);
+		want(has_text("Alundra [SLES_011.35].bin") && has_text(AL) && !has_text("Motorhead") && has_text(T(STR_HINT_RENAME)), "the preview shows the selected game, now and new");
+		want(fn_input(f, B_START) == 2, "START renames");
+		FnView s0;
+		fn_open(s0, NULL);
+		fframe("games-filename-setting", s0);
+		want(has_text("Motorhead [SLUS_007.17].bin") && !has_text("Alundra") && fn_input(s0, B_START) == 0, "the setting's view: the drive's disc, no rename");
+	}
+	// rename: every file of the set, the cue's FILE line; the log's title stays
+	std::string log0 = gc_file("out/gl/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].log");
+	want(gm_move(v, GM_RENAME, "%T [%D]") == 0, "renamed");
+	const char *NEWN = "Alundra [SLES_011.35]";
+	int moved = 0, left = 0;
+	for (const char *e : {".bin", ".cue", ".log", ".md5", ".jpg"}) {
+		char a[300], b[300];
+		snprintf(a, sizeof a, "/dev_hdd0/PSXISO/%s%s", AL, e);
+		snprintf(b, sizeof b, "/dev_hdd0/PSXISO/%s%s", NEWN, e);
+		moved += vf_exists(b); left += vf_exists(a);
+	}
+	want(moved == 5 && left == 0, "all five files renamed");
+	std::string cue = gc_file("out/gl/dev_hdd0/PSXISO/Alundra [SLES_011.35].cue");
+	want(cue == "FILE \"Alundra [SLES_011.35].bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n", "the cue's FILE line renamed, the rest as it was");
+	want(gc_file("out/gl/dev_hdd0/PSXISO/Alundra [SLES_011.35].log") == log0 && log0.find("title=Alundra\n") != std::string::npos, "the log (its title= line) stays");
+	want(strstr(v.note, NEWN) != NULL, "the note names the new name");
+	gv_poll(v);
+	want(gs_at(v, "Alundra") && strstr(g_gl.d[g_gl.g[v.shown[v.row]].first].base, NEWN) && v.mode == GV_LIST, "the renamed game stays focused");
+	gframe("games-renamed", v);
+	uint32_t rj = gm_job("SLES_011.35:3", "rename");
+	{
+		AuditRow r[16];
+		int n = audit_rows(rj, r, 0, 16), mv = 0;
+		for (int i = 0; i < n; i++) mv += !strcmp(r[i].kind, "move") && r[i].dom == AU_FILES && !strncmp(r[i].what, "Alundra", 7);
+		want(rj && mv == 5, "one rename job with a move row per file");
+	}
+	// its undo (the audit screen's): the old names and the old cue back
+	char why[200];
+	want(audit_undo_job(rj, why, sizeof why) == 0 && vf_exists("/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].md5") && !vf_exists("/dev_hdd0/PSXISO/Alundra [SLES_011.35].bin"), "the rename undone");
+	want(gc_file("out/gl/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].cue").find("FILE \"Alundra (Europe) [SLES_011.35].bin\" BINARY\n") == 0, "the cue's FILE line back");
+	want(audit_undo_job(rj, why, sizeof why) == 0 && vf_exists("/dev_hdd0/PSXISO/Alundra [SLES_011.35].bin") && gc_file("out/gl/dev_hdd0/PSXISO/Alundra [SLES_011.35].cue") == cue, "redone");
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	// a set with tracks in their own files: each renamed, each FILE line
+	gs_find(v, "Rayman");
+	want(gm_move(v, GM_RENAME, "%T (Europe)") == 0 && vf_exists("/dev_hdd0/PSXISO/Rayman (Europe) (Track 1).bin") && vf_exists("/dev_hdd0/PSXISO/Rayman (Europe) (Track 2).bin") &&
+	     gc_file("out/gl/dev_hdd0/PSXISO/Rayman (Europe).cue").find("FILE \"Rayman (Europe) (Track 2).bin\" BINARY\n") != std::string::npos, "a set with track files renamed");
+	gv_poll(v);
+	// refused: a set of that name there, the same name
+	put_bin("out/gl/dev_hdd0/PSXISO/Croc 2 [SLES_020.88].log", "x", 1);
+	gs_find(v, "Croc 2");
+	want(gm_move(v, GM_RENAME, "%T [%D]") == -1 && vf_exists("/dev_hdd0/PSXISO/Croc 2 (Europe) [SLES_020.88].bin") && strstr(v.note, "Croc 2 [SLES_020.88]"), "a set of the new name there: refused");
+	gv_poll(v);
+	gframe("games-rename-exists", v);
+	remove("out/gl/dev_hdd0/PSXISO/Croc 2 [SLES_020.88].log");
+	gs_find(v, "Croc 2");
+	want(gm_move(v, GM_RENAME, "%T (%R) [%D]") == -1 && !strcmp(v.note, T(STR_GM_SAME)), "the same name: nothing to do");
+	gv_poll(v);
+	// a move that fails half-way (the cue cannot be rewritten): all back, and the screen says why
+	gs_find(v, "Klonoa");
+	want(gm_move(v, GM_RENAME, "%T (Fixed)") == -1 && vf_exists("/dev_hdd0/PSXISO/Klonoa.bin") && vf_exists("/dev_hdd0/PSXISO/Klonoa.cue") &&
+	     !vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).bin") && !vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).cue"), "a failed rename leaves the set whole");
+	{
+		char rt[200], m[300];
+		AuditReason rs = {};
+		rs.code = AW_CANNOT_MOVE; snprintf(rs.file, sizeof rs.file, "Klonoa.cue");   // its .bin moved first, then went back
+		av_reason(rs, rt, sizeof rt);
+		snprintf(m, sizeof m, T(STR_GM_NOT_MOVED), rt);
+		want(!strcmp(v.note, m), "the note says which file and that the rest went back");
+	}
+	gv_poll(v);
+	gs_find(v, "Klonoa");
+	gv_input(v, B_DOWN); gv_input(v, B_UP);   // (the note stays until the next button: draw it before)
+	gs_find(v, "Klonoa");
+	snprintf(v.note, sizeof v.note, T(STR_GM_NOT_MOVED), "Klonoa.cue");
+	gframe("games-move-failed", v);
+	// refused: a drive rips into it; its file list was cut by the scan
+	Card &k = g_cards[1];
+	k.job = 1;
+	snprintf(k.base, sizeof k.base, "/dev_hdd0/PSXISO/Driver");
+	gs_find(v, "Driver");
+	gv_input(v, B_TRIANGLE);
+	want(vf_exists("/dev_hdd0/PSXISO/Driver.bin") && !strcmp(v.note, T(STR_GC_BUSY)), "a set a drive rips into stays");
+	k.job = 0; k.base[0] = 0;
+	gs_find(v, "Driver");
+	g_gl.d[g_gl.g[v.shown[v.row]].first].files_cut = 1;
+	gv_input(v, B_TRIANGLE);
+	want(vf_exists("/dev_hdd0/PSXISO/Driver.bin") && !strcmp(v.note, T(STR_GM_CUT)), "a set whose files were cut stays");
+	g_gl.d[g_gl.g[v.shown[v.row]].first].files_cut = 0;
+	// △: to the trash (made on first use); the focus goes to the next game
+	gs_find(v, "Croc 2");
+	int row = v.row;
+	gv_input(v, B_TRIANGLE);
+	want(vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin") && vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].log") &&
+	     !vf_exists("/dev_hdd0/PSXISO/Croc 2 (Europe) [SLES_020.88].cue"), "the set in the trash");
+	gv_poll(v);
+	want(v.nshown == 4 && v.row == row && !gs_at(v, "Croc 2"), "gone from the list, the next one focused");
+	gframe("games-trashed", v);
+	want(has_text("Croc 2"), "the note names it");
+	gs_find(v, "Klonoa");
+	gv_input(v, B_CROSS);
+	gv_input(v, B_TRIANGLE);   // from the detail view: back in the list
+	want(v.mode == GV_LIST && vf_exists("/dev_hdd0/PSXISO/.trash/Klonoa.cue"), "trash from the detail view");
+	gv_poll(v);
+	g_files_busy = 1;
+	want(g_state_busy(), "busy while files move");
+	g_files_busy = 0;
+	// the trash: △ restores, START empties after a question
+	v.trash = 1;
+	gv_switch(v);
+	gv_poll(v);
+	want(gv_listed(v) && v.nshown == 2 && gv_can_empty(v), "two games in the trash");
+	gs_find(v, "Croc 2");
+	gframe("games-trash-actions", v);
+	want(has_text(T(STR_HINT_RESTORE)) && has_text(T(STR_HINT_EMPTY_TRASH)), "the trash's △ and START hints");
+	gv_input(v, B_TRIANGLE);
+	want(vf_exists("/dev_hdd0/PSXISO/Croc 2 (Europe) [SLES_020.88].bin") && !vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin"), "restored");
+	gv_poll(v);
+	uint32_t rest = gm_job("SLES_020.88:3", "restore"), tj = gm_job("SLES_020.88:3", "trash");
+	want(rest && tj && audit_undo_job(rest, why, sizeof why) == 0 && vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].cue"), "the restore undone: in the trash again");
+	gl_changed(); gl_open("t:hdd"); gv_poll(v);
+	gv_input(v, B_START);
+	want(v.mode == GV_CONFIRM, "START asks");
+	gframe("games-empty-ask", v);
+	{
+		uint64_t bytes;
+		int n = gm_trash_size(&bytes);
+		want(n == 2 && has_text(sv ? "2 spel" : "2 games") && has_text("MB"), "the question names the games and MB");
+	}
+	gv_input(v, B_CIRCLE);
+	want(v.mode == GV_LIST && vf_exists("/dev_hdd0/PSXISO/.trash/Klonoa.bin"), "O: nothing deleted");
+	gv_input(v, B_START);
+	gv_input(v, B_CROSS);
+	want(!vf_exists("/dev_hdd0/PSXISO/.trash/Klonoa.bin") && !vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].log") && vf_exists("/dev_hdd0/PSXISO/Driver.bin"), "emptied, nothing else");
+	gv_poll(v);
+	gframe("games-emptied", v);
+	want(gv_listed(v) && !g_gl.ng && strstr(v.note, sv ? "tömdes" : "emptied"), "the empty trash and the note");
+	{
+		uint32_t ej = gm_job(".trash", "empty");
+		AuditRow r[16];
+		int n = audit_rows(ej, r, 0, 16), del = 0;
+		for (int i = 0; i < n; i++) del += !strcmp(r[i].kind, "delete") && !r[i].reversible;
+		want(ej && del == 5, "one empty job, a delete row (a record) per file");
+		int redo;
+		AuditReason rs;
+		want(!audit_job_reversible(ej, &rs, &redo), "emptying cannot be undone");
+		// the trash move's undo after emptying: refused, nothing made
+		want(audit_undo_job(tj, why, sizeof why, &rs) == -1 && rs.code == AW_TRASH_EMPTIED && !vf_exists("/dev_hdd0/PSXISO/Croc 2 (Europe) [SLES_020.88].bin"), "the trash's undo after emptying is refused");
+	}
+	gv_close(v);
+	// the audit screen: Files, by disc; the trash's emptying apart
+	{
+		AuditView a;
+		audit_view_init(a);
+		want(a.n == 3, "three domains");
+		aframe("audit-files-domains", a);
+		want(has_text(T(STR_AUDIT_DOM_FILES)), "the Files domain");
+		a.row = 2;
+		audit_open(a);
+		aframe("audit-files", a);
+		want(a.level == 1 && a.dom == AU_FILES && a.n == 5 && has_text(T(STR_GL_V_TRASH)) && has_text("Croc 2") && has_text("Alundra"), "Files lists the discs and the trash");
+		int ci = -1;
+		for (int i = 0; i < a.n; i++) if (!strcmp(av_keys[i], "SLES_020.88:3")) ci = i;
+		a.row = ci < 0 ? 0 : ci;
+		av_fix(a);
+		audit_open(a);
+		aframe("audit-files-disc", a);
+		want(a.level == 2 && a.n == 2 && has_text(T(STR_HINT_RESTORE)) && has_text(T(STR_HINT_TRASH)), "Croc 2's events: trash, restore");
+		// the newest trash job: its undo refused (emptied), the reason shown
+		for (a.row = 0; a.row < a.n && strcmp(av_rows[a.row].what, "trash"); a.row++) {}
+		av_fix(a);
+		aframe("audit-files-refused", a);
+		char rt[200];
+		AuditReason rs = {};
+		rs.code = AW_TRASH_EMPTIED; snprintf(rs.file, sizeof rs.file, "Croc 2 (Europe) [SLES_020.88].log");
+		av_reason(rs, rt, sizeof rt);
+		want(!audit_can_undo(a) && has_text(sv ? "Papperskorgen har tömts" : "The trash was emptied"), "the job's undo refused: the trash was emptied");
+		audit_open(a);
+		audit_nav(a, B_DOWN);   // its first file
+		aframe("audit-files-rows", a);
+		want(a.level == 3 && has_text("Croc 2 (Europe) [SLES_020.88].bin") && has_text(sv ? "Papperskorgen har tömts" : "The trash was emptied"),
+		     "the move rows: the file, and why it cannot go back");
+		audit_back(a); audit_back(a);
+		// Alundra's rename: undone and redone from the screen
+		for (a.row = 0; a.row < a.n && strcmp(av_keys[a.row], "SLES_011.35:3"); a.row++) {}
+		av_fix(a);
+		audit_open(a);
+		want(a.level == 2 && a.n == 1 && audit_can_undo(a) && !audit_is_redo(a), "the rename can be undone");
+		aframe("audit-files-rename", a);
+		want(has_text(T(STR_HINT_RENAME)), "the rename event");
+		want(audit_undo(a, why, sizeof why) == 0 && vf_exists("/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].bin") && audit_is_redo(a), "undone from the screen, then a redo");
+		want(g_gl_stale && !g_files_busy, "the game list reads again, not busy after");
+		// the trash's empty job: shown, not undoable
+		audit_back(a);
+		for (a.row = 0; a.row < a.n && strcmp(av_keys[a.row], ".trash"); a.row++) {}
+		av_fix(a);
+		audit_open(a);
+		aframe("audit-files-empty", a);
+		want(a.level == 2 && a.n == 1 && !audit_can_undo(a) && has_text(T(STR_HINT_EMPTY_TRASH)), "the emptying: listed, not undoable");
+		audit_open(a);
+		aframe("audit-files-deleted", a);
+		want(has_text(sv ? "Raderad:" : "Deleted:"), "its delete rows");
+	}
+	audit_set_move_hooks(NULL, NULL);
+	host_root[0] = 0;
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	snprintf(g_games_source, sizeof g_games_source, "all");
+	snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	system("rm -rf out/audit");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   game list files (%s): rename + cue, undo/redo, refusals, failed move put back, trash, restore, empty, audit Files\n", sv ? "sv" : "en");
+}
+
 // A prepared log: Alundra (a rip, and a repair that wrote 1015 sectors: 1017 rows), Final Fantasy IX
 // (a rip, a check, and a rip that was cancelled after writing a sector), and settings from every source.
 static void audit_scenarios()
@@ -1795,9 +2091,11 @@ int main()
 	host_lang = PS3_LANG_SWEDISH; lang_init(); g_sfx_sv = 1;
 	games_scenarios();
 	games_check_scenarios();
+	games_file_scenarios();
 	host_lang = PS3_LANG_ENGLISH_US; lang_init(); g_sfx_sv = 0;
 	games_scenarios();
 	games_check_scenarios();
+	games_file_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

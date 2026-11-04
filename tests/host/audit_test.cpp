@@ -1199,6 +1199,262 @@ static void redo_original_row(int &bad)
 	audit_set_hooks(NULL, NULL);
 }
 
+
+// ---- moves (rename, trash, restore, empty) ----
+// Real files under ./out/mv; the app's file layer is stdio here. A rename can be made to fail for
+// one file (a blocked destination), the moved hook to fail for one (a .cue that cannot be rewritten).
+static const char *MV = "./out/mv";
+static std::string g_rename_fail;   // a rename whose source ends with this fails
+static int mv_rename(const char *a, const char *b)
+{
+	size_t l = strlen(a);
+	if (!g_rename_fail.empty() && l >= g_rename_fail.size() && !strcmp(a + l - g_rename_fail.size(), g_rename_fail.c_str())) return -1;
+	return rename(a, b);
+}
+static int mv_exists(const char *p) { struct stat st; return stat(p, &st) == 0; }
+static const AuditIo IOM = {io_open, io_read, io_write, io_seek, io_close, mv_rename, mv_exists};
+static int g_moved_calls;
+static std::string g_moved_fail, g_moved_last;
+static int mv_moved(const char *from, const char *to)
+{
+	g_moved_calls++;
+	g_moved_last = std::string(from) + ">" + to;
+	size_t l = strlen(to);
+	return !g_moved_fail.empty() && l >= g_moved_fail.size() && !strcmp(to + l - g_moved_fail.size(), g_moved_fail.c_str()) ? -1 : 0;
+}
+static std::string g_busy;
+static int mv_busy(const char *p) { return !g_busy.empty() && strstr(p, g_busy.c_str()) != NULL; }
+
+static void mv_fresh()
+{
+	fresh();
+	audit_init(DIR, &IOM);
+	char cmd[128];
+	snprintf(cmd, sizeof cmd, "rm -rf %s && mkdir -p %s/.trash", MV, MV);
+	if (system(cmd)) {}
+	g_rename_fail.clear(); g_moved_fail.clear(); g_busy.clear();
+	g_moved_calls = 0;
+	audit_set_move_hooks(mv_moved, mv_busy);
+}
+static std::string mvp(const char *name) { return std::string(MV) + "/" + name; }
+static void mv_put(const char *name) { FILE *f = fopen(mvp(name).c_str(), "wb"); if (f) { fputs(name, f); fclose(f); } }
+static bool mv_has(const char *name) { return mv_exists(mvp(name).c_str()); }
+// a set of files moved from one name to another (in MV): rename A -> B, or into .trash
+struct MvSet { std::string from[4], to[4]; const char *f[4], *t[4]; int n; };
+static void mv_set(MvSet &m, const char *const *names, int n, const char *const *targets)
+{
+	m.n = n;
+	for (int i = 0; i < n; i++) {
+		m.from[i] = mvp(names[i]); m.to[i] = mvp(targets[i]);
+		m.f[i] = m.from[i].c_str(); m.t[i] = m.to[i].c_str();
+	}
+}
+static uint32_t newest_job()
+{
+	AuditRow e[4];
+	return audit_events(AU_FILES, NULL, e, 4) > 0 ? e[0].job : 0;
+}
+static int rows_of_kind(uint32_t job, const char *kind, AuditRow *out = NULL, int max = 0)
+{
+	AuditRow r[32];
+	int n = audit_rows(job, r, 0, 32), k = 0;
+	for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, kind)) { if (out && k < max) out[k] = r[i]; k++; }
+	return k;
+}
+
+static void move_rename_and_undo(int &bad)
+{
+	mv_fresh();
+	const char *a[] = {"A [X].bin", "A [X].cue", "A [X].log"}, *b[] = {"B [X].bin", "B [X].cue", "B [X].log"};
+	for (const char *f : a) mv_put(f);
+	MvSet m;
+	mv_set(m, a, 3, b);
+	char why[200] = "";
+	AuditReason rs;
+	CHECK(audit_move(AU_PAD, "X:3", "A", "rename", m.f, m.t, 3, why, sizeof why, &rs) == 0 && rs.code == AW_NONE);
+	CHECK(!mv_has(a[0]) && !mv_has(a[1]) && !mv_has(a[2]) && mv_has(b[0]) && mv_has(b[1]) && mv_has(b[2]));
+	CHECK(g_moved_calls == 3 && g_moved_last == m.from[2] + ">" + m.to[2]);
+	// one job in the Files domain, a move row per file, finished
+	AuditRow e[4];
+	CHECK(audit_events(AU_FILES, "X:3", e, 4) == 1 && !strcmp(e[0].kind, "job") && !strcmp(e[0].what, "rename") && !strcmp(e[0].before, "A") && e[0].dom == AU_FILES && e[0].src == AU_PAD);
+	CHECK(audit_events(AU_RIPS, NULL, e, 4) == 0);
+	uint32_t job = newest_job();
+	AuditRow mv[4], res[2];
+	CHECK(rows_of_kind(job, "move", mv, 4) == 3);
+	for (int i = 0; i < 3; i++) CHECK(!strcmp(mv[i].before, m.f[i]) && !strcmp(mv[i].after, m.t[i]) && !strcmp(mv[i].what, "A") && mv[i].dom == AU_FILES && mv[i].reversible && !mv[i].undone);
+	CHECK(rows_of_kind(job, "result", res, 2) == 1 && !strcmp(res[0].after, "finished") && res[0].dom == AU_FILES);
+	int redo = -1;
+	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 0);
+	// the job's undo: every file back, an undo row each
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && rs.code == AW_NONE);
+	CHECK(mv_has(a[0]) && mv_has(a[1]) && mv_has(a[2]) && !mv_has(b[0]) && !mv_has(b[1]) && !mv_has(b[2]));
+	CHECK(rows_of_kind(job, "undo") == 3);
+	CHECK(rows_of_kind(job, "move", mv, 4) == 3 && mv[0].undone && mv[2].undone && mv[1].redo && mv[1].reversible);
+	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 1);
+	// redo: moved again
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has(b[0]) && mv_has(b[1]) && mv_has(b[2]) && !mv_has(a[1]));
+	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 0);
+	// one file's row undoes the whole set (a set is never split), and redoes it the same way
+	CHECK(audit_undo_row(mv[1].id, why, sizeof why, &rs) == 0 && mv_has(a[0]) && mv_has(a[1]) && mv_has(a[2]) && !mv_has(b[0]));
+	CHECK(audit_undo_row(mv[1].id, why, sizeof why, &rs) == 0 && mv_has(b[0]) && mv_has(b[1]) && mv_has(b[2]) && !mv_has(a[2]));
+	CHECK(rows_of_kind(job, "undo") == 12);
+	CHECK(g_moved_calls == 3 * 5);   // every move, the undos and redos too, told the app
+	// after a reload the same (the job's domain and result come from the log)
+	audit_init(DIR, &IOM);
+	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 0);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has(a[0]) && !mv_has(b[0]));
+	CHECK(audit_events(AU_FILES, NULL, e, 4) == 1 && e[0].dom == AU_FILES);
+	audit_set_move_hooks(NULL, NULL);
+}
+
+static void move_refusals(int &bad)
+{
+	mv_fresh();
+	const char *a[] = {"A.bin", "A.cue"}, *b[] = {"B.bin", "B.cue"};
+	for (const char *f : a) mv_put(f);
+	MvSet m;
+	mv_set(m, a, 2, b);
+	char why[200] = "";
+	AuditReason rs;
+	AuditRow e[4];
+	// a target taken: refused before anything moves, no job
+	mv_put("B.cue");
+	CHECK(audit_move(AU_PAD, "", "A", "rename", m.f, m.t, 2, why, sizeof why, &rs) == -1 && rs.code == AW_MOVE_TAKEN && !strcmp(rs.file, "B.cue"));
+	CHECK(mv_has("A.bin") && mv_has("A.cue") && !mv_has("B.bin") && audit_events(AU_FILES, NULL, e, 4) == 0);
+	remove(mvp("B.cue").c_str());
+	// a file missing
+	remove(mvp("A.cue").c_str());
+	CHECK(audit_move(AU_PAD, "", "A", "rename", m.f, m.t, 2, why, sizeof why, &rs) == -1 && rs.code == AW_MOVE_GONE && !strcmp(rs.file, "A.cue") && mv_has("A.bin"));
+	mv_put("A.cue");
+	// busy (a drive rips into it)
+	g_busy = "A.bin";
+	CHECK(audit_move(AU_PAD, "", "A", "rename", m.f, m.t, 2, why, sizeof why, &rs) == -1 && rs.code == AW_FILE_BUSY && mv_has("A.bin") && audit_events(AU_FILES, NULL, e, 4) == 0);
+	g_busy.clear();
+	// a path too long for the log
+	std::string longp = mvp(std::string(200, 'x').c_str());
+	const char *lf[] = {m.f[0]}, *lt[] = {longp.c_str()};
+	CHECK(audit_move(AU_PAD, "", "A", "rename", lf, lt, 1, why, sizeof why, &rs) == -1 && rs.code == AW_TOO_LONG && mv_has("A.bin"));
+	// done; then the old place taken: the undo is refused and moves nothing
+	CHECK(audit_move(AU_PAD, "", "A", "rename", m.f, m.t, 2, why, sizeof why, &rs) == 0);
+	uint32_t job = newest_job();
+	mv_put("A.bin");
+	int redo;
+	CHECK(audit_job_reversible(job, &rs, &redo) == 0 && rs.code == AW_MOVE_TAKEN && !strcmp(rs.file, "A.bin"));
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == -1 && rs.code == AW_MOVE_TAKEN && mv_has("B.bin") && mv_has("B.cue") && !mv_has("A.cue"));
+	AuditRow mv[2];
+	CHECK(rows_of_kind(job, "move", mv, 2) == 2 && mv[0].reversible == 0 && mv[0].why == AW_MOVE_TAKEN && mv[1].reversible == 1);
+	CHECK(audit_undo_row(mv[1].id, why, sizeof why, &rs) == -1 && rs.code == AW_MOVE_TAKEN && mv_has("B.cue"));
+	CHECK(rows_of_kind(job, "undo") == 0);
+	remove(mvp("A.bin").c_str());
+	// a file gone since
+	remove(mvp("B.cue").c_str());
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == -1 && rs.code == AW_MOVE_GONE && !strcmp(rs.file, "B.cue") && mv_has("B.bin"));
+	mv_put("B.cue");
+	// busy: refused
+	g_busy = "B.bin";
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == -1 && rs.code == AW_FILE_BUSY && mv_has("B.bin"));
+	g_busy.clear();
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("A.bin") && mv_has("A.cue"));
+	// redo refused when the new place is taken now
+	mv_put("B.bin");
+	CHECK(audit_job_reversible(job, &rs, &redo) == 0 && redo == 1 && rs.code == AW_MOVE_TAKEN);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == -1 && rs.code == AW_MOVE_TAKEN && mv_has("A.bin") && mv_has("A.cue"));
+	audit_set_move_hooks(NULL, NULL);
+}
+
+// One file of a set cannot be moved: the ones moved go back, the job failed and is never redone.
+static void move_partial_failure(int &bad)
+{
+	mv_fresh();
+	const char *a[] = {"G.bin", "G.cue", "G.log"}, *t[] = {".trash/G.bin", ".trash/G.cue", ".trash/G.log"};
+	for (const char *f : a) mv_put(f);
+	MvSet m;
+	mv_set(m, a, 3, t);
+	char why[200] = "";
+	AuditReason rs;
+	g_rename_fail = "/G.cue";   // a blocked destination
+	CHECK(audit_move(AU_PAD, "G:1", "G", "trash", m.f, m.t, 3, why, sizeof why, &rs) == -1 && rs.code == AW_CANNOT_MOVE && !strcmp(rs.file, "G.cue"));
+	CHECK(mv_has("G.bin") && mv_has("G.cue") && mv_has("G.log") && !mv_has(".trash/G.bin") && !mv_has(".trash/G.log"));
+	uint32_t job = newest_job();
+	AuditRow mv[4], res[2];
+	CHECK(rows_of_kind(job, "move", mv, 4) == 1 && mv[0].undone == 1 && rows_of_kind(job, "undo") == 1);
+	CHECK(rows_of_kind(job, "result", res, 2) == 1 && !strcmp(res[0].after, "failed"));
+	int redo;
+	CHECK(audit_job_reversible(job, &rs, &redo) == 0 && redo == 1 && rs.code == AW_MOVE_FAILED);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == -1 && rs.code == AW_MOVE_FAILED && mv_has("G.bin") && !mv_has(".trash/G.bin"));
+	g_rename_fail.clear();
+	// the app's hook fails for the last file (its .cue could not be rewritten): the same
+	g_moved_fail = "/.trash/G.log";
+	CHECK(audit_move(AU_PAD, "G:1", "G", "trash", m.f, m.t, 3, why, sizeof why, &rs) == -1 && rs.code == AW_CANNOT_MOVE && !strcmp(rs.file, "G.log"));
+	CHECK(mv_has("G.bin") && mv_has("G.cue") && mv_has("G.log") && !mv_has(".trash/G.bin") && !mv_has(".trash/G.cue") && !mv_has(".trash/G.log"));
+	job = newest_job();
+	CHECK(rows_of_kind(job, "move") == 2 && rows_of_kind(job, "undo") == 2);
+	g_moved_fail.clear();
+	// an undo that fails half-way puts back what it moved
+	CHECK(audit_move(AU_PAD, "G:1", "G", "trash", m.f, m.t, 3, why, sizeof why, &rs) == 0 && mv_has(".trash/G.log"));
+	job = newest_job();
+	g_rename_fail = "/.trash/G.bin";   // undo goes newest first: G.log, G.cue moved back, then G.bin fails
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == -1 && rs.code == AW_CANNOT_MOVE && !strcmp(rs.file, "G.bin"));
+	CHECK(mv_has(".trash/G.bin") && mv_has(".trash/G.cue") && mv_has(".trash/G.log") && !mv_has("G.cue") && !mv_has("G.log"));
+	g_rename_fail.clear();
+	CHECK(rows_of_kind(job, "move", mv, 4) == 3 && !mv[0].undone && !mv[1].undone && !mv[2].undone);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("G.bin") && mv_has("G.cue") && mv_has("G.log"));
+	audit_set_move_hooks(NULL, NULL);
+}
+
+// Trash, restore, empty: the undo of a trash move after the trash was emptied is refused with its
+// reason, and nothing is created.
+static void move_trash_restore_empty(int &bad)
+{
+	mv_fresh();
+	const char *a[] = {"T.bin", "T.cue"}, *t[] = {".trash/T.bin", ".trash/T.cue"};
+	for (const char *f : a) mv_put(f);
+	MvSet m, back;
+	mv_set(m, a, 2, t);
+	mv_set(back, t, 2, a);
+	char why[200] = "";
+	AuditReason rs;
+	CHECK(audit_move(AU_PAD, "T:1", "T", "trash", m.f, m.t, 2, why, sizeof why, &rs) == 0 && mv_has(".trash/T.bin"));
+	uint32_t trash = newest_job();
+	CHECK(audit_move(AU_PAD, "T:1", "T", "restore", back.f, back.t, 2, why, sizeof why, &rs) == 0 && mv_has("T.bin") && !mv_has(".trash/T.cue"));
+	uint32_t restore = newest_job();
+	CHECK(restore != trash);
+	// the restore's undo puts it back in the trash, the trash's undo is then refused (taken? no:
+	// it is in the trash again, so the trash job's undo works)
+	CHECK(audit_undo_job(restore, why, sizeof why, &rs) == 0 && mv_has(".trash/T.bin") && !mv_has("T.bin"));
+	// emptied: the files deleted, a job with a record row each
+	uint32_t e = audit_job_begin(AU_PAD, ".trash", "", "empty", AU_FILES);
+	for (int i = 0; i < 2; i++) { remove(m.t[i]); audit_note(e, AU_FILES, NULL, "delete", "T", m.t[i], ""); }
+	audit_job_end(e, "finished");
+	AuditRow d[4];
+	CHECK(rows_of_kind(e, "delete", d, 4) == 2 && !d[0].reversible && d[0].why == AW_RECORD && !strcmp(d[0].before, m.t[0]) && d[0].dom == AU_FILES);
+	int redo;
+	CHECK(audit_job_reversible(e, &rs, &redo) == 0);
+	CHECK(audit_undo_row(d[0].id, why, sizeof why, &rs) == -1 && rs.code == AW_RECORD);
+	// the trash move's undo: the trash was emptied; nothing created
+	CHECK(audit_job_reversible(trash, &rs, &redo) == 0 && rs.code == AW_TRASH_EMPTIED && !strcmp(rs.file, "T.cue"));   // newest first
+	CHECK(audit_undo_job(trash, why, sizeof why, &rs) == -1 && rs.code == AW_TRASH_EMPTIED);
+	CHECK(!mv_has("T.bin") && !mv_has("T.cue") && !mv_has(".trash/T.bin"));
+	// the restore's redo too (its files were in the trash)
+	CHECK(audit_undo_job(restore, why, sizeof why, &rs) == -1 && rs.code == AW_TRASH_EMPTIED && !mv_has("T.bin"));
+	AuditRow mv[2];
+	CHECK(rows_of_kind(trash, "move", mv, 2) == 2 && mv[0].why == AW_TRASH_EMPTIED);
+	// a file of the same name put in the trash later is not mistaken for one deleted before
+	mv_put("T.bin"); mv_put("T.cue");
+	CHECK(audit_move(AU_PAD, "T:1", "T", "trash", m.f, m.t, 2, why, sizeof why, &rs) == 0);
+	CHECK(audit_job_reversible(newest_job(), &rs, &redo) == 1 && redo == 0);
+	// the Files domain lists its discs apart from the rips
+	uint32_t rip = audit_job_begin(AU_PAD, "R:1", "Rip", "rip");
+	audit_job_end(rip, "finished");
+	char keys[8][96], names[8][96];
+	int n = audit_discs(keys, names, NULL, NULL, 8, AU_FILES);
+	CHECK(n == 2 && !strcmp(keys[0], "T:1") && !strcmp(keys[1], ".trash"));
+	n = audit_discs(keys, names, NULL, NULL, 8, AU_RIPS);
+	CHECK(n == 1 && !strcmp(keys[0], "R:1"));
+	CHECK(audit_discs(keys, names, NULL, NULL, 8) == 3);
+	audit_set_move_hooks(NULL, NULL);
+}
+
 int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
@@ -1218,6 +1474,8 @@ int main()
 		{"setting_values", setting_values}, {"undo_progress", undo_progress},
 		{"redo_sector_chain", redo_sector_chain}, {"redo_refused", redo_refused}, {"redo_setting_chain", redo_setting_chain},
 		{"redo_job", redo_job}, {"redo_disc", redo_disc}, {"redo_original_row", redo_original_row},
+		{"move_rename_and_undo", move_rename_and_undo}, {"move_refusals", move_refusals},
+		{"move_partial_failure", move_partial_failure}, {"move_trash_restore_empty", move_trash_restore_empty},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {

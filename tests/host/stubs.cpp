@@ -160,7 +160,7 @@ int vf_printf(VFile *f, const char *fmt, ...)
 int vf_close(VFile *f) { int r = fclose(f->f); free(f); return r; }
 int vf_unlink(const char *path) { char b[512]; return unlink(hp(path, b, sizeof b)); }
 int vf_rename(const char *from, const char *to) { char a[512], b[512]; return rename(hp(from, a, sizeof a), hp(to, b, sizeof b)); }
-int vf_mkdir(const char *) { return 0; }
+int vf_mkdir(const char *path) { char b[512]; struct stat st; const char *p = hp(path, b, sizeof b); return mkdir(p, 0777) == 0 || (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) ? 0 : -1; }
 int vf_scan(VfVolume *out, int max)
 {
 	int n = 0;

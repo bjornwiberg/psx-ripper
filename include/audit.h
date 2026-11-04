@@ -31,7 +31,14 @@ enum AuditWhy {
 	AW_NOTHING,           // a job or disc with nothing (left) to undo
 	AW_NO_DISC,           // no disc given
 	AW_REPLACED,          // the file was ripped again since: the row's bytes belong to an older image (row, file)
-	AW_STOPPED            // the undo was stopped (the app is closing); the rows before stay undone (row)
+	AW_STOPPED,           // the undo was stopped (the app is closing); the rows before stay undone (row)
+	AW_MOVE_TAKEN,        // a file is in the way where a move would put one (row, file)
+	AW_MOVE_GONE,         // the file a move would take is gone (row, file)
+	AW_TRASH_EMPTIED,     // the file a move would take was deleted when the trash was emptied (row, file)
+	AW_FILE_BUSY,         // a drive or a check works on the file now (row, file)
+	AW_CANNOT_MOVE,       // the file could not be moved (row, file); the files moved before went back
+	AW_TOO_LONG,          // a path is too long to be kept in the log (file)
+	AW_MOVE_FAILED        // the move failed and was put back: it is never done again (row)
 };
 struct AuditReason {
 	AuditWhy code;
@@ -47,6 +54,9 @@ struct AuditIo {
 	size_t (*write)(void *f, const void *p, size_t n);
 	int (*seek)(void *f, uint64_t pos);
 	int (*close)(void *f);
+	// moves (rename, trash): NULL = stdio rename / stat
+	int (*rename)(const char *from, const char *to);   // 0 = moved; never over an existing file
+	int (*exists)(const char *path);                    // 1 = there
 };
 
 struct AuditRow {
@@ -69,8 +79,9 @@ struct AuditRow {
 // Creates the directory and reads the next row id and job id from the log. A half-written last
 // line (power loss) is dropped. May be called again to reload.
 void audit_init(const char *dir, const AuditIo *io);
-// Starts a job (`what` = rip | repair | check, `name` = display name, kept in the row's `before`).
-uint32_t audit_job_begin(AuditSrc src, const char *disc, const char *name, const char *what);
+// Starts a job (`what` = rip | repair | check in AU_RIPS, rename | trash | restore | empty in AU_FILES;
+// `name` = display name, kept in the row's `before`). Its job and result rows are in `dom`.
+uint32_t audit_job_begin(AuditSrc src, const char *disc, const char *name, const char *what, AuditDom dom = AU_RIPS);
 // A finished rip names the image it made (`image`, kept in its result row): rows of older jobs on
 // that file are then never undone, their bytes belong to the image it replaced.
 void audit_job_end(uint32_t job, const char *result, const char *image = NULL);
@@ -86,8 +97,8 @@ void audit_setting_private(AuditSrc src, const char *key, const char *before, co
 int audit_setting_values(char (*keys)[48], char (*vals)[192], int max);
 
 // Queries; each returns how many it wrote into out.
-// One entry per disc that has rows, newest activity first.
-int audit_discs(char (*keys)[96], char (*names)[96], int *events, uint32_t *last_t, int max);
+// One entry per disc that has rows (of domain `dom`; -1 = any), newest activity first.
+int audit_discs(char (*keys)[96], char (*names)[96], int *events, uint32_t *last_t, int max, int dom = -1);
 // Events (job rows and rows outside any job, like settings) of a domain, newest first.
 // `disc` NULL or "" = any disc.
 int audit_events(AuditDom dom, const char *disc, AuditRow *out, int max);
@@ -131,6 +142,27 @@ void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
 // undone so far stay undone, the recheck still runs). NULL = none.
 #define AUDIT_TICK 64
 void audit_set_progress(int (*tick)(uint32_t done, uint32_t total));
+// Moves files as one job in AU_FILES (`what` = rename | trash | restore, `name` = the game's name):
+// from[i] -> to[i], each a `move` row (before = from, after = to). Refused before anything moves when
+// a path is too long for the log, a file is busy, a from is missing or a to is taken (no job then).
+// When a move fails (or the moved hook does), the files moved so far go back, newest first, each with
+// an `undo` row, and the job ends "failed": a set never stays split, and a failed job is never
+// redone. Returns 0 when every file moved, else -1 with why[] and rs.
+//
+// Undo of moves: a move row, an undo row of one, or its job undo the job's moves together (a set is
+// never split): newest first, each back from `after` to `before`; when all are undone the undo is a
+// redo, oldest first, before -> after again (only for a job that finished). Every file is checked
+// first (the file there, its place free, not busy; a file deleted by an `empty` job since: the
+// trash was emptied); a refusal moves nothing. A move that fails then puts back the ones done.
+// Emptying the trash: a job `empty` with a `delete` row per deleted file (before = its path), a
+// record: never undone.
+int audit_move(AuditSrc src, const char *disc, const char *name, const char *what,
+               const char *const *from, const char *const *to, int n, char *why, size_t wn, AuditReason *rs = NULL);
+// moved (may be NULL) is called after each file moved (also by an undo or a rollback), without the
+// lock; nonzero = it failed (the move counts as failed and is put back). busy (may be NULL): 1 when
+// the file must not be moved now (a drive rips into it, a check reads it).
+void audit_set_move_hooks(int (*moved)(const char *from, const char *to), int (*busy)(const char *path));
+
 // The audit_mb setting in bytes (default 256 MB). When the job<N>.bin files together exceed it, the
 // oldest are deleted, never the file of a running job; their rows stay, no longer reversible.
 // Applies at once.
