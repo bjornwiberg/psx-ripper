@@ -4667,7 +4667,11 @@ static void usb_presence_thread(void *arg)
 {
 	int was[USBODD_DRIVES];   // disc in USB drive n: -1 unknown, 0 no, 1 yes
 	int fails[USBODD_DRIVES];        // commands in a row that got no answer at all
-	for (int i = 0; i < USBODD_DRIVES; i++) { was[i] = -1; fails[i] = 0; }
+	// Until then after a drive connects (at app start too) a disc that shows up was already in it.
+	// A SuperDrive with a disc parked in it first answers "no medium" and reports the disc only
+	// after the unlock, which looked like an insert and started a rip when the app started.
+	uint64_t settle[USBODD_DRIVES];
+	for (int i = 0; i < USBODD_DRIVES; i++) { was[i] = -1; fails[i] = 0; settle[i] = 0; }
 	while (!exit_requested) {
 		usleep(2000 * 1000);
 		for (int i = 0; i < USBODD_DRIVES; i++) {
@@ -4699,6 +4703,7 @@ static void usb_presence_thread(void *arg)
 				if (port >= 0 && port < 8 && g_usbcfg[port].set) card_from(k, g_usbcfg[port]);
 				k.state = DISC_NONE; k.tried = 0; k.base[0] = 0;
 				logf("usb drive %d: %s, port %d", i, usbodd_name(i), port);
+				settle[i] = now_ms() + 20000;
 				g_redraw = 2;
 			}
 			const uint8_t tur[6] = {0};
@@ -4714,10 +4719,12 @@ static void usb_presence_thread(void *arg)
 			int now = !(sk == 0x02 && (r >> 8 & 0xFF) == 0x3A);
 			if (!now && was[i] != 0) usbodd_unlock(i);   // without it the slot does not take a disc
 			// the first answer after the drive connected (or a job on it ended) tells whether a disc
-			// was already in it: part of the start, not an insert. The SuperDrive only takes a disc
-			// when it is unlocked, which the app does, so any disc that appears after an empty answer
+			// was already in it: part of the start, not an insert. So is a disc that appears in the
+			// first 20 s after the drive connected (see settle). The SuperDrive only takes a disc when
+			// it is unlocked, which the app does, so a disc that appears after an empty answer later
 			// was put in, and starts a rip when the drive's settings say so.
-			if (was[i] == 0 && now) { k.present = 1; k.inserted = 1; logf("usb drive %d (port %d): disc inserted", i, usbodd_port(i)); }
+			if (was[i] == 0 && now && now_ms() < settle[i]) { k.present = 1; k.inserted = 0; logf("usb drive %d (port %d): a disc is in it (found while the drive settled)", i, usbodd_port(i)); }
+			else if (was[i] == 0 && now) { k.present = 1; k.inserted = 1; logf("usb drive %d (port %d): disc inserted", i, usbodd_port(i)); }
 			if (was[i] == 1 && !now) { k.present = 0; k.inserted = 0; logf("usb drive %d (port %d): disc removed", i, usbodd_port(i)); }
 			if (was[i] == -1) { k.present = now; logf("usb drive %d (port %d): %s", i, usbodd_port(i), now ? "a disc is in it" : "empty"); }
 			if (was[i] != now) g_redraw = 2;

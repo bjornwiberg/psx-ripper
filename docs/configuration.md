@@ -14,7 +14,7 @@ app writes the whole file again.
 | `retries` | 1, 2, 4, 8, 16, 32 | Re-reads on read errors (the standard for all drives) |
 | `speed` | 0 = max, 1 = 8x, 2 = 4x, 3 = 2x | Read speed |
 | `eject` | 0 / 1 | Eject the disc when done |
-| `autostart` | 0 / 1 | Rip a disc when it is inserted (a disc already ripped there with known errors is repaired instead) |
+| `autostart` | 0 / 1 | Rip a disc when it is inserted while the app runs, not one already in a drive when the app starts or the drive connects (a disc already ripped there with known errors is repaired instead) |
 | `redump` | 0 = off, 1 = online, 2 = local copy | Check against Redump |
 | `check` | 0 = off, 1 = check and re-read, 2 = bit-perfect | Sector check |
 | `drive_bd`, `drive_usb0` … `7` | `retries,speed,eject,autostart,check` | One drive's own settings instead of the standard (SELECT on its tab); `-1` = the standard |
