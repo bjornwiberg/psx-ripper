@@ -1419,8 +1419,7 @@ static void move_trash_restore_empty(int &bad)
 	CHECK(audit_move(AU_PAD, "T:1", "T", "restore", back.f, back.t, 2, why, sizeof why, &rs) == 0 && mv_has("T.bin") && !mv_has(".trash/T.cue"));
 	uint32_t restore = newest_job();
 	CHECK(restore != trash);
-	// the restore's undo puts it back in the trash, the trash's undo is then refused (taken? no:
-	// it is in the trash again, so the trash job's undo works)
+	// the restore's undo puts it back in the trash (where the trash job's undo would find it again)
 	CHECK(audit_undo_job(restore, why, sizeof why, &rs) == 0 && mv_has(".trash/T.bin") && !mv_has("T.bin"));
 	// emptied: the files deleted, a job with a record row each
 	uint32_t e = audit_job_begin(AU_PAD, ".trash", "", "empty", AU_FILES);
@@ -1442,7 +1441,13 @@ static void move_trash_restore_empty(int &bad)
 	// a file of the same name put in the trash later is not mistaken for one deleted before
 	mv_put("T.bin"); mv_put("T.cue");
 	CHECK(audit_move(AU_PAD, "T:1", "T", "trash", m.f, m.t, 2, why, sizeof why, &rs) == 0);
-	CHECK(audit_job_reversible(newest_job(), &rs, &redo) == 1 && redo == 0);
+	uint32_t trash2 = newest_job();
+	CHECK(audit_job_reversible(trash2, &rs, &redo) == 1 && redo == 0);
+	// the older trash job's undo does not take the set trashed later (its files were deleted since)
+	CHECK(audit_job_reversible(trash, &rs, &redo) == 0 && rs.code == AW_TRASH_EMPTIED);
+	CHECK(audit_undo_job(trash, why, sizeof why, &rs) == -1 && rs.code == AW_TRASH_EMPTIED && mv_has(".trash/T.bin") && mv_has(".trash/T.cue") && !mv_has("T.bin"));
+	CHECK(audit_undo_job(restore, why, sizeof why, &rs) == -1 && rs.code == AW_TRASH_EMPTIED && mv_has(".trash/T.bin"));
+	CHECK(audit_undo_job(trash2, why, sizeof why, &rs) == 0 && mv_has("T.bin") && mv_has("T.cue") && !mv_has(".trash/T.cue"));
 	// the Files domain lists its discs apart from the rips
 	uint32_t rip = audit_job_begin(AU_PAD, "R:1", "Rip", "rip");
 	audit_job_end(rip, "finished");
@@ -1452,6 +1457,95 @@ static void move_trash_restore_empty(int &bad)
 	n = audit_discs(keys, names, NULL, NULL, 8, AU_RIPS);
 	CHECK(n == 1 && !strcmp(keys[0], "R:1"));
 	CHECK(audit_discs(keys, names, NULL, NULL, 8) == 3);
+	audit_set_move_hooks(NULL, NULL);
+}
+
+// The app's part fails for a file and so does the rename that would put it back: it is counted as
+// lost (its own reason, its row kept), and an undo of the job later brings the set together again.
+static int g_rename_fail_n = -1;   // failures left for g_rename_fail (-1 = every time)
+static int mv_rename_n(const char *a, const char *b)
+{
+	size_t l = strlen(a);
+	if (g_rename_fail_n && !g_rename_fail.empty() && l >= g_rename_fail.size() && !strcmp(a + l - g_rename_fail.size(), g_rename_fail.c_str())) {
+		if (g_rename_fail_n > 0) g_rename_fail_n--;
+		return -1;
+	}
+	return rename(a, b);
+}
+static void move_put_back_fails(int &bad)
+{
+	mv_fresh();
+	static const AuditIo IOC = {io_open, io_read, io_write, io_seek, io_close, mv_rename_n, mv_exists};
+	audit_init(DIR, &IOC);
+	const char *a[] = {"P.bin", "P.cue", "P.log"}, *t[] = {".trash/P.bin", ".trash/P.cue", ".trash/P.log"};
+	for (const char *f : a) mv_put(f);
+	MvSet m;
+	mv_set(m, a, 3, t);
+	char why[200] = "";
+	AuditReason rs;
+	g_moved_fail = "/.trash/P.cue";    // its .cue cannot be rewritten
+	g_rename_fail = "/.trash/P.cue";   // and it cannot go back
+	g_rename_fail_n = -1;
+	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 3, why, sizeof why, &rs) == -1);
+	CHECK(rs.code == AW_NOT_PUT_BACK && !strcmp(rs.file, "P.cue") && rs.lba == 1 && strstr(why, "could not be moved back"));
+	CHECK(mv_has("P.bin") && mv_has(".trash/P.cue") && !mv_has("P.cue") && mv_has("P.log") && !mv_has(".trash/P.bin") && !mv_has(".trash/P.log"));
+	uint32_t job = newest_job();
+	AuditRow mv[4], res[2];
+	// the log is true: P.bin moved and back (undone), P.cue moved and not back
+	CHECK(rows_of_kind(job, "move", mv, 4) == 2 && mv[0].undone && !strcmp(mv[1].after, m.t[1]) && !mv[1].undone && rows_of_kind(job, "undo") == 1);
+	CHECK(rows_of_kind(job, "result", res, 2) == 1 && !strcmp(res[0].after, "failed"));
+	// later: the job's undo puts the cue back, the set is whole
+	g_moved_fail.clear(); g_rename_fail.clear();
+	int redo;
+	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 0);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("P.bin") && mv_has("P.cue") && mv_has("P.log") && !mv_has(".trash/P.cue"));
+	// the app's part fails, the file goes back, and the app's part of going back fails too: lost
+	g_moved_fail = ".cue";   // both ways
+	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 3, why, sizeof why, &rs) == -1 && rs.code == AW_NOT_PUT_BACK && !strcmp(rs.file, "P.cue") && rs.lba == 1);
+	CHECK(mv_has("P.bin") && mv_has("P.cue") && mv_has("P.log") && !mv_has(".trash/P.bin"));
+	// a rollback whose rename fails: the file stays moved with its row, counted
+	g_moved_fail = "/.trash/P.log";
+	g_rename_fail = "/.trash/P.bin";
+	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 3, why, sizeof why, &rs) == -1 && rs.code == AW_NOT_PUT_BACK && !strcmp(rs.file, "P.bin") && rs.lba == 1);
+	CHECK(mv_has(".trash/P.bin") && mv_has("P.cue") && mv_has("P.log"));
+	job = newest_job();
+	CHECK(rows_of_kind(job, "move", mv, 4) == 2 && !mv[0].undone && mv[1].undone && rows_of_kind(job, "undo") == 1);
+	g_moved_fail.clear(); g_rename_fail.clear();
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("P.bin") && !mv_has(".trash/P.bin"));
+	audit_set_move_hooks(NULL, NULL);
+	audit_init(DIR, &IOM);
+}
+
+// A rename that changes only the case: its target is the file itself on a case-blind file system,
+// not a file in the way.
+static bool mv_listed(const char *name)
+{
+	bool there = false;
+	char cmd[64], line[256];
+	snprintf(cmd, sizeof cmd, "ls %s", MV);
+	FILE *p = popen(cmd, "r");
+	while (p && fgets(line, sizeof line, p)) { line[strcspn(line, "\n")] = 0; if (!strcmp(line, name)) there = true; }
+	if (p) pclose(p);
+	return there;
+}
+static void move_case_only(int &bad)
+{
+	mv_fresh();
+	const char *a[] = {"Case.bin", "Case.cue"}, *b[] = {"CASE.bin", "CASE.cue"};
+	for (const char *f : a) mv_put(f);
+	MvSet m;
+	mv_set(m, a, 2, b);
+	char why[200] = "";
+	AuditReason rs;
+	CHECK(audit_move_check(m.f, m.t, 2, why, sizeof why, &rs) == 0);
+	CHECK(audit_move(AU_PAD, "", "Case", "rename", m.f, m.t, 2, why, sizeof why, &rs) == 0);
+	CHECK(mv_listed("CASE.bin") && mv_listed("CASE.cue") && !mv_listed("Case.bin"));
+	CHECK(audit_undo_job(newest_job(), why, sizeof why, &rs) == 0 && mv_listed("Case.bin") && !mv_listed("CASE.cue"));
+	// two targets that differ only in case are one file on a case-blind file system: refused
+	const char *c[] = {"Case.bin", "Case.cue"}, *d[] = {"X.bin", "x.BIN"};
+	MvSet m2;
+	mv_set(m2, c, 2, d);
+	CHECK(audit_move_check(m2.f, m2.t, 2, why, sizeof why, &rs) == -1 && rs.code == AW_MOVE_TAKEN);
 	audit_set_move_hooks(NULL, NULL);
 }
 
@@ -1476,6 +1570,7 @@ int main()
 		{"redo_job", redo_job}, {"redo_disc", redo_disc}, {"redo_original_row", redo_original_row},
 		{"move_rename_and_undo", move_rename_and_undo}, {"move_refusals", move_refusals},
 		{"move_partial_failure", move_partial_failure}, {"move_trash_restore_empty", move_trash_restore_empty},
+		{"move_put_back_fails", move_put_back_fails}, {"move_case_only", move_case_only},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {

@@ -167,7 +167,21 @@ static size_t au_read(void *f, void *p, size_t n) { return vf_read((VFile *)f, p
 static size_t au_write(void *f, const void *p, size_t n) { return vf_write((VFile *)f, p, n); }
 static int au_seek(void *f, uint64_t pos) { return vf_seek((VFile *)f, pos); }
 static int au_close(void *f) { return vf_close((VFile *)f); }
-static int au_rename(const char *a, const char *b) { return vf_rename(a, b); }
+// A move's rename never goes over a file: the internal disk's rename() would replace it, so the
+// target is looked at right before. A case-only rename goes through a temp name: on a case-blind
+// file system the target found is the file itself, on another it may be a different one.
+static int au_rename(const char *a, const char *b)
+{
+	if (strcmp(a, b) && !strcasecmp(a, b)) {
+		char t[340];
+		snprintf(t, sizeof(t), "%s.case", a);
+		if (vf_exists(t) || vf_rename(a, t)) return -1;
+		if (vf_exists(b) || vf_rename(t, b)) { vf_rename(t, a); return -1; }   // a different file of that name
+		return 0;
+	}
+	if (vf_exists(b)) return -1;
+	return vf_rename(a, b);
+}
 static int au_exists(const char *p) { return vf_exists(p); }
 static const AuditIo vf_io = {au_open, au_read, au_write, au_seek, au_close, au_rename, au_exists};
 
@@ -4473,6 +4487,7 @@ static void av_reason(const AuditReason &rs, char *out, size_t n)
 	case AW_CANNOT_MOVE: snprintf(out, n, T(STR_AW_CANNOT_MOVE), rs.file); break;
 	case AW_TOO_LONG: snprintf(out, n, T(STR_AW_TOO_LONG), rs.file); break;
 	case AW_MOVE_FAILED: snprintf(out, n, "%s", T(STR_AW_MOVE_FAILED)); break;
+	case AW_NOT_PUT_BACK: snprintf(out, n, T(STR_AW_NOT_PUT_BACK), (int)rs.lba, rs.file); break;
 	default: snprintf(out, n, "%s", T(STR_AUDIT_NO_UNDO)); break;
 	}
 }
@@ -4573,7 +4588,10 @@ static int audit_undo(AuditView &v, char *why, size_t n)
 	else if (r && v.level == 2 && !strcmp(r->kind, "job")) rc = audit_undo_job(r->job, why, n, &rs);
 	else if (r) rc = audit_undo_row(r->id, why, n, &rs);
 	g_files_busy = 0;
-	if (v.dom == AU_FILES) gl_changed();   // the game list reads its folders again
+	if (v.dom == AU_FILES) {   // the game list reads its folders again, a card showing a moved rip looks again
+		gl_changed();
+		for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;
+	}
 	if (rc) logf("audit undo of %s refused: %s", key, why);   // the English text, for the log
 	snprintf(v.why_key, sizeof(v.why_key), "%s", rc ? key : "");
 	v.why = rs;
@@ -4844,6 +4862,7 @@ static int gv_can_empty(const GamesView &v);
 // from the audit screen. The list is read again after each.
 enum { GM_RENAME, GM_TRASH, GM_RESTORE };
 #define GM_FILES 64   // files one action moves (all discs of a game)
+#define GM_CUE_MAX 32766   // the largest .cue a rename rewrites (cue_rename_files reads it whole)
 static const char *const GM_VERBS[] = {"rename", "trash", "restore"};
 
 // A set's file named after its base (folder + leaf, or the leaf alone): "<leaf>.<ext>" or
@@ -4852,6 +4871,13 @@ static int gm_owned(const char *name, const char *leaf)
 {
 	size_t l = strlen(leaf);
 	return l && !strncmp(name, leaf, l) && (name[l] == '.' || !strncmp(name + l, " (Track ", 8));
+}
+// The same, the case of the name not counted (a cue's FILE line may name the file in another case:
+// FAT32 and exFAT find it all the same).
+static int gm_owned_ci(const char *name, const char *leaf)
+{
+	size_t l = strlen(leaf);
+	return l && !strncasecmp(name, leaf, l) && (name[l] == '.' || !strncasecmp(name + l, " (Track ", 8));
 }
 // The disc key the audit groups a set's jobs by: its disc ID (its title without one) and its size,
 // as its checks have it.
@@ -4883,6 +4909,7 @@ static int gm_plan(const Game &g, int what, char (*leaf)[200], char (*from)[320]
 		int dl = (int)(sl - d.base);
 		const char *old = sl + 1;
 		if (what == GM_RESTORE && (dl < 7 || strncmp(d.base + dl - 7, "/.trash", 7))) return -1;
+		if (what == GM_RENAME && !strcmp(leaf[i - g.first], old)) continue;   // this disc has the new name already
 		char p[320];
 		for (int k = 0; lib_file_path(&d, k, p, sizeof(p)); k++) {
 			const char *fn = p + dl + 1;   // its name in the folder
@@ -4935,20 +4962,42 @@ static int gm_move(GamesView &v, int what, const char *pat)
 			for (const char *e : ext) {
 				char q[340];
 				snprintf(q, sizeof(q), "%.*s/%s%s", (int)(sl - d.base), d.base, leaf[i], e);
+				if (!strcasecmp(leaf[i], sl + 1)) {   // a case-only rename: the file found may be its own
+					char own[340];
+					snprintf(own, sizeof(own), "%s%s", d.base, e);
+					if (vf_exists(own)) continue;   // (a different file of that name: the move refuses it)
+				}
 				if (vf_exists(q)) { snprintf(v.note, sizeof(v.note), T(STR_GM_EXISTS), leaf[i]); n = -1; break; }
 			}
 		}
 		if (n >= 0 && same) { snprintf(v.note, sizeof(v.note), "%s", T(STR_GM_SAME)); n = -1; }
 	}
 	if (n >= 0 && (n = gm_plan(g, what, leaf, from, to, GM_FILES)) < 0) snprintf(v.note, sizeof(v.note), "%s", T(STR_GM_CUT));
+	for (int i = 0; what == GM_RENAME && i < n; i++) {   // a cue the rename cannot rewrite: refused before anything moves
+		size_t l = strlen(from[i]);
+		uint64_t sz;
+		if (l > 4 && !strcasecmp(from[i] + l - 4, ".cue") && !vf_size(from[i], &sz) && sz > GM_CUE_MAX) {
+			const char *b = strrchr(from[i], '/');
+			snprintf(v.note, sizeof(v.note), T(STR_GM_CUE_BIG), b ? b + 1 : from[i]);
+			n = -1;
+		}
+	}
+	const char *fp[GM_FILES], *tp[GM_FILES];
+	for (int i = 0; i < n; i++) { fp[i] = from[i]; tp[i] = to[i]; }
+	AuditReason rs;
+	char why[200];
+	if (n > 0 && audit_move_check(fp, tp, n, why, sizeof(why), &rs)) {   // before the trash folder is made
+		char rt[200];
+		av_reason(rs, rt, sizeof(rt));
+		snprintf(v.note, sizeof(v.note), T(STR_GM_NOT_MOVED), rt);
+		n = -1;
+	}
 	if (n < 0) {
 		logf("game list %s %s refused: %s", GM_VERBS[what], name, v.note);
 		free(leaf);
 		return -1;
 	}
-	const char *fp[GM_FILES], *tp[GM_FILES];
-	for (int i = 0; i < n; i++) { fp[i] = from[i]; tp[i] = to[i]; }
-	char key[160], why[200], dir[320], newbase[400] = "";
+	char key[160], dir[320], newbase[400] = "";
 	gm_key(g_gl.d[g.first], key, sizeof(key));
 	for (int i = g.first; i < g.first + g.ndiscs; i++) {
 		const GameDisc &d = g_gl.d[i];
@@ -4957,7 +5006,6 @@ static int gm_move(GamesView &v, int what, const char *pat)
 		if (what == GM_TRASH) { size_t l = strlen(dir); snprintf(dir + l, sizeof(dir) - l, "/.trash"); vf_mkdir(dir); }   // made on first use
 		if (i == g.first && what == GM_RENAME) snprintf(newbase, sizeof(newbase), "%s/%s", dir, leaf[0]);
 	}
-	AuditReason rs;
 	g_files_busy = 1;
 	int rc = audit_move(g_input_src, key, name, GM_VERBS[what], fp, tp, n, why, sizeof(why), &rs);
 	g_files_busy = 0;
@@ -5001,6 +5049,20 @@ static void gm_empty_ask(GamesView &v)
 	else snprintf(v.ask, sizeof(v.ask), T(STR_GM_EMPTY_Q), n, mb);
 	v.mode = GV_CONFIRM;
 }
+// A file right in the trash of a source the shown trash scan covers: <PSXISO>/.trash/<name>.
+static int gm_in_trash(const char *p)
+{
+	if (strncmp(g_gl.key, "t:", 2)) return 0;
+	const char *k = g_gl.key + 2;
+	for (int i = 0; i < g_gl.nsrc; i++) {
+		const GlSource &s = g_gl.src[i];
+		if (!s.dir[0] || !strcmp(s.key, "all") || (strcmp(k, "all") && strcmp(k, s.key))) continue;
+		char pre[64];
+		int l = snprintf(pre, sizeof(pre), "%s/.trash/", s.dir);
+		if (l > 0 && l < (int)sizeof(pre) && !strncmp(p, pre, (size_t)l) && p[l] && !strchr(p + l, '/')) return 1;
+	}
+	return 0;
+}
 // Yes: every file of the games in the trash shown is deleted, one audit job `empty` with a delete
 // row per file (a record: it cannot be undone). Only files in a .trash folder.
 static void gm_empty(GamesView &v)
@@ -5014,7 +5076,7 @@ static void gm_empty(GamesView &v)
 	for (int i = 0; i < g_gl.n; i++) {
 		const GameDisc &d = g_gl.d[i];
 		for (int k = 0; lib_file_path(&d, k, p, sizeof(p)); k++) {
-			if (!strstr(p, "/.trash/")) { failed++; continue; }   // never outside the trash
+			if (!gm_in_trash(p)) { failed++; continue; }   // never outside the trash
 			if (vf_unlink(p) == 0) { audit_note(job, AU_FILES, NULL, "delete", d.title, p, ""); del++; }
 			else { failed++; logf("empty the trash: %s could not be deleted", p); }
 		}
@@ -7367,7 +7429,7 @@ static void tmp_restore(const char *path)
 // Written through <cue>.tmp (file_replace). 0 = done, also when no line names the old leaf.
 static int cue_rename_files(const char *cue, const char *from, const char *to)
 {
-	static char in[32768], out[40000];   // (the UI thread only: moves run there)
+	static char in[GM_CUE_MAX + 2], out[40000];   // (the UI thread only: moves run there)
 	VFile *f = vf_open(cue, "rb");
 	if (!f) return -1;
 	size_t n = vf_read(f, in, sizeof(in) - 1);
@@ -7385,7 +7447,7 @@ static int cue_rename_files(const char *cue, const char *from, const char *to)
 			nm = q + 4;
 			while (*nm == ' ' || *nm == '\t') nm++;
 			if (*nm == '"') nm++;
-			if (!gm_owned(nm, from)) nm = NULL;
+			if (!gm_owned_ci(nm, from)) nm = NULL;
 		}
 		if (o + len + tl >= sizeof(out)) return -1;
 		if (nm) {   // the name's start, the new leaf, the rest of the line (extension, quote, type)
@@ -7419,7 +7481,10 @@ static int gm_moved_hook(const char *from, const char *to)
 	snprintf(fb, sizeof(fb), "%.*s", (int)(strlen(b) - 4), b);
 	if (!strcmp(fa, fb)) return 0;   // the trash and back: same name
 	int rc = cue_rename_files(to, fa, fb);
-	if (rc) logf("cue %s: its FILE lines could not be renamed", to);
+	if (rc) {   // the cue cut short between its removal and the rename of its .tmp: put it back first,
+		tmp_restore(to);   // so the audit can move it back (and this hook then renames its lines back)
+		logf("cue %s: its FILE lines could not be renamed", to);
+	}
 	return rc;
 }
 

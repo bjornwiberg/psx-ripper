@@ -38,7 +38,8 @@ enum AuditWhy {
 	AW_FILE_BUSY,         // a drive or a check works on the file now (row, file)
 	AW_CANNOT_MOVE,       // the file could not be moved (row, file); the files moved before went back
 	AW_TOO_LONG,          // a path is too long to be kept in the log (file)
-	AW_MOVE_FAILED        // the move failed and was put back: it is never done again (row)
+	AW_MOVE_FAILED,       // the move failed and was put back: it is never done again (row)
+	AW_NOT_PUT_BACK       // a move failed and lba file(s) could not be put back, `file` the first: the set is split (row)
 };
 struct AuditReason {
 	AuditWhy code;
@@ -146,8 +147,9 @@ void audit_set_progress(int (*tick)(uint32_t done, uint32_t total));
 // from[i] -> to[i], each a `move` row (before = from, after = to). Refused before anything moves when
 // a path is too long for the log, a file is busy, a from is missing or a to is taken (no job then).
 // When a move fails (or the moved hook does), the files moved so far go back, newest first, each with
-// an `undo` row, and the job ends "failed": a set never stays split, and a failed job is never
-// redone. Returns 0 when every file moved, else -1 with why[] and rs.
+// an `undo` row, and the job ends "failed"; a failed job is never redone. A file that cannot be put
+// back keeps its row (the log stays true, an undo of the job can try again later) and the reason is
+// AW_NOT_PUT_BACK. Returns 0 when every file moved, else -1 with why[] and rs.
 //
 // Undo of moves: a move row, an undo row of one, or its job undo the job's moves together (a set is
 // never split): newest first, each back from `after` to `before`; when all are undone the undo is a
@@ -158,8 +160,13 @@ void audit_set_progress(int (*tick)(uint32_t done, uint32_t total));
 // record: never undone.
 int audit_move(AuditSrc src, const char *disc, const char *name, const char *what,
                const char *const *from, const char *const *to, int n, char *why, size_t wn, AuditReason *rs = NULL);
-// moved (may be NULL) is called after each file moved (also by an undo or a rollback), without the
-// lock; nonzero = it failed (the move counts as failed and is put back). busy (may be NULL): 1 when
+// audit_move's checks alone (nothing moves, nothing is logged): 0 when it would start, else -1 with
+// why[] and rs. A to that differs from its from only in case is not taken by the from itself (a
+// case-only rename; the rename hook tells a different file of that name).
+int audit_move_check(const char *const *from, const char *const *to, int n, char *why, size_t wn, AuditReason *rs = NULL);
+// moved (may be NULL) is called after each file moved (also by an undo, a rollback, or the put-back
+// of a file whose own call failed), without the lock; nonzero = it failed (the move counts as failed
+// and is put back; it must leave the file where it moved it, whole). busy (may be NULL): 1 when
 // the file must not be moved now (a drive rips into it, a check reads it).
 void audit_set_move_hooks(int (*moved)(const char *from, const char *to), int (*busy)(const char *path));
 

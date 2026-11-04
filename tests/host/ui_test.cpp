@@ -987,6 +987,35 @@ static uint32_t gm_job(const char *disc, const char *what)
 	for (int i = 0; i < n; i++) if (!strcmp(e[i].kind, "job") && !strcmp(e[i].what, what)) return e[i].job;
 	return 0;
 }
+// A file's name exactly as the folder lists it (the host's file system may not tell case apart).
+static bool gm_listed(const char *dir, const char *name)
+{
+	bool there = false;
+	char cmd[400], line[400];
+	snprintf(cmd, sizeof cmd, "ls '%s'", dir);
+	FILE *p = popen(cmd, "r");
+	while (p && fgets(line, sizeof line, p)) { line[strcspn(line, "\n")] = 0; if (!strcmp(line, name)) there = true; }
+	if (p) pclose(p);
+	return there;
+}
+// The renames the tests make fail: a cue's .tmp (its rewrite cut short), the put-back of a renamed
+// cue; and a file put in the way of a move right after the move's checks.
+static int g_rh_tmp_fail;          // renames of a <cue>.tmp left to fail
+static const char *g_rh_putback;   // a rename from this path fails
+static const char *g_rh_plant_on, *g_rh_plant;   // the rename from plant_on first puts a file at plant
+static int rename_fails(const char *from, const char *to)
+{
+	size_t l = strlen(from);
+	if (g_rh_tmp_fail > 0 && l > 8 && !strcmp(from + l - 8, ".cue.tmp")) { g_rh_tmp_fail--; return 1; }
+	if (g_rh_putback && !strcmp(from, g_rh_putback)) return 1;
+	if (g_rh_plant_on && !strcmp(from, g_rh_plant_on)) {
+		char p[400];
+		snprintf(p, sizeof p, "out/gl%s", g_rh_plant);
+		put_bin(p, "other", 5);
+		g_rh_plant_on = NULL;
+	}
+	return 0;
+}
 static void games_file_scenarios()
 {
 	int bad = 0, sv = g_sfx_sv;
@@ -1004,7 +1033,7 @@ static void games_file_scenarios()
 	gm_files_of(H, AL, ext, 2);
 	gs_set(H, "Croc 2 (Europe) [SLES_020.88]", 3, gs_log("Croc 2", "SLES_020.88", NULL).c_str());
 	gs_set(H, "Driver", 3, NULL);
-	{   // Klonoa: a cue too big for the app to rewrite (its rename fails at the cue and is put back)
+	{   // Klonoa: a cue too big for the app to rewrite (its rename is refused before anything moves)
 		std::vector<uint8_t> img(3 * RAW_SIZE);
 		put_bin("out/gl/dev_hdd0/PSXISO/Klonoa.bin", img.data(), img.size());
 		std::string cue = "FILE \"Klonoa.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n";
@@ -1103,24 +1132,107 @@ static void games_file_scenarios()
 	gs_find(v, "Croc 2");
 	want(gm_move(v, GM_RENAME, "%T (%R) [%D]") == -1 && !strcmp(v.note, T(STR_GM_SAME)), "the same name: nothing to do");
 	gv_poll(v);
-	// a move that fails half-way (the cue cannot be rewritten): all back, and the screen says why
+	// a cue too big to be rewritten: refused before anything moves, no job
 	gs_find(v, "Klonoa");
 	want(gm_move(v, GM_RENAME, "%T (Fixed)") == -1 && vf_exists("/dev_hdd0/PSXISO/Klonoa.bin") && vf_exists("/dev_hdd0/PSXISO/Klonoa.cue") &&
-	     !vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).bin") && !vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).cue"), "a failed rename leaves the set whole");
+	     !vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).bin") && !gm_job("Klonoa:3", "rename"), "a cue too big: refused, nothing moved, nothing logged");
+	{
+		char m[300];
+		snprintf(m, sizeof m, T(STR_GM_CUE_BIG), "Klonoa.cue");
+		want(!strcmp(v.note, m), "the note names the cue");
+	}
+	gv_poll(v);
+	gs_find(v, "Klonoa");
+	gframe("games-rename-cue-big", v);
+	// a move that fails half-way: the cue's rewrite is cut short (its .tmp put back first) and the cue
+	// cannot go back: the screen says the game is split, the log keeps the cue's row, and the job's
+	// undo joins the set again
+	gs_set(H, "Spyro", 3, NULL);
+	const std::string spyro_cue = gc_file("out/gl/dev_hdd0/PSXISO/Spyro.cue");
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	host_rename_hook = rename_fails;
+	g_rh_tmp_fail = 2;   // the rewrite's rename and its retry after the unlink
+	g_rh_putback = "/dev_hdd0/PSXISO/Spyro (Fixed).cue";
+	gs_find(v, "Spyro");
+	want(gm_move(v, GM_RENAME, "%T (Fixed)") == -1, "the rename failed");
+	g_rh_putback = NULL;
+	host_rename_hook = NULL;
+	want(vf_exists("/dev_hdd0/PSXISO/Spyro.bin") && !vf_exists("/dev_hdd0/PSXISO/Spyro (Fixed).bin") && vf_exists("/dev_hdd0/PSXISO/Spyro (Fixed).cue") &&
+	     !vf_exists("/dev_hdd0/PSXISO/Spyro (Fixed).cue.tmp") && !vf_exists("/dev_hdd0/PSXISO/Spyro.cue"), "the bin back, the cue (from its .tmp) left where it went");
 	{
 		char rt[200], m[300];
 		AuditReason rs = {};
-		rs.code = AW_CANNOT_MOVE; snprintf(rs.file, sizeof rs.file, "Klonoa.cue");   // its .bin moved first, then went back
+		rs.code = AW_NOT_PUT_BACK; rs.lba = 1; snprintf(rs.file, sizeof rs.file, "Spyro (Fixed).cue");
+		av_reason(rs, rt, sizeof rt);
+		snprintf(m, sizeof m, T(STR_GM_NOT_MOVED), rt);
+		want(!strcmp(v.note, m), "the note says a file could not go back");
+	}
+	gv_poll(v);
+	gs_find(v, "Spyro");
+	gframe("games-move-failed", v);
+	{
+		uint32_t sj = gm_job("Spyro:3", "rename");
+		want(sj && audit_undo_job(sj, why, sizeof why) == 0 && vf_exists("/dev_hdd0/PSXISO/Spyro.cue") && !vf_exists("/dev_hdd0/PSXISO/Spyro (Fixed).cue") &&
+		     gc_file("out/gl/dev_hdd0/PSXISO/Spyro.cue") == spyro_cue, "the job's undo: the cue back, its FILE line too");
+	}
+	// the same, but the cue can go back: its FILE line is renamed back on the way, the set whole
+	host_rename_hook = rename_fails;
+	g_rh_tmp_fail = 2;
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	gs_find(v, "Spyro");
+	want(gm_move(v, GM_RENAME, "%T (Fixed)") == -1 && vf_exists("/dev_hdd0/PSXISO/Spyro.bin") && vf_exists("/dev_hdd0/PSXISO/Spyro.cue") &&
+	     !vf_exists("/dev_hdd0/PSXISO/Spyro (Fixed).cue") && gc_file("out/gl/dev_hdd0/PSXISO/Spyro.cue") == spyro_cue, "the cue back with its own FILE line");
+	host_rename_hook = NULL;
+	{
+		char rt[200], m[300];
+		AuditReason rs = {};
+		rs.code = AW_CANNOT_MOVE; snprintf(rs.file, sizeof rs.file, "Spyro.cue");
 		av_reason(rs, rt, sizeof rt);
 		snprintf(m, sizeof m, T(STR_GM_NOT_MOVED), rt);
 		want(!strcmp(v.note, m), "the note says which file and that the rest went back");
 	}
-	gv_poll(v);
-	gs_find(v, "Klonoa");
-	gv_input(v, B_DOWN); gv_input(v, B_UP);   // (the note stays until the next button: draw it before)
-	gs_find(v, "Klonoa");
-	snprintf(v.note, sizeof v.note, T(STR_GM_NOT_MOVED), "Klonoa.cue");
-	gframe("games-move-failed", v);
+	// a file put in the way after the checks: the rename does not go over it
+	g_rh_plant_on = "/dev_hdd0/PSXISO/Spyro.bin";
+	g_rh_plant = "/dev_hdd0/PSXISO/Spyro (Fixed).cue";
+	host_rename_hook = rename_fails;
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	gs_find(v, "Spyro");
+	int bin_first = 0;
+	for (int k = 0; k < g_gl.d[g_gl.g[v.shown[v.row]].first].nfiles; k++) {
+		char p[320];
+		if (lib_file_path(&g_gl.d[g_gl.g[v.shown[v.row]].first], k, p, sizeof p)) { bin_first = strstr(p, ".bin") != NULL; break; }
+	}
+	if (!bin_first) { g_rh_plant_on = "/dev_hdd0/PSXISO/Spyro.cue"; g_rh_plant = "/dev_hdd0/PSXISO/Spyro (Fixed).bin"; }
+	want(gm_move(v, GM_RENAME, "%T (Fixed)") == -1 && vf_exists("/dev_hdd0/PSXISO/Spyro.bin") && vf_exists("/dev_hdd0/PSXISO/Spyro.cue") &&
+	     gc_file((std::string("out/gl") + g_rh_plant).c_str()) == "other", "a file put in the way stays, the set goes back");
+	host_rename_hook = NULL;
+	remove((std::string("out/gl") + g_rh_plant).c_str());
+	system("rm -f out/gl/dev_hdd0/PSXISO/Spyro.*");
+	// a game of two discs, one named as the pattern has it already: only the other is renamed
+	{
+		const char *D1 = "Metal Gear Solid (Disc 1) [SLES_016.86]", *D2 = "MGS disc two [SLES_116.86]";
+		gs_set(H, D1, 3, gs_log("Metal Gear Solid (Disc 1)", "SLES_016.86", NULL).c_str());
+		gs_set(H, D2, 3, gs_log("Metal Gear Solid (Disc 2)", "SLES_116.86", NULL).c_str());
+		gl_changed(); gl_open("hdd"); gv_poll(v);
+		want(gs_find(v, "Metal Gear Solid") && g_gl.g[v.shown[v.row]].ndiscs == 2, "the two discs are one game");
+		want(gm_move(v, GM_RENAME, "%T [%D]") == 0 && vf_exists("/dev_hdd0/PSXISO/Metal Gear Solid (Disc 1) [SLES_016.86].bin") &&
+		     vf_exists("/dev_hdd0/PSXISO/Metal Gear Solid (Disc 2) [SLES_116.86].bin") && vf_exists("/dev_hdd0/PSXISO/Metal Gear Solid (Disc 2) [SLES_116.86].log") &&
+		     !vf_exists("/dev_hdd0/PSXISO/MGS disc two [SLES_116.86].cue"), "the second disc renamed, the first left as it is");
+		system("rm -f 'out/gl/dev_hdd0/PSXISO/Metal Gear Solid'*");
+	}
+	// a case-only rename: the set's own files are not in the way
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	gs_find(v, "Driver");
+	want(gm_move(v, GM_RENAME, "DRIVER") == 0 && gm_listed(H, "DRIVER.bin") && gm_listed(H, "DRIVER.cue") && !gm_listed(H, "Driver.bin"), "a case-only rename");
+	want(gc_file("out/gl/dev_hdd0/PSXISO/DRIVER.cue").find("FILE \"DRIVER.bin\"") == 0, "its FILE line too");
+	want(audit_undo_job(gm_job("Driver:3", "rename"), why, sizeof why) == 0 && gm_listed(H, "Driver.bin") && gm_listed(H, "Driver.cue") && !gm_listed(H, "DRIVER.cue"), "and back");
+	// a cue naming its file in another case: its FILE line renamed all the same
+	gl_text("out/gl/dev_hdd0/PSXISO/Driver.cue", "FILE \"driver.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	gs_find(v, "Driver");
+	want(gm_move(v, GM_RENAME, "Driver X") == 0 && gc_file("out/gl/dev_hdd0/PSXISO/Driver X.cue").find("FILE \"Driver X.bin\"") == 0, "a FILE line in another case renamed");
+	want(audit_undo_job(gm_job("Driver:3", "rename"), why, sizeof why) == 0 && vf_exists("/dev_hdd0/PSXISO/Driver.bin"), "and back");
+	gl_changed(); gl_open("hdd"); gv_poll(v);
 	// refused: a drive rips into it; its file list was cut by the scan
 	Card &k = g_cards[1];
 	k.job = 1;
@@ -1205,7 +1317,7 @@ static void games_file_scenarios()
 		a.row = 2;
 		audit_open(a);
 		aframe("audit-files", a);
-		want(a.level == 1 && a.dom == AU_FILES && a.n == 5 && has_text(T(STR_GL_V_TRASH)) && has_text("Croc 2") && has_text("Alundra"), "Files lists the discs and the trash");
+		want(a.level == 1 && a.dom == AU_FILES && a.n == 8 && has_text(T(STR_GL_V_TRASH)) && has_text("Croc 2") && has_text("Alundra"), "Files lists the discs and the trash");
 		int ci = -1;
 		for (int i = 0; i < a.n; i++) if (!strcmp(av_keys[i], "SLES_020.88:3")) ci = i;
 		a.row = ci < 0 ? 0 : ci;
@@ -1217,10 +1329,6 @@ static void games_file_scenarios()
 		for (a.row = 0; a.row < a.n && strcmp(av_rows[a.row].what, "trash"); a.row++) {}
 		av_fix(a);
 		aframe("audit-files-refused", a);
-		char rt[200];
-		AuditReason rs = {};
-		rs.code = AW_TRASH_EMPTIED; snprintf(rs.file, sizeof rs.file, "Croc 2 (Europe) [SLES_020.88].log");
-		av_reason(rs, rt, sizeof rt);
 		want(!audit_can_undo(a) && has_text(sv ? "Papperskorgen har tömts" : "The trash was emptied"), "the job's undo refused: the trash was emptied");
 		audit_open(a);
 		audit_nav(a, B_DOWN);   // its first file
