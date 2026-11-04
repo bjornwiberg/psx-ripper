@@ -406,6 +406,18 @@ static const char *en[STR_COUNT] = {
 	"Game list: source",
 	"Game list: filter",
 	".sbi present",
+	"Check",
+	"Check all",
+	"Checking against Redump",
+	"Game %d of %d",
+	"Checked against Redump: %d of %d games",
+	"Check cancelled: %d of %d games checked",
+	" · %d could not be checked",
+	"A 2048 image cannot be checked: re-rip the disc to verify it",
+	"An incomplete set cannot be checked",
+	"An image in several files cannot be checked yet",
+	"A drive is ripping into this game right now",
+	"Redump is off: turn it on in the settings (online or a local copy) to check games",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -808,6 +820,18 @@ static const char *sv[STR_COUNT] = {
 	"Spellistan: källa",
 	"Spellistan: filter",
 	".sbi finns",
+	"Kontrollera",
+	"Kontrollera alla",
+	"Kontrollerar mot Redump",
+	"Spel %d av %d",
+	"Kontrollerade mot Redump: %d av %d spel",
+	"Kontrollen avbröts: %d av %d spel kontrollerade",
+	" · %d kunde inte kontrolleras",
+	"En 2048-avbildning kan inte kontrolleras: rippa om skivan för att verifiera den",
+	"En ofullständig uppsättning kan inte kontrolleras",
+	"En avbildning i flera filer kan inte kontrolleras än",
+	"En enhet rippar till det här spelet just nu",
+	"Redump är av: slå på det i inställningarna (online eller lokal kopia) för att kontrollera spel",
 };
 
 static const char **table = en;

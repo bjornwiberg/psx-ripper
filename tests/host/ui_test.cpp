@@ -648,6 +648,226 @@ static void games_scenarios()
 	if (bad) g_fail += bad; else printf("ok   game list screen (%s): reading, list, statuses, letters, filters, panel, detail, sources, trash, gone, memory\n", sv ? "sv" : "en");
 }
 
+// ---------------------------------------------------------------- game list: checks against Redump from the files
+// A 2352 image without a cue (one MODE2/2352 track) with a tiny ISO 9660 file system: its PVD at
+// sector 16, the root directory at 18 with SYSTEM.CNF at 20 naming `serial`. Without a serial: no
+// file system at all.
+static std::vector<uint8_t> gc_iso(const char *serial, int sectors)
+{
+	std::vector<uint8_t> img((size_t)sectors * RAW_SIZE);
+	for (int s = 0; s < sectors; s++) {
+		uint8_t *b = &img[(size_t)s * RAW_SIZE];
+		b[15] = 2;   // MODE2: the user data after the 8-byte subheader, at 24
+		for (int i = 2072; i < RAW_SIZE; i++) b[i] = (uint8_t)(s * 31 + i);   // something to hash
+	}
+	if (!serial) return img;
+	uint8_t *pvd = &img[16 * RAW_SIZE + 24];
+	pvd[0] = 1; memcpy(pvd + 1, "CD001", 5);
+	memcpy(pvd + 40, "TESTDISC                        ", 32);
+	pvd[158] = 18;   // the root's extent (little-endian copy)
+	uint8_t *dir = &img[18 * RAW_SIZE + 24];
+	dir[0] = 33 + 12; dir[9] = 20; dir[17] = 64; dir[32] = 12; memcpy(dir + 33, "SYSTEM.CNF;1", 12);
+	char cnf[64];
+	snprintf(cnf, sizeof cnf, "BOOT = cdrom:\\%s;1\r\nTCB = 4\r\n", serial);
+	memcpy(&img[20 * RAW_SIZE + 24], cnf, strlen(cnf));
+	return img;
+}
+static std::string gc_file(const char *p) { std::string s; FILE *f = fopen(p, "rb"); if (!f) return s; char b[4096]; size_t n; while ((n = fread(b, 1, sizeof b, f)) > 0) s.append(b, n); fclose(f); return s; }
+static bool has_exact(const char *s)
+{
+	for (auto &b : g_boxes) if (b.kind == UI_TRACE_TEXT && b.text == s) return true;
+	return false;
+}
+static int g_gc_cancel_after = -1;   // the check-all job is cancelled after this many games
+static void gc_cancel_hook(int i) { if (i + 1 == g_gc_cancel_after) g_gc.abort = 1; }
+static void games_check_scenarios()
+{
+	int bad = 0, sv = g_sfx_sv;
+	auto want = [&](bool ok, const char *what) { if (!ok) { printf("FAIL games check (%s): %s\n", sv ? "sv" : "en", what); bad++; } };
+	system("rm -rf out/gl out/audit && mkdir -p out/gl/dev_hdd0/PSXISO");
+	audit_init("out/audit", &vf_io);
+	snprintf(host_root, 256, "out/gl");
+	memset(host_exfat, 0, sizeof(int) * 8);
+	const char *H = "out/gl/dev_hdd0/PSXISO";
+	reset_all();
+	// a disc ID the title list knows: the new log's title comes from it
+	const char *ID = "SLUS_005.53";
+	const char *idtitle = lookup_title(ID);
+	want(idtitle != NULL, "the title list knows the test's disc ID");
+	if (!idtitle) idtitle = "?";
+	std::vector<uint8_t> iso = gc_iso(ID, 24), unk = gc_iso(NULL, 4);
+	put_bin("out/gl/dev_hdd0/PSXISO/mystery.iso", iso.data(), iso.size());
+	put_bin("out/gl/dev_hdd0/PSXISO/Unknown Game (Europe).img", unk.data(), unk.size());
+	put_bin("out/gl/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso", std::vector<uint8_t>(3 * 2048).data(), 3 * 2048);
+	gs_set(H, "Ape Escape (Europe) [SCES_011.15]", 3, gs_log("Ape Escape", "SCES_011.15", NULL).c_str());
+	gs_set(H, "MediEvil (Europe) [SCES_003.11]", 3, gs_log("MediEvil", "SCES_003.11", "verified MediEvil (Europe)").c_str());
+	gs_set(H, "Motorhead (USA) [SLUS_007.17]", 3, gs_log("Motorhead", "SLUS_007.17", NULL, "unreadable=1000\n").c_str());
+	for (const char *n : {"Croc 2", "Driver", "Klonoa"}) gs_set(H, n, 3, NULL);
+	uint8_t md5[16];
+	{ Md5 m; md5_init(&m); md5_update(&m, iso.data(), iso.size()); md5_final(&m, md5); }
+	char hex[33];
+	md5_hex(md5, hex);
+	memcpy(host_rd_md5, md5, 16);
+	snprintf(host_rd_name, sizeof host_rd_name, "Test Disc (USA)");
+	host_rd_local = 1;
+	g_cfg_primed = false;
+	system("rm -f out/psxrip.cfg");
+	snprintf(g_games_source, sizeof g_games_source, "hdd");
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	g_gl_stale = 1;
+	g_input_src = AU_PAD;
+	GamesView v;
+	// Redump off: neither check is offered, the screen says how to turn it on
+	g_redump = RD_OFF;
+	gv_open(v);
+	gv_poll(v);
+	want(gv_listed(v) && v.nshown == 9, "nine games");
+	gs_find(v, "mystery");
+	want(!gv_can_check(v) && !gv_can_check_all(v), "Redump off: no check offered");
+	gframe("games-check-off", v);
+	want(has_text(sv ? "Redump är av" : "Redump is off") && !has_exact(T(STR_HINT_CHECK_ALL)), "Redump off: the note, no hint");
+	gv_input(v, B_SQUARE);
+	gv_input(v, B_START);
+	gv_poll(v);
+	want(!vf_exists("/dev_hdd0/PSXISO/mystery.log"), "Redump off: □ and START do nothing");
+	gs_find(v, "mystery");
+	gv_input(v, B_CROSS);
+	gframe("games-check-off-detail", v);
+	want(has_text(sv ? "Redump är av" : "Redump is off"), "Redump off: the detail view's note");
+	gv_input(v, B_CIRCLE);
+	// Redump on (a local copy): □ and START with their names
+	g_redump = RD_LOCAL;
+	want(gv_can_check(v) && gv_can_check_all(v), "Redump on: both offered");
+	gframe("games-check-hints", v);
+	want(has_exact(T(STR_HINT_CHECK_ONE)) && has_exact(T(STR_HINT_CHECK_ALL)) && !has_text(sv ? "Redump är av" : "Redump is off"), "the hints' names");
+	want(!strcmp(T(STR_HINT_CHECK_ONE), sv ? "Kontrollera" : "Check") && !strcmp(T(STR_HINT_CHECK_ALL), sv ? "Kontrollera alla" : "Check all"), "the hints' words");
+	// a 2352 .iso without a cue: one track, its log written, verified by the local copy
+	gs_find(v, "mystery");
+	gv_input(v, B_SQUARE);
+	gv_poll(v);   // the job ran (no threads on the host); the list is read again
+	gv_poll(v);
+	std::string log = gc_file("out/gl/dev_hdd0/PSXISO/mystery.log");
+	char t[200];
+	snprintf(t, sizeof t, "track=01 start=0 md5=%s\n", hex);
+	want(log.find(t) != std::string::npos, "the .iso's log: its track MD5");
+	want(log.find("redump=verified Test Disc (USA)\n") != std::string::npos, "the .iso's log: the Redump line");
+	snprintf(t, sizeof t, "title=%s\nserial=%s\n", idtitle, ID);
+	want(log.find(t) != std::string::npos && log.find("PSX Ripper rip log\n") == 0, "the .iso's log: title from the disc ID, serial");
+	want(gv_listed(v) && v.nshown && g_gl.d[g_gl.g[v.shown[v.row]].first].rd == 1 && strstr(g_gl.d[g_gl.g[v.shown[v.row]].first].base, "mystery"),
+	     "focus on the same game (now named by its log) after the rescan");
+	{   // the list read again with a game added before it: the focus follows the game, not its row
+		int row = v.row;
+		gs_set(H, "Lemmings (Europe) [SCES_000.20]", 3, gs_log("Lemmings", "SCES_000.20", "verified Lemmings (Europe)").c_str());
+		gl_changed();
+		gl_open("hdd");
+		gv_poll(v);
+		want(v.row == row + 1 && strstr(g_gl.d[g_gl.g[v.shown[v.row]].first].base, "mystery"), "focus follows the game when rows move");
+	}
+	{   // its audit job: a check, with the Redump line before and after
+		AuditRow r[20];
+		char key[40];
+		snprintf(key, sizeof key, "%s:24", ID);
+		int n = audit_events(AU_RIPS, key, r, 20), jobs = 0, rd = 0, fin = 0;
+		for (int i = 0; i < n; i++) {
+			if (strcmp(r[i].kind, "job")) continue;
+			jobs++;
+			want(r[i].src == AU_PAD && !strcmp(r[i].what, "check"), "the job row: a check from the pad");
+			AuditRow rr[10];
+			int m = audit_rows(r[i].job, rr, 0, 10);
+			for (int j = 0; j < m; j++) {
+				if (!strcmp(rr[j].kind, "redump") && !strcmp(rr[j].before, "unchecked") && !strcmp(rr[j].after, "verified Test Disc (USA)")) rd++;
+				if (!strcmp(rr[j].kind, "result") && !strcmp(rr[j].after, "finished")) fin++;
+			}
+		}
+		want(jobs == 1 && rd == 1 && fin == 1, "the audit rows of the check");
+	}
+	// an image without a file system and unknown to Redump: titled by its file name, no match
+	gs_find(v, "Unknown Game");
+	gv_input(v, B_SQUARE);
+	gv_poll(v); gv_poll(v);
+	log = gc_file("out/gl/dev_hdd0/PSXISO/Unknown Game (Europe).log");
+	want(log.find("title=Unknown Game (Europe)\nserial=\n") != std::string::npos && log.find("redump=no_match\n") != std::string::npos, "the unknown image's log");
+	want(gs_at(v, "Unknown Game"), "focus kept");
+	// a 2048 image: refused with the reason, nothing written
+	gs_find(v, "Castlevania");
+	gv_input(v, B_SQUARE);
+	gv_poll(v);
+	gframe("games-check-2048", v);
+	want(!vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].log") && has_text(T(STR_GC_NO_2048)), "a 2048 image is refused");
+	// an app rip: through check_image, its log kept apart from the track MD5 and the Redump line
+	gs_find(v, "Ape Escape");
+	gv_input(v, B_CROSS);   // from the detail view: back in it after the check
+	gv_input(v, B_SQUARE);
+	gv_poll(v); gv_poll(v);
+	log = gc_file("out/gl/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].log");
+	want(log.find("date=2026-10-02 18:41 UTC\n") != std::string::npos && log.find("check=bitperfect\n") != std::string::npos && log.find("redump=no_match\n") != std::string::npos &&
+	     log.find(GS_MD5) == std::string::npos, "the app rip's log rewritten by check_image");
+	want(v.mode == GV_DETAIL && gs_at(v, "Ape Escape"), "back in the detail view of the same game");
+	gv_input(v, B_CIRCLE);
+	// a drive rips into a set: its check is refused
+	{
+		Card &k = g_cards[0];
+		k.job = 1;
+		snprintf(k.base, sizeof k.base, "/dev_hdd0/PSXISO/Croc 2");
+		gs_find(v, "Croc 2");
+		gv_input(v, B_SQUARE);
+		gv_poll(v);
+		gframe("games-check-busy", v);
+		want(!vf_exists("/dev_hdd0/PSXISO/Croc 2.log") && has_text(T(STR_GC_BUSY)), "a set a drive rips into is refused");
+		k.job = 0; k.base[0] = 0;
+	}
+	// Check all: only the unchecked 2352 games the filter shows (without errors: not Motorhead);
+	// cancelled after the first, the rest stays unchecked
+	g_games_filter = GameFilter{0, 0, 2, 0};
+	gv_refilter(v);
+	g_gc_after = gc_cancel_hook;
+	g_gc_cancel_after = 1;
+	gv_input(v, B_START);
+	gv_poll(v); gv_poll(v);
+	int logs = vf_exists("/dev_hdd0/PSXISO/Croc 2.log") + vf_exists("/dev_hdd0/PSXISO/Driver.log") + vf_exists("/dev_hdd0/PSXISO/Klonoa.log");
+	want(logs == 1 && vf_exists("/dev_hdd0/PSXISO/Croc 2.log"), "cancelled after the first game");
+	gframe("games-check-cancelled", v);
+	want(has_text(sv ? "avbröts" : "cancelled"), "the cancelled note");
+	g_gc_cancel_after = -1;
+	std::string medievil = gc_file("out/gl/dev_hdd0/PSXISO/MediEvil (Europe) [SCES_003.11].log");
+	gv_input(v, B_START);
+	gv_poll(v); gv_poll(v);
+	logs = vf_exists("/dev_hdd0/PSXISO/Croc 2.log") + vf_exists("/dev_hdd0/PSXISO/Driver.log") + vf_exists("/dev_hdd0/PSXISO/Klonoa.log");
+	want(logs == 3, "the rest checked");
+	want(gc_file("out/gl/dev_hdd0/PSXISO/Motorhead (USA) [SLUS_007.17].log").find("redump=") == std::string::npos, "a game the filter hides is not checked");
+	want(gc_file("out/gl/dev_hdd0/PSXISO/MediEvil (Europe) [SCES_003.11].log") == medievil, "a verified game is not checked again");
+	want(!vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].log"), "a 2048 image is never checked");
+	gframe("games-check-done", v);
+	want(!gv_can_check_all(v), "nothing unchecked shown: no Check all");
+	g_gc_after = NULL;
+	// the progress screen, and O cancels
+	{
+		GcItem it[3] = {};
+		snprintf(it[0].base, sizeof it[0].base, "/dev_hdd0/PSXISO/Croc 2");
+		snprintf(it[1].base, sizeof it[1].base, "/dev_hdd0/PSXISO/Driver");
+		snprintf(it[2].base, sizeof it[2].base, "/dev_hdd0/PSXISO/Klonoa");
+		g_gc.items = it; g_gc.n = 3; g_gc.i = 1; g_gc.done = 120000; g_gc.total = 300000; g_gc.running = 1; g_gc.abort = 0;
+		v.checking = 1;
+		gframe("games-check-progress", v);
+		want(has_text(sv ? "Spel 2 av 3" : "Game 2 of 3") && has_text("Driver") && has_text("40 %"), "the progress screen");
+		gv_input(v, B_CIRCLE);
+		want(g_gc.abort == 1 && v.checking, "O cancels the job (the screen waits for it)");
+		g_gc.running = 0; g_gc.items = NULL; g_gc.n = 0;
+		gv_poll(v);
+		want(!v.checking, "back to the list when the job ended");
+	}
+	gv_close(v);
+	host_rd_local = 0;
+	g_redump = RD_OFF;
+	host_root[0] = 0;
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	snprintf(g_games_source, sizeof g_games_source, "all");
+	system("rm -rf out/audit");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   game list checks (%s): .iso without cue, 2048 refused, app rip, busy, check all + cancel, audit, Redump off, focus\n", sv ? "sv" : "en");
+}
+
 // A prepared log: Alundra (a rip, and a repair that wrote 1015 sectors: 1017 rows), Final Fantasy IX
 // (a rip, a check, and a rip that was cancelled after writing a sector), and settings from every source.
 static void audit_scenarios()
@@ -1479,8 +1699,10 @@ int main()
 	// the game list screen, in both languages
 	host_lang = PS3_LANG_SWEDISH; lang_init(); g_sfx_sv = 1;
 	games_scenarios();
+	games_check_scenarios();
 	host_lang = PS3_LANG_ENGLISH_US; lang_init(); g_sfx_sv = 0;
 	games_scenarios();
+	games_check_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

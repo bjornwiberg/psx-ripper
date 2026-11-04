@@ -11,3 +11,8 @@ extern int host_lang;
 extern char host_root[256];
 extern int host_exfat[8];
 extern char host_label[8][24];
+// Redump's local copy: host_rd_local = there is one; it knows one disc of one track, with MD5
+// host_rd_md5, named host_rd_name (0 = no copy, as before: every check is "unchecked").
+extern int host_rd_local;
+extern unsigned char host_rd_md5[16];
+extern char host_rd_name[160];

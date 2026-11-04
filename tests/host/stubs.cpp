@@ -207,7 +207,16 @@ int vf_label(int port, char *out, size_t n) { if (port < 0 || port > 7) return -
 // Redump, the remote view and webhooks: no network on the host
 int rd_local_info(char *ver, size_t n, time_t *when) { snprintf(ver, n, "2026-06-15"); *when = 0; return 1; }
 int rd_local_by_size(uint64_t, int, char (*)[RD_NAME], int) { return -1; }
-int rd_local_verify(const uint8_t (*)[16], int, char *, size_t) { return -1; }
+int host_rd_local;
+unsigned char host_rd_md5[16];
+char host_rd_name[160];
+int rd_local_verify(const uint8_t (*md5)[16], int n, char *name, size_t nn)
+{
+	if (!host_rd_local) return -1;
+	if (n != 1 || memcmp(md5[0], host_rd_md5, 16)) return 0;
+	snprintf(name, nn, "%s", host_rd_name);
+	return 1;
+}
 int rd_online(const char *, RdDisc *, int) { return -1; }
 int rd_download(volatile uint32_t *, volatile uint32_t *, volatile int *, volatile int *) { return -1; }
 #ifdef HOST_REMOTE

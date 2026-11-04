@@ -3146,6 +3146,38 @@ static void lookup_start()
 	sysThreadCreate(&t, lookup_thread, (void *)(long)cur_card(), 1000, 0x10000, 0, (char *)"psxlookup");
 }
 
+// 1 when one of Redump's discs has exactly these track MD5s (its name into name), else 0.
+static int rd_match(const RdDisc *discs, int nd, const uint8_t (*md5)[16], int nt, char *name, size_t n)
+{
+	for (int i = 0; i < nd; i++) {
+		int ok = discs[i].n == nt;
+		for (int t = 0; t < nt && ok; t++) ok = !memcmp(discs[i].md5[t], md5[t], 16);
+		if (ok) { snprintf(name, n, "%s", discs[i].name); return 1; }
+	}
+	return 0;
+}
+
+// Compares track MD5s with Redump as set (the local copy, or online by the disc ID), outside any
+// card (the game list's checks). 1 verified (name filled in), 0 no match, -1 could not check
+// (Redump off, no ID for an online lookup, no network), -2 the ID is unknown to Redump.
+static int rd_compare(const uint8_t (*md5)[16], int nt, const char *serial, char *name, size_t n)
+{
+	static RdDisc discs[4];   // (used under rd_lock only)
+	int r = -1;
+	name[0] = 0;
+	rd_lock();
+	if (g_redump == RD_LOCAL) r = rd_local_verify(md5, nt, name, n);
+	else if (g_redump == RD_ONLINE && serial && serial[0]) {
+		int nd = rd_online(serial, discs, 4);
+		r = nd < 0 ? -1 : nd == 0 ? -2 : rd_match(discs, nd, md5, nt, name, n);
+	}
+	rd_unlock();
+	if (r < -2 || r > 1) r = -1;
+	if (r != 1) name[0] = 0;
+	logf("redump compare (%s) %s -> %d %s", g_redump == RD_LOCAL ? "local" : g_redump == RD_ONLINE ? "online" : "off", serial ? serial : "", r, name);
+	return r;
+}
+
 // Compares the track MD5s of the finished rip with Redump. Fills `out` with the result line.
 static void redump_verify(char *out, size_t n)
 {
@@ -3163,15 +3195,7 @@ static void redump_verify(char *out, size_t n)
 		}
 		if (g_rd_ndiscs < 0) r = -1;
 		else if (g_rd_ndiscs == 0) r = -2;
-		else {
-			r = 0;
-			for (int i = 0; i < g_rd_ndiscs && r == 0; i++) {
-				const RdDisc *d = &g_rd_discs[i];
-				int ok = d->n == g_ntracks;
-				for (int t = 0; t < g_ntracks && ok; t++) ok = !memcmp(d->md5[t], g_track_md5bin[t], 16);
-				if (ok) { r = 1; snprintf(name, sizeof(name), "%s", d->name); }
-			}
-		}
+		else r = rd_match(g_rd_discs, g_rd_ndiscs, g_track_md5bin, g_ntracks, name, sizeof(name));
 	}
 	rd_unlock();
 	if (r == 1) snprintf(out, n, T(STR_RD_VERIFIED), name);
@@ -4615,9 +4639,23 @@ static void audit_screen()
 // filter shows are worked out when a result is taken or the filter changes, never per frame.
 // ↑↓ select, L2/R2 jump by first letter, X the detail view, R1 the filter panel (its last row
 // switches between the games and the trash), L1 clears the filter, SELECT the next source.
-// The actions of later steps (□ check, START check all, △ trash) have their hooks below and stay
-// hidden until those exist.
+// □ checks the focused game against Redump from its file(s), START every unchecked game shown (one
+// background job with its progress screen, O cancels); both only while Redump is on. The trash
+// action of a later step (△) has its hook below and stays hidden until it exists.
 #define GD_LINES 200     // lines of a detail view
+
+// The check job (□ / START): the discs it checks are its own copy (the list may be read again meanwhile).
+struct GcItem { char base[200], image[220], id[16], title[128]; uint64_t size; };
+static struct {
+	volatile int running, abort;
+	GcItem *items; int n;            // the discs to check; the screen frees them when the job ended
+	volatile int i;                  // the one being checked
+	volatile uint32_t done, total;   // its progress in sectors
+	volatile int checked, failed;    // so far
+} g_gc;
+static void (*g_gc_after)(int i);    // called after each disc (the tests cancel through it)
+static void gc_start(GcItem *items, int n, AuditSrc src);
+
 enum { GV_LIST, GV_DETAIL, GV_FILTER };
 struct GamesView {
 	char key[8];          // the source shown: hdd, usbN, all
@@ -4632,6 +4670,11 @@ struct GamesView {
 	GameFilter f;         // the filter panel's values (applied when it closes)
 	int ftrash, frow;     // the panel's "Show" value and its focused row
 	int dfirst;           // the detail view's first line on the screen
+	char fbase[200];      // the focused game's first disc (base): it stays focused when the list is read again
+	int checking;         // a check job of this screen runs: its progress screen shows
+	int back_detail;      // it was started from the detail view: back there when the list is read again
+	uint32_t gc_sig;      // the progress last drawn
+	char note[200];       // a check's result or why it was refused, until the next button
 };
 struct GdLine { char k[48], v[200]; uint32_t col; int head; };
 static GdLine gd_lines[GD_LINES];   // the detail view, read from the set's files when it opens
@@ -4647,9 +4690,53 @@ static int gv_top() { return gv_ycrit() + ui_line(UI_SMALL) * 2 + gv_lh() / 4; }
 static int gv_vis() { int n = (hint_y() - ui_line(UI_SMALL) * 2 - gv_top()) / gv_lh(); return n > 1 ? n : 1; }
 
 
-// Hooks for the actions that come with later steps: each returns whether it is offered.
-static int gv_can_check(const GamesView &v) { (void)v; return 0; }       // □ check against Redump from the file
-static int gv_can_check_all(const GamesView &v) { (void)v; return 0; }   // START check every unchecked game shown
+static int gv_listed(const GamesView &v);
+// Why a disc cannot be checked from its file, STR_COUNT when it can: a 2048 image (no error data
+// to compare: re-rip), an incomplete set, an image in several .bin files, a set a drive rips into.
+static StrId gc_refusal(const GameDisc &d)
+{
+	if (d.fmt == GF_2048) return STR_GC_NO_2048;
+	if (d.st == GS_BROKEN || d.fmt != GF_2352 || !d.image[0]) return STR_GC_NO_BROKEN;
+	int bins = 0;
+	char p[320];
+	for (int i = 0; lib_file_path(&d, i, p, sizeof(p)); i++) {
+		size_t l = strlen(p);
+		if (l > 4 && !strcasecmp(p + l - 4, ".bin")) bins++;
+	}
+	if (bins > 1) return STR_GC_NO_MULTI;
+	for (int c = 0; c < NCARDS; c++) {
+		const Card &k = g_cards[c];
+		if (k.job && (!strcmp(k.base, d.base) || !strcmp(k.exist, d.base))) return STR_GC_BUSY;
+	}
+	return STR_COUNT;
+}
+static void gc_item(const GameDisc &d, GcItem &it)
+{
+	snprintf(it.base, sizeof(it.base), "%s", d.base);
+	snprintf(it.image, sizeof(it.image), "%s", d.image);
+	snprintf(it.id, sizeof(it.id), "%s", d.id);
+	snprintf(it.title, sizeof(it.title), "%s", d.title);
+	it.size = d.size;
+}
+// The discs START checks: of the games shown, those without a Redump result that can be checked.
+// Into items (up to max; NULL: only counted). Returns how many.
+static int gv_unchecked(const GamesView &v, GcItem *items, int max)
+{
+	int n = 0;
+	for (int r = 0; r < v.nshown; r++) {
+		const Game &g = g_gl.g[v.shown[r]];
+		for (int i = g.first; i < g.first + g.ndiscs; i++) {
+			const GameDisc &d = g_gl.d[i];
+			if (d.rd != -1 || gc_refusal(d) != STR_COUNT) continue;
+			if (items && n < max) gc_item(d, items[n]);
+			n++;
+		}
+	}
+	return n;
+}
+// Each returns whether its action is offered.
+static int gv_can_check(const GamesView &v) { return g_redump != RD_OFF && !v.trash && gv_listed(v) && v.nshown > 0; }       // □
+static int gv_can_check_all(const GamesView &v) { return gv_can_check(v) && gv_unchecked(v, NULL, 0) > 0; }                 // START
 static int gv_can_trash(const GamesView &v) { (void)v; return 0; }       // △ move to the trash (in the trash: restore)
 
 // (keys are hdd, all, usbN: "t:" and five characters fit the scan's 8)
@@ -4690,13 +4777,29 @@ static void gv_fix(GamesView &v)
 	int vis = gv_vis();
 	if (v.row >= v.first + vis) v.first = v.row - vis + 1;
 	if (v.first > v.nshown - vis) v.first = v.nshown > vis ? v.nshown - vis : 0;
+	if (v.shown && v.row < v.nshown && v.gen == g_gl.gen && g_gl.g)
+		snprintf(v.fbase, sizeof(v.fbase), "%s", g_gl.d[g_gl.g[v.shown[v.row]].first].base);
+}
+
+// The row (position in shown) whose game has a disc with this base, -1 when none shows.
+static int gv_row_of(const GamesView &v, const char *base)
+{
+	if (!base[0]) return -1;
+	for (int pass = 0; pass < 2; pass++)   // its first disc first, then any of its discs
+		for (int r = 0; r < v.nshown; r++) {
+			const Game &g = g_gl.g[v.shown[r]];
+			for (int i = g.first; i < g.first + (pass ? g.ndiscs : 1); i++) if (!strcmp(g_gl.d[i].base, base)) return r;
+		}
+	return -1;
 }
 
 // The rows the filter shows, from the result in hand; the focused game stays focused when it
-// still shows.
+// still shows (found by its first disc's file, also in a result read again).
 static void gv_refilter(GamesView &v)
 {
-	int keep = v.shown && v.row < v.nshown ? v.shown[v.row] : -1;
+	char keep[sizeof(v.fbase)];
+	snprintf(keep, sizeof(keep), "%s", v.fbase);
+	int old = v.row;
 	free(v.shown);
 	v.shown = NULL;
 	v.nshown = v.nomem = 0;
@@ -4706,9 +4809,8 @@ static void gv_refilter(GamesView &v)
 		if (!v.shown) v.nomem = 1;
 		else v.nshown = lib_filter(g_gl.g, g_gl.ng, g_gl.d, &g_games_filter, v.shown);
 	}
-	int r = 0;
-	for (int i = 0; i < v.nshown && keep >= 0; i++) if (v.shown[i] == keep) r = i;
-	v.row = r;
+	int r = gv_row_of(v, keep);
+	v.row = r >= 0 ? r : old;
 	gv_fix(v);
 }
 
@@ -4718,6 +4820,7 @@ static void gv_switch(GamesView &v)
 	char k[8];
 	gv_scan_key(v, k, sizeof(k));
 	v.row = v.first = v.gen = 0;   // (gen 0: no result is worked out yet)
+	v.fbase[0] = 0;
 	free(v.shown);
 	v.shown = NULL;
 	v.nshown = 0;
@@ -4736,13 +4839,40 @@ static void gv_open(GamesView &v)
 // Takes a finished scan; returns 1 when the screen changed. The rows are worked out once per
 // result of the source shown. A result of another source (asked for elsewhere, e.g. /games.json)
 // with nothing else on its way: the screen asks for its own again.
+static void gd_build(const Game &g);
 static int gv_poll(GamesView &v)
 {
-	int took = gl_poll();
+	int took = 0;
+	if (v.checking) {   // the check job: its progress, then its result and the list read again
+		if (g_gc.running) {
+			uint32_t sig = (uint32_t)g_gc.i * 1000003u + g_gc.done / 2048 + (g_gc.abort ? 1u << 31 : 0);
+			if (sig == v.gc_sig) return 0;
+			v.gc_sig = sig;
+			return 1;
+		}
+		v.checking = 0;
+		int n = g_gc.n, ok = g_gc.checked, failed = g_gc.failed;
+		snprintf(v.note, sizeof(v.note), T(g_gc.abort ? STR_GC_CANCELLED : STR_GC_DONE), ok, n);
+		size_t l = strlen(v.note);
+		if (failed) snprintf(v.note + l, sizeof(v.note) - l, T(STR_GC_FAILED_N), failed);
+		free(g_gc.items);
+		g_gc.items = NULL;
+		g_gc.n = 0;
+		char k[8];
+		gv_scan_key(v, k, sizeof(k));
+		gl_changed();
+		gl_open(k);
+		took = 1;
+	}
+	took |= gl_poll();
 	if (gv_ready(v)) {
 		if (v.gen == g_gl.gen) return took;
 		if (v.mode == GV_DETAIL) v.mode = GV_LIST;   // the detail view was read from the old result
 		gv_refilter(v);
+		if (v.back_detail) {   // a check from the detail view: back in it, read again
+			v.back_detail = 0;
+			if (v.nshown && gv_row_of(v, v.fbase) == v.row) { gd_build(g_gl.g[v.shown[v.row]]); v.dfirst = 0; v.mode = GV_DETAIL; }
+		}
 		return 1;
 	}
 	char k[8];
@@ -4753,6 +4883,13 @@ static int gv_poll(GamesView &v)
 
 static void gv_close(GamesView &v)
 {
+	if (v.checking) {   // the app closes during a check: it stops, then its discs go
+		g_gc.abort = 1;
+		while (g_gc.running) usleep(10000);
+		free(g_gc.items);
+		g_gc.items = NULL;
+		v.checking = 0;
+	}
 	free(v.shown);
 	v.shown = NULL;
 	v.nshown = 0;
@@ -4980,22 +5117,33 @@ static void gv_head(const GamesView &v, char *name, size_t n)
 	ui_text_fit(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, sub, ui_w() * 2 / 3, UI_CENTER);
 }
 
+// The list's buttons. A row too wide for the screen (Swedish, with the checks and a filter set)
+// leaves out the obvious ones first: ↑↓ select, then L1 clear, then L2/R2 by letter.
 static void gv_list_hints(const GamesView &v, int rows)
 {
-	const char *b[10], *l[10];
-	int m = 0;
+	const char *b[12], *l[12];
+	int drop[12], m = 0;   // drop: the order hints are left out in (0 = always shown)
+	auto add = [&](const char *btn, StrId s, int d) { b[m] = btn; l[m] = T(s); drop[m++] = d; };
 	if (rows) {
-		b[m] = "updown"; l[m++] = T(STR_HINT_SELECT);
-		if (rows > 1) { b[m] = "l2r2"; l[m++] = T(STR_HINT_LETTER); }
-		b[m] = "cross"; l[m++] = T(STR_HINT_DETAILS);
+		add("updown", STR_HINT_SELECT, 1);
+		if (rows > 1) add("l2r2", STR_HINT_LETTER, 3);
+		add("cross", STR_HINT_DETAILS, 0);
 	}
-	if (rows && gv_can_check(v)) { b[m] = "square"; l[m++] = T(STR_HINT_CHECK); }
-	if (rows && gv_can_trash(v)) { b[m] = "triangle"; l[m++] = T(STR_GL_V_TRASH); }
-	if (gv_can_check_all(v)) { b[m] = "start"; l[m++] = T(STR_HINT_CHECK); }
-	b[m] = "r1"; l[m++] = T(STR_GL_FILTER);
-	if (g_games_filter.fmt || g_games_filter.redump || g_games_filter.errors || g_games_filter.other) { b[m] = "l1"; l[m++] = T(STR_HINT_CLEAR); }
-	b[m] = "select"; l[m++] = T(STR_HINT_SOURCE);
-	b[m] = "circle"; l[m++] = T(STR_HINT_BACK);
+	if (rows && gv_can_check(v)) add("square", STR_HINT_CHECK_ONE, 0);
+	if (rows && gv_can_trash(v)) add("triangle", STR_GL_V_TRASH, 0);
+	if (gv_can_check_all(v)) add("start", STR_HINT_CHECK_ALL, 0);
+	add("r1", STR_GL_FILTER, 0);
+	if (g_games_filter.fmt || g_games_filter.redump || g_games_filter.errors || g_games_filter.other) add("l1", STR_HINT_CLEAR, 2);
+	add("select", STR_HINT_SOURCE, 0);
+	add("circle", STR_HINT_BACK, 0);
+	for (int d = 1; d <= 3; d++) {
+		int sum = 0;
+		for (int i = 0; i < m; i++) sum += ui_hint_width(b[i], l[i]);
+		if (sum + (m - 1) * (ui_w() / 60) <= ui_w() * 94 / 100) break;
+		int k = 0;
+		for (int i = 0; i < m; i++) if (drop[i] != d) { b[k] = b[i]; l[k] = l[i]; drop[k++] = drop[i]; }
+		m = k;
+	}
 	hint_bar(b, l, m);
 }
 
@@ -5010,6 +5158,29 @@ static void gv_filter_draw(const GamesView &v)
 	const char *b[] = {"updown", "leftright", "l1", "circle"};
 	const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_CLEAR), T(STR_HINT_DONE)};
 	hint_bar(b, l, 4);
+}
+
+// The note above the hint bar: a check's result or refusal; else the focused game's note (place,
+// duplicate, LibCrypt); else, while Redump is off, how to turn it on for the checks.
+static void gv_footer(const GamesView &v, const char *note)
+{
+	const char *t = v.note[0] ? v.note : note && note[0] ? note : g_redump == RD_OFF && !v.trash ? T(STR_GC_REDUMP_OFF) : NULL;
+	if (t) ui_text_fit(UI_SMALL, ui_w() / 2, hint_y() - ui_line(UI_SMALL) * 2, 0x6870A0, t, ui_w() * 2 / 3, UI_CENTER);
+}
+
+// The check job's progress: which game of how many, its name, how far through its file.
+static void gc_draw()
+{
+	int n = g_gc.n, i = g_gc.i < n ? g_gc.i : n - 1;
+	char det[64];
+	snprintf(det, sizeof(det), T(STR_GC_N_OF_M), i + 1, n);
+	uint32_t tot = g_gc.total, done = g_gc.done;
+	progress_draw(T(STR_GC_TITLE), det, tot ? (uint32_t)((uint64_t)done * 100 / tot) : 0, NULL, g_gc.abort);
+	if (g_gc.items && i >= 0) {
+		const char *b = g_gc.items[i].base, *sl = strrchr(b, '/');
+		int lb = ui_line(UI_BODY);
+		ui_text_fit(UI_SMALL, ui_w() / 2, ui_h() * 2 / 5 + lb / 3, 0xA8B0C8, sl ? sl + 1 : b, ui_w() * 3 / 5, UI_CENTER);
+	}
 }
 
 static void gv_detail_draw(const GamesView &v)
@@ -5034,15 +5205,18 @@ static void gv_detail_draw(const GamesView &v)
 		ui_text_fit(UI_SMALL, left, sy, 0xA8B0C8, l.k, vx - left - ui_w() / 80);
 		ui_text_fit(UI_SMALL, vx, sy, l.col, l.v, right - vx);
 	}
+	gv_footer(v, NULL);
 	const char *b[4], *lb[4];
 	int m = 0;
 	if (gd_n > vis) { b[m] = "updown"; lb[m++] = T(STR_HINT_SCROLL); b[m] = "l2r2"; lb[m++] = T(STR_HINT_PAGE); }
+	if (gv_can_check(v)) { b[m] = "square"; lb[m++] = T(STR_HINT_CHECK_ONE); }
 	b[m] = "circle"; lb[m++] = T(STR_HINT_BACK);
 	hint_bar(b, lb, m);
 }
 
 static void games_draw(const GamesView &v)
 {
+	if (v.checking) { gc_draw(); return; }
 	draw_backdrop();
 	if (v.mode == GV_FILTER) { gv_filter_draw(v); return; }
 	if (v.mode == GV_DETAIL && gv_listed(v) && v.row < v.nshown) { gv_detail_draw(v); return; }
@@ -5121,7 +5295,7 @@ static void games_draw(const GamesView &v)
 				break;
 			}
 	}
-	if (note[0]) footer_note(note);
+	gv_footer(v, note);
 	gv_list_hints(v, v.nshown);
 }
 
@@ -5137,9 +5311,42 @@ static void gv_set_filter(GamesView &v, const GameFilter &f)
 	gv_refilter(v);
 }
 
+// □ (all = 0: the focused game, each of its discs that can be checked) or START (all = 1: every
+// unchecked game shown): starts the check job, or says why the game cannot be checked.
+static void gv_check(GamesView &v, int all)
+{
+	const Game &g = g_gl.g[v.shown[v.row]];
+	int cap = all ? gv_unchecked(v, NULL, 0) : g.ndiscs, n = 0;
+	StrId why = STR_COUNT;
+	GcItem *items = cap > 0 ? (GcItem *)malloc((size_t)cap * sizeof(GcItem)) : NULL;
+	if (!items) { if (cap > 0) snprintf(v.note, sizeof(v.note), "%s", T(STR_GL_OOM)); return; }
+	if (all) n = gv_unchecked(v, items, cap);
+	else for (int i = g.first; i < g.first + g.ndiscs; i++) {
+		StrId r = gc_refusal(g_gl.d[i]);
+		if (r == STR_COUNT) gc_item(g_gl.d[i], items[n++]);
+		else if (why == STR_COUNT) why = r;
+	}
+	if (!n) {
+		free(items);
+		if (why != STR_COUNT) snprintf(v.note, sizeof(v.note), "%s", T(why));
+		logf("game list check: %s refused (%s)", g.name, why != STR_COUNT ? T(why) : "nothing to check");
+		return;
+	}
+	logf("game list check: %d disc(s)%s", n, all ? " (all unchecked shown)" : "");
+	v.back_detail = v.mode == GV_DETAIL;
+	v.checking = 1;
+	v.gc_sig = 0;
+	gc_start(items, n, g_input_src);
+}
+
 // One press; returns 0 when the screen closes.
 static int gv_input(GamesView &v, int p)
 {
+	if (v.checking) {   // the progress screen: O cancels (the screen waits for the job to stop)
+		if (p & B_CIRCLE) g_gc.abort = 1;
+		return 1;
+	}
+	v.note[0] = 0;
 	if (v.mode == GV_FILTER) {
 		int *vals[5] = {&v.f.fmt, &v.f.redump, &v.f.errors, &v.f.other, &v.ftrash};
 		static const int counts[5] = {3, 5, 3, 4, 2};
@@ -5164,6 +5371,7 @@ static int gv_input(GamesView &v, int p)
 		if (v.dfirst > maxf) v.dfirst = maxf;
 		if (v.dfirst < 0) v.dfirst = 0;
 		if (p & B_CIRCLE) v.mode = GV_LIST;
+		else if ((p & B_SQUARE) && gv_can_check(v) && v.row < v.nshown) gv_check(v, 0);
 		return 1;
 	}
 	if (p & B_CIRCLE) return 0;
@@ -5186,6 +5394,8 @@ static int gv_input(GamesView &v, int p)
 	if (p & B_L2) v.row = lib_first_letter_next(g_gl.g, v.shown, v.nshown, v.row, -1);
 	gv_fix(v);
 	if (p & B_CROSS) { gd_build(g_gl.g[v.shown[v.row]]); v.dfirst = 0; v.mode = GV_DETAIL; }
+	else if ((p & B_SQUARE) && gv_can_check(v)) gv_check(v, 0);
+	else if ((p & B_START) && gv_can_check_all(v)) gv_check(v, 1);
 	return 1;
 }
 
@@ -6764,21 +6974,31 @@ static void job_reset(int c);
 // Checks a rip from its file, without the disc: MD5 per track (track bounds from its .cue), its
 // .md5 written, the track MD5s and the Redump line of its log rewritten (a small log made when it
 // has none). As the card's job (job = 1) it shows its progress, can be cancelled and compares with
-// Redump as set. Otherwise (the audit's undo, on the UI thread) it touches no card's state and
-// compares with the local copy only (none: unchecked). Returns 0 checked, 1 cancelled, -1 no image.
+// Redump as set. With cf (the game list, any thread) it reads cf's image, touches no card's state,
+// compares with Redump as set by cf's disc ID, reports progress and stops through cf. Otherwise (the
+// audit's undo, on the UI thread) it touches no card's state and compares with the local copy only
+// (none: unchecked). Returns 0 checked, 1 cancelled, -1 no image.
+struct CheckFile {
+	const char *image;                 // the image file (an .iso/.img without a cue: one track)
+	const char *title, *serial;        // a new log's title= and serial=; serial is also the online lookup's
+	volatile int *abort;               // set: stop
+	volatile uint32_t *done, *total;   // progress in sectors
+	int rd;                            // the result (rd_compare)
+	char rdname[RD_NAME];
+};
 static void (*g_check_tick)(uint32_t sectors);   // set: called now and then while check_image reads (not as a job)
-static int check_image(const char *base, int job = 0)
+static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 {
 	char path[320];
 	// track starts (sectors) from the cue: INDEX 00 when there is one (the pregap belongs to the track)
 	uint32_t st[MAX_TRACKS + 1];
 	int nt = 0;
 	snprintf(path, sizeof(path), "%s.cue", base);
-	VFile *cf = vf_open(path, "rb");
-	if (cf) {
+	VFile *cuef = vf_open(path, "rb");
+	if (cuef) {
 		char cb[8192];
-		int n = (int)vf_read(cf, cb, sizeof(cb) - 1);
-		vf_close(cf);
+		int n = (int)vf_read(cuef, cb, sizeof(cb) - 1);
+		vf_close(cuef);
 		cb[n > 0 ? n : 0] = 0;
 		int i0 = 0;
 		char *save = NULL;
@@ -6794,9 +7014,16 @@ static int check_image(const char *base, int job = 0)
 	}
 	if (!nt) { nt = 1; st[0] = 0; }   // no cue: the whole image as one track
 	st[0] = 0;
-	snprintf(path, sizeof(path), "%s.bin", base);
+	if (cf) snprintf(path, sizeof(path), "%s", cf->image);
+	else snprintf(path, sizeof(path), "%s.bin", base);
 	VFile *f = vf_open(path, "rb");
 	if (!f) { if (job) g_total = 1; logf("check %s: no image", base); return -1; }
+	if (cf) {
+		uint64_t size = 0;
+		vf_size(path, &size);
+		*cf->total = (uint32_t)(size / RAW_SIZE);
+		*cf->done = 0;
+	}
 	if (job) {   // size: read to the end once is slow; seek-free estimate from the identification
 		uint64_t size = (uint64_t)g_cards[cur_card()].mb * 1024 * 1024;
 		g_total = size ? (uint32_t)(size / RAW_SIZE) : 1;
@@ -6806,7 +7033,7 @@ static int check_image(const char *base, int job = 0)
 	uint8_t *buf = (uint8_t *)malloc(512 * RAW_SIZE);
 	uint32_t lba = 0;
 	int t = 0;
-	while (buf && !(job && g_abort)) {
+	while (buf && !(job && g_abort) && !(cf && *cf->abort)) {
 		size_t got = vf_read(f, buf, 512 * RAW_SIZE);
 		uint32_t secs = (uint32_t)(got / RAW_SIZE);
 		for (uint32_t i = 0; i < secs; i++, lba++) {
@@ -6814,12 +7041,13 @@ static int check_image(const char *base, int job = 0)
 			md5_update(&md[t], buf + (size_t)i * RAW_SIZE, RAW_SIZE);
 		}
 		if (job) { g_done = lba; if (lba > g_total) g_total = lba; }
+		else if (cf) { *cf->done = lba; if (lba > *cf->total) *cf->total = lba; }
 		else if (g_check_tick && lba % (16 * 512) == 0) g_check_tick(lba);   // about every 19 MB
 		if (got < 512 * RAW_SIZE) break;
 	}
 	vf_close(f);
 	free(buf);
-	if (job && g_abort) { logf("check %s: cancelled", base); return 1; }
+	if ((job && g_abort) || (cf && *cf->abort)) { logf("check %s: cancelled", base); return 1; }
 	uint8_t bin[MAX_TRACKS + 1][16];
 	char hex[MAX_TRACKS + 1][33];
 	for (int i = 0; i < nt; i++) { md5_final(&md[i], bin[i]); md5_hex(bin[i], hex[i]); }
@@ -6835,6 +7063,10 @@ static int check_image(const char *base, int job = 0)
 		redump_verify(info, sizeof(info));
 		rd = g_rd_result;
 		snprintf(rdname, sizeof(rdname), "%s", g_rd_result_name);
+	} else if (cf) {
+		rd = rd_compare(bin, nt, cf->serial, rdname, sizeof(rdname));
+		cf->rd = rd;
+		snprintf(cf->rdname, sizeof(cf->rdname), "%s", rdname);
 	} else {
 		rd_lock();
 		rd = rd_local_verify(bin, nt, rdname, sizeof(rdname));
@@ -6881,7 +7113,7 @@ static int check_image(const char *base, int job = 0)
 			const Card *k = job ? &g_cards[cur_card()] : NULL;
 			const char *slash = strrchr(base, '/');
 			vf_printf(of, "PSX Ripper rip log\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n",
-			          k ? k->title : slash ? slash + 1 : base, k ? k->serial : "");
+			          k ? k->title : cf && cf->title ? cf->title : slash ? slash + 1 : base, k ? k->serial : cf && cf->serial ? cf->serial : "");
 			vf_printf(of, "sectors=%u\n", lba);
 			for (int i = 0; i < nt; i++) vf_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], hex[i]);
 			vf_printf(of, "%s", rdl);
@@ -7061,6 +7293,116 @@ static void check_job_start(int c, AuditSrc src)
 	audit_card_begin(c, src, "check");
 	sys_ppu_thread_t t;
 	if (sysThreadCreate(&t, check_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxcheck")) { audit_card_end(c, "failed"); k.job = 0; g_state = ST_HOME; }
+}
+
+// ---------------------------------------------------------------- the game list's checks (□, START)
+// The user data (2048 bytes) of sector lba of a 2352 image file: after the header (MODE1) or the
+// header and subheader (MODE2). 0 when read.
+static int image_user_sector(VFile *f, uint32_t lba, uint8_t *out2048)
+{
+	static uint8_t raw[RAW_SIZE];   // (the check job's thread only)
+	if (vf_seek(f, (uint64_t)lba * RAW_SIZE) || vf_read(f, raw, RAW_SIZE) != RAW_SIZE) return -1;
+	memcpy(out2048, raw + (raw[15] == 1 ? 16 : 24), 2048);
+	return 0;
+}
+
+// The disc ID of a 2352 image, as the identification reads it from a disc: SYSTEM.CNF, else the
+// volume name. Empty when it has none (or no ISO 9660 file system).
+static void image_serial(const char *image, char *out)
+{
+	out[0] = 0;
+	VFile *f = vf_open(image, "rb");
+	if (!f) return;
+	static uint8_t pvd[2048], dir[2048], cnf[2049];
+	if (!image_user_sector(f, 16, pvd) && !memcmp(pvd + 1, "CD001", 5)) {
+		char vol[33];
+		memcpy(vol, pvd + 40, 32);
+		vol[32] = 0;
+		for (int i = 31; i >= 0 && (vol[i] == ' ' || vol[i] == 0); i--) vol[i] = 0;
+		uint32_t root = pvd[158] | (pvd[159] << 8) | (pvd[160] << 16) | ((uint32_t)pvd[161] << 24), lba, size;
+		if (!image_user_sector(f, root, dir) && !find_file(dir, 2048, "SYSTEM.CNF", &lba, &size) && !image_user_sector(f, lba, cnf)) {
+			cnf[2048] = 0;
+			serial_from_cnf((const char *)cnf, out);
+		}
+		if (!out[0]) serial_from_volume(vol, out);
+	}
+	vf_close(f);
+}
+
+// One disc's check from its file, as an audit check job with its Redump line before and after: an
+// app rip (a cue) through check_image as it is; a 2352 .iso/.img without a cue as one track, whose
+// new log names the title of its disc ID (read from the image) or its file name. Returns 0 checked,
+// 1 cancelled, -1 failed.
+static int gc_check_one(const GcItem &it, AuditSrc src)
+{
+	char cue[320], serial[16] = "", title[128];
+	snprintf(cue, sizeof(cue), "%s.cue", it.base);
+	const char *leaf = strrchr(it.base, '/');
+	leaf = leaf ? leaf + 1 : it.base;
+	int single = !vf_exists(cue);
+	if (single) image_serial(it.image, serial);
+	if (!serial[0]) snprintf(serial, sizeof(serial), "%s", it.id);
+	const char *known = single && serial[0] ? lookup_title(serial) : NULL;
+	snprintf(title, sizeof(title), "%s", single ? (known ? known : leaf) : it.title);
+	char key[160], before[RD_NAME + 16], after[RD_NAME + 16];
+	snprintf(key, sizeof(key), "%s:%u", serial[0] ? serial : title, (unsigned)(it.size / RAW_SIZE));
+	redump_line_of(it.base, before, sizeof(before));
+	uint32_t job = audit_job_begin(src, key, leaf, "check");
+	CheckFile cf = {};
+	cf.image = it.image; cf.title = title; cf.serial = serial;
+	cf.abort = &g_gc.abort; cf.done = &g_gc.done; cf.total = &g_gc.total;
+	int r = check_image(it.base, 0, &cf);
+	if (r == 0 && job) {
+		snprintf(after, sizeof(after), "%s%s%s", rd_code(cf.rd), cf.rdname[0] ? " " : "", cf.rdname);
+		audit_note(job, AU_RIPS, key, "redump", "", before, after);
+	}
+	if (job) audit_job_end(job, r == 0 ? "finished" : r == 1 ? "cancelled" : "failed");
+	for (int c = 0; c < NCARDS; c++)   // a drive's card showing this rip: its Redump state follows the log
+		if (!strcmp(g_cards[c].exist, it.base) || !strcmp(g_cards[c].base, it.base)) g_cards[c].recheck = 1;
+	return r;
+}
+
+static AuditSrc g_gc_src;
+// The check job: each disc in turn, a disc a drive started ripping into meanwhile is left out.
+// arg != NULL: a thread of its own (it exits); NULL: run in place.
+static void gc_thread(void *arg)
+{
+	for (int i = 0; i < g_gc.n && !g_gc.abort; i++) {
+		g_gc.i = i;
+		g_gc.done = 0; g_gc.total = 0;
+		const GcItem &it = g_gc.items[i];
+		int busy = 0;
+		for (int c = 0; c < NCARDS; c++) {
+			const Card &k = g_cards[c];
+			if (k.job && (!strcmp(k.base, it.base) || !strcmp(k.exist, it.base))) busy = 1;
+		}
+		int r = busy ? -1 : gc_check_one(it, g_gc_src);
+		if (busy) logf("game list check %s: a drive rips into it, left out", it.base);
+		if (r == 0) g_gc.checked++;
+		else if (r < 0) g_gc.failed++;
+		if (g_gc_after) g_gc_after(i);
+	}
+	logf("game list check: %d checked, %d failed, of %d%s", g_gc.checked, g_gc.failed, g_gc.n, g_gc.abort ? " (cancelled)" : "");
+	gl_changed();
+	__sync_synchronize();
+	g_gc.running = 0;
+	g_redraw = 2;
+	if (arg) sysThreadExit(0);
+}
+
+// Starts the check job over items (it owns them now; the screen frees them when it ended) at the
+// app's lowest priority, as the list's scan: a rip on another drive goes first. Where no thread can
+// be started it runs here and now.
+static void gc_start(GcItem *items, int n, AuditSrc src)
+{
+	g_gc.items = items; g_gc.n = n; g_gc.i = 0;
+	g_gc.done = g_gc.total = 0;
+	g_gc.checked = g_gc.failed = 0;
+	g_gc.abort = 0;
+	g_gc_src = src;
+	g_gc.running = 1;
+	sys_ppu_thread_t t;
+	if (sysThreadCreate(&t, gc_thread, (void *)1, GL_PRIO, 0x10000, 0, (char *)"psxgcheck")) gc_thread(NULL);
 }
 
 // A rip in the background, for one card: the home screen keeps running and shows it in the card.
