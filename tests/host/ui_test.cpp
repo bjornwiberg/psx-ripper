@@ -840,6 +840,67 @@ static void games_check_scenarios()
 	gframe("games-check-done", v);
 	want(!gv_can_check_all(v), "nothing unchecked shown: no Check all");
 	g_gc_after = NULL;
+	want(!vf_exists("/dev_hdd0/PSXISO/Croc 2.log.tmp") && !vf_exists("/dev_hdd0/PSXISO/Croc 2.md5.tmp"), "no .tmp left after a check");
+	// Redump online without an answer (no network on the host): a verified game keeps its line; a
+	// disc without an ID is left out before it is read; Check all stops at the first game
+	g_redump = RD_ONLINE;
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	for (const char *n : {"Spyro (Europe) [SCES_013.15]", "Tomba (Europe) [SCES_011.24]"}) gs_set(H, n, 3, NULL);
+	put_bin("out/gl/dev_hdd0/PSXISO/Nameless.img", unk.data(), unk.size());
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	gs_find(v, "MediEvil");
+	gv_input(v, B_SQUARE);
+	gv_poll(v); gv_poll(v);
+	want(gc_file("out/gl/dev_hdd0/PSXISO/MediEvil (Europe) [SCES_003.11].log").find("redump=verified MediEvil (Europe)\n") != std::string::npos,
+	     "offline: a verified game keeps its Redump line");
+	want(!strstr(v.note, sv ? "Kontrollerade" : "Checked against"), "offline: not counted as checked");
+	gs_find(v, "Nameless");
+	gv_input(v, B_SQUARE);
+	gv_poll(v); gv_poll(v);
+	want(!vf_exists("/dev_hdd0/PSXISO/Nameless.md5") && !vf_exists("/dev_hdd0/PSXISO/Nameless.log") && strstr(v.note, sv ? "utan skiv-ID" : "without disc ID"),
+	     "online: a disc without an ID is not read");
+	gv_input(v, B_START);
+	gv_poll(v); gv_poll(v);
+	gframe("games-check-offline", v);
+	want(vf_exists("/dev_hdd0/PSXISO/Motorhead (USA) [SLUS_007.17].md5") && gc_file("out/gl/dev_hdd0/PSXISO/Motorhead (USA) [SLUS_007.17].log").find("redump=") == std::string::npos &&
+	     !vf_exists("/dev_hdd0/PSXISO/Spyro (Europe) [SCES_013.15].md5") && !vf_exists("/dev_hdd0/PSXISO/Tomba (Europe) [SCES_011.24].md5") && has_text(sv ? "gick inte att fråga" : "could not be asked"),
+	     "offline: Check all stops at the first game (Motorhead: MD5 written, no Redump line), and says why");
+	g_redump = RD_LOCAL;
+	// both directions with a drive: the job's file is busy for a rip or a card check on it; the job
+	// writes nothing when a drive started on the set meanwhile
+	{
+		GcItem it[1] = {};
+		snprintf(it[0].base, sizeof it[0].base, "/dev_hdd0/PSXISO/Klonoa");
+		g_gc.items = it; g_gc.n = 1; g_gc.i = 0; g_gc.running = 1;
+		want(g_state_busy(), "/status.json busy while the check job runs");
+		Card &k = g_cards[1];
+		k.job = 0; k.res[0] = 0;
+		snprintf(k.exist, sizeof k.exist, "/dev_hdd0/PSXISO/Klonoa");
+		snprintf(k.base, sizeof k.base, "/dev_hdd0/PSXISO/Klonoa");
+		check_job_start(1, AU_PAD);
+		want(!k.job && !strcmp(k.res, T(STR_GC_CARD_BUSY)), "a card's check of the job's file is refused");
+		k.res[0] = 0;
+		rip_job_start(1, AU_PAD, 0);
+		want(!k.job && !strcmp(k.res, T(STR_GC_CARD_BUSY)), "a rip into the job's file is refused");
+		k.res[0] = 0;
+		snprintf(k.exist, sizeof k.exist, "/dev_hdd0/PSXISO/Driver");
+		snprintf(k.base, sizeof k.base, "/dev_hdd0/PSXISO/Driver");
+		check_job_start(1, AU_PAD);
+		want(strcmp(k.res, T(STR_GC_CARD_BUSY)) != 0, "another file: not refused");
+		k.job = 0; k.res[0] = 0; k.exist[0] = k.base[0] = 0;
+		g_gc.running = 0; g_gc.items = NULL; g_gc.n = 0;
+		want(!g_state_busy(), "not busy after the job");
+		// a drive starts on the set while the job reads it: nothing is written
+		std::string before = gc_file("out/gl/dev_hdd0/PSXISO/Driver.log");
+		volatile int ab = 0; volatile uint32_t dn = 0, tt = 0;
+		CheckFile cf = {};
+		cf.busy = [](const char *) { return 1; };
+		cf.image = "/dev_hdd0/PSXISO/Driver.bin"; cf.abort = &ab; cf.done = &dn; cf.total = &tt;
+		remove("out/gl/dev_hdd0/PSXISO/Driver.md5");
+		int r = check_image("/dev_hdd0/PSXISO/Driver", 0, &cf);
+		want(r == -1 && !vf_exists("/dev_hdd0/PSXISO/Driver.md5") && gc_file("out/gl/dev_hdd0/PSXISO/Driver.log") == before && !vf_exists("/dev_hdd0/PSXISO/Driver.log.tmp"),
+		     "a drive on the set: the check writes nothing");
+	}
 	// the progress screen, and O cancels
 	{
 		GcItem it[3] = {};

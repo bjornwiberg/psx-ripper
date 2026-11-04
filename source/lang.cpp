@@ -418,6 +418,9 @@ static const char *en[STR_COUNT] = {
 	"An image in several files cannot be checked yet",
 	"A drive is ripping into this game right now",
 	"Redump is off: turn it on in the settings (online or a local copy) to check games",
+	"Redump could not be asked: check stopped, %d of %d games compared",
+	" · %d without disc ID (not compared)",
+	"The game list is checking this rip",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -832,6 +835,9 @@ static const char *sv[STR_COUNT] = {
 	"En avbildning i flera filer kan inte kontrolleras än",
 	"En enhet rippar till det här spelet just nu",
 	"Redump är av: slå på det i inställningarna (online eller lokal kopia) för att kontrollera spel",
+	"Redump gick inte att fråga: kontrollen stoppades, %d av %d spel jämförda",
+	" · %d utan skiv-ID (inte jämförda)",
+	"Spellistan kontrollerar den här rippen",
 };
 
 static const char **table = en;

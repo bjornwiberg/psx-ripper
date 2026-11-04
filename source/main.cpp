@@ -4651,8 +4651,17 @@ static struct {
 	GcItem *items; int n;            // the discs to check; the screen frees them when the job ended
 	volatile int i;                  // the one being checked
 	volatile uint32_t done, total;   // its progress in sectors
-	volatile int checked, failed;    // so far
+	volatile int checked, failed;    // so far: compared with Redump; could not be read or written
+	volatile int nocmp;              // hashed or not, not compared: no disc ID for the online lookup
+	volatile int unreach;            // Redump could not be asked (network, no local copy): the job stopped
 } g_gc;
+// The base of the disc the check job works on now ("" when none): a rip or a card's check refuses it.
+static const char *gc_current()
+{
+	if (!g_gc.running || !g_gc.items || g_gc.i < 0 || g_gc.i >= g_gc.n) return "";
+	return g_gc.items[g_gc.i].base;
+}
+static int gc_on(const char *a, const char *b) { const char *c = gc_current(); return c[0] && ((a && !strcmp(a, c)) || (b && !strcmp(b, c))); }
 static void (*g_gc_after)(int i);    // called after each disc (the tests cancel through it)
 static void gc_start(GcItem *items, int n, AuditSrc src);
 
@@ -4691,6 +4700,15 @@ static int gv_vis() { int n = (hint_y() - ui_line(UI_SMALL) * 2 - gv_top()) / gv
 
 
 static int gv_listed(const GamesView &v);
+// 1 when a drive's job (a rip, a repair, a card's check) works on the set with this base.
+static int gc_card_busy(const char *base)
+{
+	for (int c = 0; c < NCARDS; c++) {
+		const Card &k = g_cards[c];
+		if (k.job && (!strcmp(k.base, base) || !strcmp(k.exist, base))) return 1;
+	}
+	return 0;
+}
 // Why a disc cannot be checked from its file, STR_COUNT when it can: a 2048 image (no error data
 // to compare: re-rip), an incomplete set, an image in several .bin files, a set a drive rips into.
 static StrId gc_refusal(const GameDisc &d)
@@ -4704,10 +4722,7 @@ static StrId gc_refusal(const GameDisc &d)
 		if (l > 4 && !strcasecmp(p + l - 4, ".bin")) bins++;
 	}
 	if (bins > 1) return STR_GC_NO_MULTI;
-	for (int c = 0; c < NCARDS; c++) {
-		const Card &k = g_cards[c];
-		if (k.job && (!strcmp(k.base, d.base) || !strcmp(k.exist, d.base))) return STR_GC_BUSY;
-	}
+	if (gc_card_busy(d.base)) return STR_GC_BUSY;
 	return STR_COUNT;
 }
 static void gc_item(const GameDisc &d, GcItem &it)
@@ -4851,9 +4866,11 @@ static int gv_poll(GamesView &v)
 			return 1;
 		}
 		v.checking = 0;
-		int n = g_gc.n, ok = g_gc.checked, failed = g_gc.failed;
-		snprintf(v.note, sizeof(v.note), T(g_gc.abort ? STR_GC_CANCELLED : STR_GC_DONE), ok, n);
+		int n = g_gc.n, ok = g_gc.checked, failed = g_gc.failed, nocmp = g_gc.nocmp;
+		snprintf(v.note, sizeof(v.note), T(g_gc.unreach ? STR_GC_UNREACHABLE : g_gc.abort ? STR_GC_CANCELLED : STR_GC_DONE), ok, n);
 		size_t l = strlen(v.note);
+		if (nocmp) snprintf(v.note + l, sizeof(v.note) - l, T(STR_GC_NOCMP_N), nocmp);
+		l = strlen(v.note);
 		if (failed) snprintf(v.note + l, sizeof(v.note) - l, T(STR_GC_FAILED_N), failed);
 		free(g_gc.items);
 		g_gc.items = NULL;
@@ -6620,7 +6637,7 @@ static void json_fields(char *js, size_t n)
 	o = strlen(js); snprintf(js + o, n - o, ",\"redump\":\"%s\",\"redump_name\":", rd_result_str()); json_str(js, n, g_rd_result_name);
 }
 
-static int g_state_busy() { return any_ripping() || g_ident_busy || g_repairing || lv1_patched; }
+static int g_state_busy() { return any_ripping() || g_ident_busy || g_repairing || lv1_patched || g_gc.running; }
 
 // /status.json: the app, and every drive (internal first, then the USB drives by port) with its
 // disc, its job and its last rip. busy at the top: a drive is in use or the lv1 patch is on, never
@@ -6978,7 +6995,17 @@ static void job_reset(int c);
 // compares with Redump as set by cf's disc ID, reports progress and stops through cf. Otherwise (the
 // audit's undo, on the UI thread) it touches no card's state and compares with the local copy only
 // (none: unchecked). Returns 0 checked, 1 cancelled, -1 no image.
+// Closes f (written as tmp) and puts it in path's place; a failed write leaves path as it was.
+static int file_replace(VFile *f, const char *tmp, const char *path)
+{
+	if (vf_close(f)) { vf_unlink(tmp); logf("write %s failed", tmp); return -1; }
+	vf_unlink(path);   // (FatFs' rename does not replace a file)
+	if (vf_rename(tmp, path)) { logf("rename %s failed", tmp); return -1; }
+	return 0;
+}
+
 struct CheckFile {
+	int (*busy)(const char *base);     // checked right before writing: 1 = a drive rips into the set now (nothing written)
 	const char *image;                 // the image file (an .iso/.img without a cue: one track)
 	const char *title, *serial;        // a new log's title= and serial=; serial is also the online lookup's
 	volatile int *abort;               // set: stop
@@ -7075,11 +7102,22 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 		if (rd != 1) rdname[0] = 0;
 	}
 	logf("check %s: %d track(s), redump %s %s", base, nt, rd_code(rd), rdname);
+	if (cf && cf->busy && cf->busy(base)) { logf("check %s: a drive rips into it now, nothing written", base); return -1; }
+	// the .md5 and the log are written next to them (<file>.tmp) and then put in their place: an app
+	// stopped (or the power lost) in the middle leaves the old file whole
+	char tmp[330];
 	snprintf(path, sizeof(path), "%s.md5", base);
-	VFile *mf = vf_open(path, "wb");
-	if (mf) { for (int i = 0; i < nt; i++) vf_printf(mf, "%s  track %02d\n", hex[i], i + 1); vf_close(mf); }
-	// its log: the tracks' MD5s and the Redump line replaced, or a small log
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	VFile *mf = vf_open(tmp, "wb");
+	if (mf) {
+		for (int i = 0; i < nt; i++) vf_printf(mf, "%s  track %02d\n", hex[i], i + 1);
+		file_replace(mf, tmp, path);
+	}
+	// its log: the tracks' MD5s and the Redump line replaced, or a small log. From the game list
+	// (cf) a Redump that could not be asked (-1) leaves the line the log has.
+	int keep_rd = cf && rd == -1;
 	snprintf(path, sizeof(path), "%s.log", base);
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 	char *lb = (char *)malloc(65536);
 	int n = 0;
 	VFile *lf = lb ? vf_open(path, "rb") : NULL;
@@ -7087,7 +7125,7 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 	if (lb) lb[n > 0 ? n : 0] = 0;
 	char rdl[RD_NAME + 32];
 	snprintf(rdl, sizeof(rdl), "redump=%s%s%s\n", rd_code(rd), rdname[0] ? " " : "", rdname);
-	VFile *of = lb ? vf_open(path, "wb") : NULL;
+	VFile *of = lb ? vf_open(tmp, "wb") : NULL;
 	if (of) {
 		if (n > 0) {
 			int put = 0;
@@ -7100,7 +7138,8 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 					mp = strstr(l, " md5=");
 					if (mp && mp >= l + len) mp = NULL;   // on a later line
 				}
-				if (!strncmp(l, "redump=", 7)) { if (!put) { vf_printf(of, "%s", rdl); put = 1; } }
+				if (!strncmp(l, "redump=", 7) && keep_rd) vf_write(of, l, len);
+				else if (!strncmp(l, "redump=", 7)) { if (!put) { vf_printf(of, "%s", rdl); put = 1; } }
 				else if (mp) {   // the track's MD5 as the image has it now
 					vf_write(of, l, (size_t)(mp + 5 - l));
 					vf_printf(of, "%s\n", hex[tn - 1]);
@@ -7108,7 +7147,7 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 				else vf_write(of, l, len);
 				l += len;
 			}
-			if (!put) vf_printf(of, "%s", rdl);
+			if (!put && !keep_rd) vf_printf(of, "%s", rdl);
 		} else {
 			const Card *k = job ? &g_cards[cur_card()] : NULL;
 			const char *slash = strrchr(base, '/');
@@ -7118,7 +7157,7 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 			for (int i = 0; i < nt; i++) vf_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], hex[i]);
 			vf_printf(of, "%s", rdl);
 		}
-		vf_close(of);
+		file_replace(of, tmp, path);
 	}
 	free(lb);
 	return 0;
@@ -7279,10 +7318,23 @@ static void check_job_thread(void *arg)
 	sysThreadExit(0);
 }
 
+// The game list's check job works on this card's rip (its file, or the one a rip replaces): the
+// card's job is refused, its tab says why.
+static int card_gc_refused(Card &k)
+{
+	if (!gc_on(k.base, k.exist)) return 0;
+	snprintf(k.res, sizeof(k.res), "%s", T(STR_GC_CARD_BUSY));
+	k.res_col = 0xF0C060; k.res_rd = -2; k.res_failed = 2;
+	logf("job refused: the game list checks %s", gc_current());
+	g_redraw = 2;
+	return 1;
+}
+
 static void check_job_start(int c, AuditSrc src)
 {
 	Card &k = g_cards[c];
 	if (k.job || !k.exist[0]) return;
+	if (card_gc_refused(k)) return;
 	job_reset(c);
 	k.job = 1;
 	k.res[0] = 0; k.res_rd = -2;
@@ -7331,8 +7383,10 @@ static void image_serial(const char *image, char *out)
 
 // One disc's check from its file, as an audit check job with its Redump line before and after: an
 // app rip (a cue) through check_image as it is; a 2352 .iso/.img without a cue as one track, whose
-// new log names the title of its disc ID (read from the image) or its file name. Returns 0 checked,
-// 1 cancelled, -1 failed.
+// new log names the title of its disc ID (read from the image) or its file name. Returns 0 compared
+// with Redump, 1 cancelled, -1 failed (unreadable, or a drive rips into it), -2 not compared: no disc
+// ID for the online lookup (found before hashing: nothing done), -3 Redump could not be asked (the
+// MD5s are written, the log keeps its Redump line).
 static int gc_check_one(const GcItem &it, AuditSrc src)
 {
 	char cue[320], serial[16] = "", title[128];
@@ -7344,22 +7398,24 @@ static int gc_check_one(const GcItem &it, AuditSrc src)
 	if (!serial[0]) snprintf(serial, sizeof(serial), "%s", it.id);
 	const char *known = single && serial[0] ? lookup_title(serial) : NULL;
 	snprintf(title, sizeof(title), "%s", single ? (known ? known : leaf) : it.title);
+	if (g_redump == RD_ONLINE && !serial[0]) { logf("game list check %s: no disc ID to look up online, left out", it.base); return -2; }
 	char key[160], before[RD_NAME + 16], after[RD_NAME + 16];
 	snprintf(key, sizeof(key), "%s:%u", serial[0] ? serial : title, (unsigned)(it.size / RAW_SIZE));
 	redump_line_of(it.base, before, sizeof(before));
 	uint32_t job = audit_job_begin(src, key, leaf, "check");
 	CheckFile cf = {};
+	cf.busy = gc_card_busy;
 	cf.image = it.image; cf.title = title; cf.serial = serial;
 	cf.abort = &g_gc.abort; cf.done = &g_gc.done; cf.total = &g_gc.total;
 	int r = check_image(it.base, 0, &cf);
-	if (r == 0 && job) {
+	if (r == 0 && cf.rd != -1 && job) {   // (Redump not asked: the log's line stays, no change to note)
 		snprintf(after, sizeof(after), "%s%s%s", rd_code(cf.rd), cf.rdname[0] ? " " : "", cf.rdname);
 		audit_note(job, AU_RIPS, key, "redump", "", before, after);
 	}
-	if (job) audit_job_end(job, r == 0 ? "finished" : r == 1 ? "cancelled" : "failed");
+	if (job) audit_job_end(job, r == 0 && cf.rd != -1 ? "finished" : r == 1 ? "cancelled" : "failed");
 	for (int c = 0; c < NCARDS; c++)   // a drive's card showing this rip: its Redump state follows the log
 		if (!strcmp(g_cards[c].exist, it.base) || !strcmp(g_cards[c].base, it.base)) g_cards[c].recheck = 1;
-	return r;
+	return r == 0 && cf.rd == -1 ? -3 : r;
 }
 
 static AuditSrc g_gc_src;
@@ -7371,18 +7427,17 @@ static void gc_thread(void *arg)
 		g_gc.i = i;
 		g_gc.done = 0; g_gc.total = 0;
 		const GcItem &it = g_gc.items[i];
-		int busy = 0;
-		for (int c = 0; c < NCARDS; c++) {
-			const Card &k = g_cards[c];
-			if (k.job && (!strcmp(k.base, it.base) || !strcmp(k.exist, it.base))) busy = 1;
-		}
+		int busy = gc_card_busy(it.base);
 		int r = busy ? -1 : gc_check_one(it, g_gc_src);
 		if (busy) logf("game list check %s: a drive rips into it, left out", it.base);
 		if (r == 0) g_gc.checked++;
+		else if (r == -2) g_gc.nocmp++;
+		else if (r == -3) { g_gc.unreach = 1; break; }   // the next ones would not get an answer either
 		else if (r < 0) g_gc.failed++;
 		if (g_gc_after) g_gc_after(i);
 	}
-	logf("game list check: %d checked, %d failed, of %d%s", g_gc.checked, g_gc.failed, g_gc.n, g_gc.abort ? " (cancelled)" : "");
+	logf("game list check: %d checked, %d not compared, %d failed, of %d%s%s", g_gc.checked, g_gc.nocmp, g_gc.failed, g_gc.n,
+	     g_gc.abort ? " (cancelled)" : "", g_gc.unreach ? " (Redump could not be asked: stopped)" : "");
 	gl_changed();
 	__sync_synchronize();
 	g_gc.running = 0;
@@ -7397,7 +7452,7 @@ static void gc_start(GcItem *items, int n, AuditSrc src)
 {
 	g_gc.items = items; g_gc.n = n; g_gc.i = 0;
 	g_gc.done = g_gc.total = 0;
-	g_gc.checked = g_gc.failed = 0;
+	g_gc.checked = g_gc.failed = g_gc.nocmp = g_gc.unreach = 0;
 	g_gc.abort = 0;
 	g_gc_src = src;
 	g_gc.running = 1;
@@ -7452,6 +7507,7 @@ static void rip_job_start(int c, AuditSrc src, int fresh)
 	Card &k = g_cards[c];
 	if (k.job) return;
 	if (!g_parallel && any_ripping()) { own_dialog(T(STR_REPAIR_WAIT), 0); return; }   // one at a time then
+	if (card_gc_refused(k)) return;
 	job_reset(c);
 	k.job = 1;
 	OnCard o(c);
