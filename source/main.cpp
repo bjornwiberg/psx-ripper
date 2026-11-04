@@ -6995,13 +6995,54 @@ static void job_reset(int c);
 // compares with Redump as set by cf's disc ID, reports progress and stops through cf. Otherwise (the
 // audit's undo, on the UI thread) it touches no card's state and compares with the local copy only
 // (none: unchecked). Returns 0 checked, 1 cancelled, -1 no image.
-// Closes f (written as tmp) and puts it in path's place; a failed write leaves path as it was.
-static int file_replace(VFile *f, const char *tmp, const char *path)
+// A file written next to the one it replaces (<file>.tmp): ok drops at the first write that did not
+// write everything (a full disk: FatFs and stdio report a short count, the close still succeeds).
+struct TmpOut { VFile *f; int ok; size_t put; };
+static size_t g_tmp_cap = (size_t)-1;   // bytes a temp file takes (the tests lower it: a full disk)
+static int g_replace_unlinks;           // replacements that had to remove the old file first (FatFs)
+static void to_write(TmpOut &o, const void *p, size_t n)
 {
-	if (vf_close(f)) { vf_unlink(tmp); logf("write %s failed", tmp); return -1; }
-	vf_unlink(path);   // (FatFs' rename does not replace a file)
+	if (!o.ok) return;
+	size_t want = n;
+	if (o.put + n > g_tmp_cap) n = g_tmp_cap > o.put ? g_tmp_cap - o.put : 0;
+	size_t w = n ? vf_write(o.f, p, n) : 0;
+	o.put += w;
+	if (w != want) o.ok = 0;
+}
+static void to_printf(TmpOut &o, const char *fmt, ...)
+{
+	char b[1024];
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(b, sizeof(b), fmt, ap);
+	va_end(ap);
+	if (n < 0 || n >= (int)sizeof(b)) { o.ok = 0; return; }
+	to_write(o, b, (size_t)n);
+}
+// Closes o (written as tmp) and puts it in path's place. A short write or a failed close leaves path
+// as it was and removes tmp. The rename replaces path where it can (stdio: at once); where it cannot
+// (FatFs) path is removed first, and a <file>.tmp without its <file> is put back by tmp_restore.
+static int file_replace(TmpOut &o, const char *tmp, const char *path)
+{
+	int closed = vf_close(o.f) == 0;
+	if (!o.ok || !closed) { vf_unlink(tmp); logf("write %s failed (%s), %s kept", tmp, o.ok ? "close" : "short write", path); return -1; }
+	if (!vf_rename(tmp, path)) return 0;
+	g_replace_unlinks++;
+	vf_unlink(path);
 	if (vf_rename(tmp, path)) { logf("rename %s failed", tmp); return -1; }
 	return 0;
+}
+// A replacement cut short between removing <file> and renaming <file>.tmp (power lost): the .tmp is
+// whole (it was closed first), so it becomes <file> again. A .tmp next to its <file> is a write that
+// did not finish: it goes.
+static void tmp_restore(const char *path)
+{
+	char tmp[340];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	if (!vf_exists(tmp)) return;
+	if (vf_exists(path)) { vf_unlink(tmp); logf("%s: unfinished write removed", tmp); return; }
+	if (vf_rename(tmp, path)) logf("%s: could not be put back", tmp);
+	else logf("%s put back from its .tmp", path);
 }
 
 struct CheckFile {
@@ -7103,15 +7144,17 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 	}
 	logf("check %s: %d track(s), redump %s %s", base, nt, rd_code(rd), rdname);
 	if (cf && cf->busy && cf->busy(base)) { logf("check %s: a drive rips into it now, nothing written", base); return -1; }
+	snprintf(path, sizeof(path), "%s.md5", base); tmp_restore(path);
+	snprintf(path, sizeof(path), "%s.log", base); tmp_restore(path);
 	// the .md5 and the log are written next to them (<file>.tmp) and then put in their place: an app
 	// stopped (or the power lost) in the middle leaves the old file whole
 	char tmp[330];
 	snprintf(path, sizeof(path), "%s.md5", base);
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-	VFile *mf = vf_open(tmp, "wb");
-	if (mf) {
-		for (int i = 0; i < nt; i++) vf_printf(mf, "%s  track %02d\n", hex[i], i + 1);
-		file_replace(mf, tmp, path);
+	TmpOut mo = {vf_open(tmp, "wb"), 1, 0};
+	if (mo.f) {
+		for (int i = 0; i < nt; i++) to_printf(mo, "%s  track %02d\n", hex[i], i + 1);
+		file_replace(mo, tmp, path);
 	}
 	// its log: the tracks' MD5s and the Redump line replaced, or a small log. From the game list
 	// (cf) a Redump that could not be asked (-1) leaves the line the log has.
@@ -7125,8 +7168,8 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 	if (lb) lb[n > 0 ? n : 0] = 0;
 	char rdl[RD_NAME + 32];
 	snprintf(rdl, sizeof(rdl), "redump=%s%s%s\n", rd_code(rd), rdname[0] ? " " : "", rdname);
-	VFile *of = lb ? vf_open(tmp, "wb") : NULL;
-	if (of) {
+	TmpOut of = {lb ? vf_open(tmp, "wb") : NULL, 1, 0};
+	if (of.f) {
 		if (n > 0) {
 			int put = 0;
 			for (char *l = lb; *l; ) {
@@ -7138,24 +7181,24 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 					mp = strstr(l, " md5=");
 					if (mp && mp >= l + len) mp = NULL;   // on a later line
 				}
-				if (!strncmp(l, "redump=", 7) && keep_rd) vf_write(of, l, len);
-				else if (!strncmp(l, "redump=", 7)) { if (!put) { vf_printf(of, "%s", rdl); put = 1; } }
+				if (!strncmp(l, "redump=", 7) && keep_rd) to_write(of, l, len);
+				else if (!strncmp(l, "redump=", 7)) { if (!put) { to_printf(of, "%s", rdl); put = 1; } }
 				else if (mp) {   // the track's MD5 as the image has it now
-					vf_write(of, l, (size_t)(mp + 5 - l));
-					vf_printf(of, "%s\n", hex[tn - 1]);
+					to_write(of, l, (size_t)(mp + 5 - l));
+					to_printf(of, "%s\n", hex[tn - 1]);
 				}
-				else vf_write(of, l, len);
+				else to_write(of, l, len);
 				l += len;
 			}
-			if (!put && !keep_rd) vf_printf(of, "%s", rdl);
+			if (!put && !keep_rd) to_printf(of, "%s", rdl);
 		} else {
 			const Card *k = job ? &g_cards[cur_card()] : NULL;
 			const char *slash = strrchr(base, '/');
-			vf_printf(of, "PSX Ripper rip log\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n",
+			to_printf(of, "PSX Ripper rip log\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n",
 			          k ? k->title : cf && cf->title ? cf->title : slash ? slash + 1 : base, k ? k->serial : cf && cf->serial ? cf->serial : "");
-			vf_printf(of, "sectors=%u\n", lba);
-			for (int i = 0; i < nt; i++) vf_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], hex[i]);
-			vf_printf(of, "%s", rdl);
+			to_printf(of, "sectors=%u\n", lba);
+			for (int i = 0; i < nt; i++) to_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], hex[i]);
+			to_printf(of, "%s", rdl);
 		}
 		file_replace(of, tmp, path);
 	}
@@ -7593,6 +7636,7 @@ static void repair_job_start(int c, AuditSrc src)
 {
 	Card &k = g_cards[c];
 	if (k.job) return;
+	if (card_gc_refused(k)) return;
 	job_reset(c);
 	k.job = 1;
 	k.repairing = 1;

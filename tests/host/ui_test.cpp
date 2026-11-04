@@ -901,6 +901,40 @@ static void games_check_scenarios()
 		want(r == -1 && !vf_exists("/dev_hdd0/PSXISO/Driver.md5") && gc_file("out/gl/dev_hdd0/PSXISO/Driver.log") == before && !vf_exists("/dev_hdd0/PSXISO/Driver.log.tmp"),
 		     "a drive on the set: the check writes nothing");
 	}
+	{   // a full disk: a short write into the temp file keeps the original log and leaves no .tmp;
+		// stdio's rename replaces at once (the old file is never removed first)
+		std::string before = gc_file("out/gl/dev_hdd0/PSXISO/Driver.log");
+		volatile int ab = 0; volatile uint32_t dn = 0, tt = 0;
+		CheckFile cf = {};
+		cf.image = "/dev_hdd0/PSXISO/Driver.bin"; cf.abort = &ab; cf.done = &dn; cf.total = &tt;
+		g_tmp_cap = 20;
+		check_image("/dev_hdd0/PSXISO/Driver", 0, &cf);
+		g_tmp_cap = (size_t)-1;
+		want(gc_file("out/gl/dev_hdd0/PSXISO/Driver.log") == before && !vf_exists("/dev_hdd0/PSXISO/Driver.log.tmp") && !vf_exists("/dev_hdd0/PSXISO/Driver.md5.tmp"),
+		     "a short temp write keeps the original, no .tmp left");
+		g_replace_unlinks = 0;
+		check_image("/dev_hdd0/PSXISO/Driver", 0, &cf);
+		want(g_replace_unlinks == 0 && vf_exists("/dev_hdd0/PSXISO/Driver.md5"), "stdio: rename replaces, nothing removed first");
+		// a power cut between removing the log and renaming its .tmp: the .tmp is put back first
+		std::string log2 = gc_file("out/gl/dev_hdd0/PSXISO/Driver.log") + "drive=Test Drive\n";
+		put_bin("out/gl/dev_hdd0/PSXISO/Driver.log.tmp", log2.data(), log2.size());
+		remove("out/gl/dev_hdd0/PSXISO/Driver.log");
+		check_image("/dev_hdd0/PSXISO/Driver", 0, &cf);
+		std::string log3 = gc_file("out/gl/dev_hdd0/PSXISO/Driver.log");
+		want(!vf_exists("/dev_hdd0/PSXISO/Driver.log.tmp") && log3 == log2, "a lone .log.tmp is put back (not a new small log)");
+		// a repair of the set the job works on is refused, as a rip or a card check
+		GcItem it[1] = {};
+		snprintf(it[0].base, sizeof it[0].base, "/dev_hdd0/PSXISO/Driver");
+		g_gc.items = it; g_gc.n = 1; g_gc.i = 0; g_gc.running = 1;
+		Card &k = g_cards[1];
+		k.job = 0; k.res[0] = 0;
+		snprintf(k.exist, sizeof k.exist, "/dev_hdd0/PSXISO/Driver");
+		snprintf(k.base, sizeof k.base, "/dev_hdd0/PSXISO/Driver");
+		repair_job_start(1, AU_PAD);
+		want(!k.job && !strcmp(k.res, T(STR_GC_CARD_BUSY)), "a repair of the job's file is refused");
+		k.job = 0; k.res[0] = 0; k.exist[0] = k.base[0] = 0;
+		g_gc.running = 0; g_gc.items = NULL; g_gc.n = 0;
+	}
 	// the progress screen, and O cancels
 	{
 		GcItem it[3] = {};
