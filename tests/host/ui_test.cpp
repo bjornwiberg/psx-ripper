@@ -729,7 +729,7 @@ static void games_check_scenarios()
 	gv_input(v, B_SQUARE);
 	gv_input(v, B_START);
 	gv_poll(v);
-	want(!vf_exists("/dev_hdd0/PSXISO/mystery.log"), "Redump off: □ and START do nothing");
+	want(!vf_exists("/dev_hdd0/PSXISO/mystery.iso.log"), "Redump off: □ and START do nothing");
 	gs_find(v, "mystery");
 	gv_input(v, B_CROSS);
 	gframe("games-check-off-detail", v);
@@ -746,7 +746,7 @@ static void games_check_scenarios()
 	gv_input(v, B_SQUARE);
 	gv_poll(v);   // the job ran (no threads on the host); the list is read again
 	gv_poll(v);
-	std::string log = gc_file("out/gl/dev_hdd0/PSXISO/mystery.log");
+	std::string log = gc_file("out/gl/dev_hdd0/PSXISO/mystery.iso.log");
 	char t[200];
 	snprintf(t, sizeof t, "track=01 start=0 md5=%s\n", hex);
 	want(log.find(t) != std::string::npos, "the .iso's log: its track MD5");
@@ -785,7 +785,7 @@ static void games_check_scenarios()
 	gs_find(v, "Unknown Game");
 	gv_input(v, B_SQUARE);
 	gv_poll(v); gv_poll(v);
-	log = gc_file("out/gl/dev_hdd0/PSXISO/Unknown Game (Europe).log");
+	log = gc_file("out/gl/dev_hdd0/PSXISO/Unknown Game (Europe).img.log");
 	want(log.find("title=Unknown Game (Europe)\nserial=\n") != std::string::npos && log.find("redump=no_match\n") != std::string::npos, "the unknown image's log");
 	want(gs_at(v, "Unknown Game"), "focus kept");
 	// a 2048 image: refused with the reason, nothing written
@@ -793,13 +793,13 @@ static void games_check_scenarios()
 	gv_input(v, B_SQUARE);
 	gv_poll(v);
 	gframe("games-check-2048", v);
-	want(!vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].log") && has_text(T(STR_GC_NO_2048)), "a 2048 image is refused");
+	want(!vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].log") && !vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso.log") && has_text(T(STR_GC_NO_2048)), "a 2048 image is refused");
 	// an app rip: through check_image, its log kept apart from the track MD5 and the Redump line
 	gs_find(v, "Ape Escape");
 	gv_input(v, B_CROSS);   // from the detail view: back in it after the check
 	gv_input(v, B_SQUARE);
 	gv_poll(v); gv_poll(v);
-	log = gc_file("out/gl/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].log");
+	log = gc_file("out/gl/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin.log");
 	want(log.find("date=2026-10-02 18:41 UTC\n") != std::string::npos && log.find("check=bitperfect\n") != std::string::npos && log.find("redump=no_match\n") != std::string::npos &&
 	     log.find(GS_MD5) == std::string::npos, "the app rip's log rewritten by check_image");
 	want(v.mode == GV_DETAIL && gs_at(v, "Ape Escape"), "back in the detail view of the same game");
@@ -813,7 +813,7 @@ static void games_check_scenarios()
 		gv_input(v, B_SQUARE);
 		gv_poll(v);
 		gframe("games-check-busy", v);
-		want(!vf_exists("/dev_hdd0/PSXISO/Croc 2.log") && has_text(T(STR_GC_BUSY)), "a set a drive rips into is refused");
+		want(!vf_exists("/dev_hdd0/PSXISO/Croc 2.bin.log") && has_text(T(STR_GC_BUSY)), "a set a drive rips into is refused");
 		k.job = 0; k.base[0] = 0;
 	}
 	// Check all: only the unchecked 2352 games the filter shows (without errors: not Motorhead);
@@ -824,23 +824,23 @@ static void games_check_scenarios()
 	g_gc_cancel_after = 1;
 	gv_input(v, B_START);
 	gv_poll(v); gv_poll(v);
-	int logs = vf_exists("/dev_hdd0/PSXISO/Croc 2.log") + vf_exists("/dev_hdd0/PSXISO/Driver.log") + vf_exists("/dev_hdd0/PSXISO/Klonoa.log");
-	want(logs == 1 && vf_exists("/dev_hdd0/PSXISO/Croc 2.log"), "cancelled after the first game");
+	int logs = vf_exists("/dev_hdd0/PSXISO/Croc 2.bin.log") + vf_exists("/dev_hdd0/PSXISO/Driver.bin.log") + vf_exists("/dev_hdd0/PSXISO/Klonoa.bin.log");
+	want(logs == 1 && vf_exists("/dev_hdd0/PSXISO/Croc 2.bin.log"), "cancelled after the first game");
 	gframe("games-check-cancelled", v);
 	want(has_text(sv ? "avbröts" : "cancelled"), "the cancelled note");
 	g_gc_cancel_after = -1;
-	std::string medievil = gc_file("out/gl/dev_hdd0/PSXISO/MediEvil (Europe) [SCES_003.11].log");
+	std::string medievil = gc_file("out/gl/dev_hdd0/PSXISO/MediEvil (Europe) [SCES_003.11].bin.log");
 	gv_input(v, B_START);
 	gv_poll(v); gv_poll(v);
-	logs = vf_exists("/dev_hdd0/PSXISO/Croc 2.log") + vf_exists("/dev_hdd0/PSXISO/Driver.log") + vf_exists("/dev_hdd0/PSXISO/Klonoa.log");
+	logs = vf_exists("/dev_hdd0/PSXISO/Croc 2.bin.log") + vf_exists("/dev_hdd0/PSXISO/Driver.bin.log") + vf_exists("/dev_hdd0/PSXISO/Klonoa.bin.log");
 	want(logs == 3, "the rest checked");
-	want(gc_file("out/gl/dev_hdd0/PSXISO/Motorhead (USA) [SLUS_007.17].log").find("redump=") == std::string::npos, "a game the filter hides is not checked");
-	want(gc_file("out/gl/dev_hdd0/PSXISO/MediEvil (Europe) [SCES_003.11].log") == medievil, "a verified game is not checked again");
+	want(gc_file("out/gl/dev_hdd0/PSXISO/Motorhead (USA) [SLUS_007.17].bin.log").find("redump=") == std::string::npos, "a game the filter hides is not checked");
+	want(gc_file("out/gl/dev_hdd0/PSXISO/MediEvil (Europe) [SCES_003.11].bin.log") == medievil, "a verified game is not checked again");
 	want(!vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].log"), "a 2048 image is never checked");
 	gframe("games-check-done", v);
 	want(!gv_can_check_all(v), "nothing unchecked shown: no Check all");
 	g_gc_after = NULL;
-	want(!vf_exists("/dev_hdd0/PSXISO/Croc 2.log.tmp") && !vf_exists("/dev_hdd0/PSXISO/Croc 2.md5.tmp"), "no .tmp left after a check");
+	want(!vf_exists("/dev_hdd0/PSXISO/Croc 2.bin.log.tmp") && !vf_exists("/dev_hdd0/PSXISO/Croc 2.bin.md5.tmp"), "no .tmp left after a check");
 	// Redump online without an answer (no network on the host): a verified game keeps its line; a
 	// disc without an ID is left out before it is read; Check all stops at the first game
 	g_redump = RD_ONLINE;
@@ -851,19 +851,19 @@ static void games_check_scenarios()
 	gs_find(v, "MediEvil");
 	gv_input(v, B_SQUARE);
 	gv_poll(v); gv_poll(v);
-	want(gc_file("out/gl/dev_hdd0/PSXISO/MediEvil (Europe) [SCES_003.11].log").find("redump=verified MediEvil (Europe)\n") != std::string::npos,
+	want(gc_file("out/gl/dev_hdd0/PSXISO/MediEvil (Europe) [SCES_003.11].bin.log").find("redump=verified MediEvil (Europe)\n") != std::string::npos,
 	     "offline: a verified game keeps its Redump line");
 	want(!strstr(v.note, sv ? "Kontrollerade" : "Checked against"), "offline: not counted as checked");
 	gs_find(v, "Nameless");
 	gv_input(v, B_SQUARE);
 	gv_poll(v); gv_poll(v);
-	want(!vf_exists("/dev_hdd0/PSXISO/Nameless.md5") && !vf_exists("/dev_hdd0/PSXISO/Nameless.log") && strstr(v.note, sv ? "utan skiv-ID" : "without disc ID"),
+	want(!vf_exists("/dev_hdd0/PSXISO/Nameless.img.md5") && !vf_exists("/dev_hdd0/PSXISO/Nameless.img.log") && strstr(v.note, sv ? "utan skiv-ID" : "without disc ID"),
 	     "online: a disc without an ID is not read");
 	gv_input(v, B_START);
 	gv_poll(v); gv_poll(v);
 	gframe("games-check-offline", v);
-	want(vf_exists("/dev_hdd0/PSXISO/Motorhead (USA) [SLUS_007.17].md5") && gc_file("out/gl/dev_hdd0/PSXISO/Motorhead (USA) [SLUS_007.17].log").find("redump=") == std::string::npos &&
-	     !vf_exists("/dev_hdd0/PSXISO/Spyro (Europe) [SCES_013.15].md5") && !vf_exists("/dev_hdd0/PSXISO/Tomba (Europe) [SCES_011.24].md5") && has_text(sv ? "gick inte att fråga" : "could not be asked"),
+	want(vf_exists("/dev_hdd0/PSXISO/Motorhead (USA) [SLUS_007.17].bin.md5") && gc_file("out/gl/dev_hdd0/PSXISO/Motorhead (USA) [SLUS_007.17].bin.log").find("redump=") == std::string::npos &&
+	     !vf_exists("/dev_hdd0/PSXISO/Spyro (Europe) [SCES_013.15].bin.md5") && !vf_exists("/dev_hdd0/PSXISO/Tomba (Europe) [SCES_011.24].bin.md5") && has_text(sv ? "gick inte att fråga" : "could not be asked"),
 	     "offline: Check all stops at the first game (Motorhead: MD5 written, no Redump line), and says why");
 	g_redump = RD_LOCAL;
 	// both directions with a drive: the job's file is busy for a rip or a card check on it; the job
@@ -891,37 +891,37 @@ static void games_check_scenarios()
 		g_gc.running = 0; g_gc.items = NULL; g_gc.n = 0;
 		want(!g_state_busy(), "not busy after the job");
 		// a drive starts on the set while the job reads it: nothing is written
-		std::string before = gc_file("out/gl/dev_hdd0/PSXISO/Driver.log");
+		std::string before = gc_file("out/gl/dev_hdd0/PSXISO/Driver.bin.log");
 		volatile int ab = 0; volatile uint32_t dn = 0, tt = 0;
 		CheckFile cf = {};
 		cf.busy = [](const char *) { return 1; };
 		cf.image = "/dev_hdd0/PSXISO/Driver.bin"; cf.abort = &ab; cf.done = &dn; cf.total = &tt;
-		remove("out/gl/dev_hdd0/PSXISO/Driver.md5");
+		remove("out/gl/dev_hdd0/PSXISO/Driver.bin.md5");
 		int r = check_image("/dev_hdd0/PSXISO/Driver", 0, &cf);
-		want(r == -1 && !vf_exists("/dev_hdd0/PSXISO/Driver.md5") && gc_file("out/gl/dev_hdd0/PSXISO/Driver.log") == before && !vf_exists("/dev_hdd0/PSXISO/Driver.log.tmp"),
+		want(r == -1 && !vf_exists("/dev_hdd0/PSXISO/Driver.bin.md5") && gc_file("out/gl/dev_hdd0/PSXISO/Driver.bin.log") == before && !vf_exists("/dev_hdd0/PSXISO/Driver.bin.log.tmp"),
 		     "a drive on the set: the check writes nothing");
 	}
 	{   // a full disk: a short write into the temp file keeps the original log and leaves no .tmp;
 		// stdio's rename replaces at once (the old file is never removed first)
-		std::string before = gc_file("out/gl/dev_hdd0/PSXISO/Driver.log");
+		std::string before = gc_file("out/gl/dev_hdd0/PSXISO/Driver.bin.log");
 		volatile int ab = 0; volatile uint32_t dn = 0, tt = 0;
 		CheckFile cf = {};
 		cf.image = "/dev_hdd0/PSXISO/Driver.bin"; cf.abort = &ab; cf.done = &dn; cf.total = &tt;
 		g_tmp_cap = 20;
 		check_image("/dev_hdd0/PSXISO/Driver", 0, &cf);
 		g_tmp_cap = (size_t)-1;
-		want(gc_file("out/gl/dev_hdd0/PSXISO/Driver.log") == before && !vf_exists("/dev_hdd0/PSXISO/Driver.log.tmp") && !vf_exists("/dev_hdd0/PSXISO/Driver.md5.tmp"),
+		want(gc_file("out/gl/dev_hdd0/PSXISO/Driver.bin.log") == before && !vf_exists("/dev_hdd0/PSXISO/Driver.bin.log.tmp") && !vf_exists("/dev_hdd0/PSXISO/Driver.bin.md5.tmp"),
 		     "a short temp write keeps the original, no .tmp left");
 		g_replace_unlinks = 0;
 		check_image("/dev_hdd0/PSXISO/Driver", 0, &cf);
-		want(g_replace_unlinks == 0 && vf_exists("/dev_hdd0/PSXISO/Driver.md5"), "stdio: rename replaces, nothing removed first");
+		want(g_replace_unlinks == 0 && vf_exists("/dev_hdd0/PSXISO/Driver.bin.md5"), "stdio: rename replaces, nothing removed first");
 		// a power cut between removing the log and renaming its .tmp: the .tmp is put back first
-		std::string log2 = gc_file("out/gl/dev_hdd0/PSXISO/Driver.log") + "drive=Test Drive\n";
-		put_bin("out/gl/dev_hdd0/PSXISO/Driver.log.tmp", log2.data(), log2.size());
-		remove("out/gl/dev_hdd0/PSXISO/Driver.log");
+		std::string log2 = gc_file("out/gl/dev_hdd0/PSXISO/Driver.bin.log") + "drive=Test Drive\n";
+		put_bin("out/gl/dev_hdd0/PSXISO/Driver.bin.log.tmp", log2.data(), log2.size());
+		remove("out/gl/dev_hdd0/PSXISO/Driver.bin.log");
 		check_image("/dev_hdd0/PSXISO/Driver", 0, &cf);
-		std::string log3 = gc_file("out/gl/dev_hdd0/PSXISO/Driver.log");
-		want(!vf_exists("/dev_hdd0/PSXISO/Driver.log.tmp") && log3 == log2, "a lone .log.tmp is put back (not a new small log)");
+		std::string log3 = gc_file("out/gl/dev_hdd0/PSXISO/Driver.bin.log");
+		want(!vf_exists("/dev_hdd0/PSXISO/Driver.bin.log.tmp") && log3 == log2, "a lone .log.tmp is put back (not a new small log)");
 		// a repair of the set the job works on is refused, as a rip or a card check
 		GcItem it[1] = {};
 		snprintf(it[0].base, sizeof it[0].base, "/dev_hdd0/PSXISO/Driver");
@@ -963,6 +963,194 @@ static void games_check_scenarios()
 	if (bad) g_fail += bad; else printf("ok   game list checks (%s): .iso without cue, 2048 refused, app rip, busy, check all + cancel, audit, Redump off, focus\n", sv ? "sv" : "en");
 }
 
+
+// ---------------------------------------------------------------- game list: logs and .md5 named after their image
+// The app's log and .md5 carry the image's type (<base>.bin.log, <base>.iso.md5): the list renames
+// the app's old <base>.log / .md5 as one undoable audit job per folder (only logs the app wrote, never
+// onto a taken name, never a busy set); two sets of one base (a rip and an .iso) are each checked on
+// their own files, with the checked row focused and showing its own result; a rip's writers take
+// the new names and its readers still find an old log.
+static std::string gn_row_image(const GamesView &v) { return v.nshown ? g_gl.d[g_gl.g[v.shown[v.row]].first].image : ""; }
+static bool gn_focus_on(GamesView &v, const char *base_leaf, const char *ext)
+{
+	for (int i = 0; i < v.nshown; i++) {
+		const GameDisc &d = g_gl.d[g_gl.g[v.shown[i]].first];
+		const char *sl = strrchr(d.base, '/');
+		size_t l = strlen(d.image);
+		if (sl && !strcmp(sl + 1, base_leaf) && l > 4 && !strcmp(d.image + l - 4, ext)) { v.row = i; gv_fix(v); return true; }
+	}
+	return false;
+}
+static int gn_jobs(const char *disc, const char *what, uint32_t *last = NULL)
+{
+	AuditRow e[32];
+	int n = audit_events(AU_FILES, disc, e, 32), k = 0;
+	for (int i = 0; i < n; i++) if (!strcmp(e[i].kind, "job") && !strcmp(e[i].what, what)) { if (!k && last) *last = e[i].job; k++; }
+	return k;
+}
+static void games_names_scenarios()
+{
+	int bad = 0, sv = g_sfx_sv;
+	auto want = [&](bool ok, const char *what) { if (!ok) { printf("FAIL log names (%s): %s\n", sv ? "sv" : "en", what); bad++; } };
+	system("rm -rf out/gl out/audit && mkdir -p out/gl/dev_hdd0/PSXISO");
+	audit_init("out/audit", &vf_io);
+	audit_set_move_hooks(gm_moved_hook, gm_busy_hook);
+	snprintf(host_root, 256, "out/gl");
+	memset(host_exfat, 0, sizeof(int) * 8);
+	reset_all();
+	g_mig_nfailed = 0;
+	const char *H = "out/gl/dev_hdd0/PSXISO", *P = "/dev_hdd0/PSXISO";
+	const char *BOF = "Breath of Fire IV [SLUS_013.24]";
+	auto at = [&](const char *name) { static char p[400]; snprintf(p, sizeof p, "%s/%s", P, name); return (const char *)p; };
+	auto put = [&](const char *name, const std::string &text) { char p[400]; snprintf(p, sizeof p, "%s/%s", H, name); put_bin(p, text.data(), text.size()); };
+	auto file = [&](const char *name) { char p[400]; snprintf(p, sizeof p, "%s/%s", H, name); return gc_file(p); };
+	// a rip and an .iso of one base (the console's Breath of Fire IV): the rip's old log is the app's
+	gs_set(H, BOF, 3, gs_log("Breath of Fire IV", "SLUS_013.24", NULL).c_str());
+	put("Breath of Fire IV [SLUS_013.24].md5", "aaaa  track 01\n");
+	std::vector<uint8_t> iso = gc_iso("SLUS_013.24", 24);
+	put("Breath of Fire IV [SLUS_013.24].iso", std::string(iso.begin(), iso.end()));
+	put("Breath of Fire IV [SLUS_013.24]_.jpg", "jpg");
+	gs_set(H, "Alundra (Europe) [SLES_011.35]", 3, gs_log("Alundra", "SLES_011.35", "verified Alundra (Europe)").c_str());
+	gs_set(H, "EAC Game", 3, "Exact Audio Copy extraction logfile\n");   // another tool's log and .md5: left alone
+	put("EAC Game.md5", "bbbb *EAC Game.bin\n");
+	gs_set(H, "Taken", 3, gs_log("Taken", "SLES_000.02", NULL).c_str());   // the new name is taken: left alone
+	put("Taken.bin.log", gs_log("Taken", "SLES_000.02", "verified Taken (Europe)"));
+	std::vector<uint8_t> lone = gc_iso(NULL, 4);
+	put("Lone.iso", std::string(lone.begin(), lone.end()));   // a lone .iso with an old log of the app
+	put("Lone.log", gs_log("Lone", "", NULL));
+	put("Lone.md5", "cccc  track 01\n");
+	gs_set(H, "Busy", 3, gs_log("Busy", "SLES_000.03", NULL).c_str());   // a drive works on it: not now
+	Card &k = g_cards[0];
+	k.job = 1;
+	snprintf(k.base, sizeof k.base, "%s/Busy", P);
+	g_redump = RD_LOCAL;
+	host_rd_local = 1;
+	{ Md5 m; uint8_t d[16]; md5_init(&m); md5_update(&m, iso.data(), iso.size()); md5_final(&m, d); memcpy(host_rd_md5, d, 16); }
+	snprintf(host_rd_name, sizeof host_rd_name, "Breath of Fire IV (USA)");
+	g_cfg_primed = false;
+	system("rm -f out/psxrip.cfg");
+	snprintf(g_games_source, sizeof g_games_source, "hdd");
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	g_gl_stale = 1;
+	g_input_src = AU_PAD;
+	std::string bof_log = file("Breath of Fire IV [SLUS_013.24].log"), lone_log = file("Lone.log");
+	GamesView v;
+	gv_open(v);
+	gv_poll(v);
+	// the migration: one job in the Files domain for the folder, a move row per file
+	want(vf_exists(at("Breath of Fire IV [SLUS_013.24].bin.log")) && vf_exists(at("Breath of Fire IV [SLUS_013.24].bin.md5")) &&
+	     !vf_exists(at("Breath of Fire IV [SLUS_013.24].log")) && !vf_exists(at("Breath of Fire IV [SLUS_013.24].md5")) &&
+	     file("Breath of Fire IV [SLUS_013.24].bin.log") == bof_log, "the rip's old log and .md5 renamed after its .bin, not the .iso's");
+	want(!vf_exists(at("Breath of Fire IV [SLUS_013.24].iso.log")) && vf_exists(at("Breath of Fire IV [SLUS_013.24]_.jpg")), "the .iso got nothing, the cover stays");
+	want(vf_exists(at("Alundra (Europe) [SLES_011.35].bin.log")) && !vf_exists(at("Alundra (Europe) [SLES_011.35].log")), "an app log without .md5");
+	want(vf_exists(at("EAC Game.log")) && vf_exists(at("EAC Game.md5")) && !vf_exists(at("EAC Game.bin.log")) && !vf_exists(at("EAC Game.bin.md5")), "another tool's log stays");
+	want(vf_exists(at("Taken.log")) && file("Taken.bin.log").find("redump=verified Taken") != std::string::npos, "a taken name: nothing moved onto it");
+	want(vf_exists(at("Lone.iso.log")) && vf_exists(at("Lone.iso.md5")) && !vf_exists(at("Lone.log")) && file("Lone.iso.log") == lone_log, "a lone .iso's old log renamed after the .iso");
+	want(vf_exists(at("Busy.log")) && !vf_exists(at("Busy.bin.log")), "a set a drive works on is left for later");
+	uint32_t mj = 0;
+	want(gn_jobs(P, "migrate", &mj) == 1, "one migrate job for the folder");
+	{
+		AuditRow r[16];
+		int n = audit_rows(mj, r, 0, 16), mv = 0, app = 0;
+		for (int i = 0; i < n; i++) {
+			if (!strcmp(r[i].kind, "move") && r[i].dom == AU_FILES) mv++;
+			if (!strcmp(r[i].kind, "job") && r[i].src == AU_APP) app++;
+		}
+		want(mv == 5 && app == 1, "five move rows, started by the app");
+	}
+	want(gv_listed(v) && v.nshown == 7, "seven games (the rip and the .iso apart)");
+	gframe("games-log-names", v);
+	// the audit screen names the job
+	{
+		AuditView a;
+		audit_view_init(a);
+		a.row = 2;
+		audit_open(a);   // Files: the folder's entry
+		for (int i = 0; i < a.n; i++) { char lb[200]; audit_label(a, i, lb, sizeof lb); if (!strcmp(lb, P)) a.row = i; }
+		audit_open(a);
+		aframe("audit-files-log-names", a);
+		want(has_text(T(STR_AUDIT_MIGRATE)) && has_text(sv ? "Byt namn på loggar" : "Rename logs"), "the audit screen: the job's name");
+	}
+	// undone from the audit: the old names back, and a scan does not rename them again
+	char why[200];
+	want(audit_undo_job(mj, why, sizeof why) == 0 && vf_exists(at("Breath of Fire IV [SLUS_013.24].log")) && vf_exists(at("Lone.md5")) &&
+	     !vf_exists(at("Breath of Fire IV [SLUS_013.24].bin.log")), "the migration undone");
+	k.job = 0; k.base[0] = 0;   // the drive is done with Busy
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	want(vf_exists(at("Breath of Fire IV [SLUS_013.24].log")) && vf_exists(at("Lone.log")) && vf_exists(at("Busy.bin.log")) && !vf_exists(at("Busy.log")),
+	     "after the undo a scan leaves those as they are, and renames the set that was busy");
+	want(gn_jobs(P, "migrate") == 2, "the busy set: a job of its own");
+	// redone: the new names again
+	want(audit_undo_job(mj, why, sizeof why) == 0 && vf_exists(at("Breath of Fire IV [SLUS_013.24].bin.log")) && vf_exists(at("Lone.iso.md5")), "the migration redone");
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	// □ on the .iso of the pair: its own log and .md5, the rip's untouched; the .iso row focused, checked
+	std::string bin_log = file("Breath of Fire IV [SLUS_013.24].bin.log"), bin_md5 = file("Breath of Fire IV [SLUS_013.24].bin.md5");
+	want(gn_focus_on(v, BOF, ".iso"), "the .iso row");
+	gv_input(v, B_SQUARE);
+	gv_poll(v); gv_poll(v);
+	std::string iso_log = file("Breath of Fire IV [SLUS_013.24].iso.log");
+	want(iso_log.find(LIB_LOG_MARK "\n") == 0 && iso_log.find("checked=from the image") != std::string::npos &&
+	     iso_log.find("redump=verified Breath of Fire IV (USA)\n") != std::string::npos && vf_exists(at("Breath of Fire IV [SLUS_013.24].iso.md5")),
+	     "□: the .iso's own log (the app's mark, from a check) and .md5");
+	want(file("Breath of Fire IV [SLUS_013.24].bin.log") == bin_log && file("Breath of Fire IV [SLUS_013.24].bin.md5") == bin_md5 &&
+	     !vf_exists(at("Breath of Fire IV [SLUS_013.24].log")), "□: the rip's log and .md5 untouched");
+	want(gn_row_image(v).size() > 4 && gn_row_image(v).compare(gn_row_image(v).size() - 4, 4, ".iso") == 0 && g_gl.d[g_gl.g[v.shown[v.row]].first].rd == 1 &&
+	     g_gl.d[g_gl.g[v.shown[v.row]].first].st == GS_VERIFIED, "□: the .iso row focused after the rescan, verified");
+	gframe("games-pair-iso-checked", v);
+	want(has_text(sv ? "Verifierad" : "Verified"), "the frame shows it verified");
+	// Check all with the rip of the pair focused: the rip checked on its own files (no match), the .iso's untouched
+	want(gn_focus_on(v, BOF, ".bin"), "the rip's row");
+	gv_input(v, B_START);
+	gv_poll(v); gv_poll(v);
+	std::string bin_log2 = file("Breath of Fire IV [SLUS_013.24].bin.log");
+	want(bin_log2.find("redump=no_match\n") != std::string::npos && bin_log2.find("date=2026-10-02 18:41 UTC\n") != std::string::npos &&
+	     file("Breath of Fire IV [SLUS_013.24].iso.log") == iso_log, "check all: the rip's own log (its lines kept), the .iso's untouched");
+	want(gn_row_image(v).size() > 4 && gn_row_image(v).compare(gn_row_image(v).size() - 4, 4, ".bin") == 0 && g_gl.d[g_gl.g[v.shown[v.row]].first].rd == 0,
+	     "check all: the rip's row still focused, no match");
+	want(vf_exists(at("EAC Game.bin.log")) && file("EAC Game.log") == "Exact Audio Copy extraction logfile\n" && file("EAC Game.md5") == "bbbb *EAC Game.bin\n",
+	     "check all: another tool's log and .md5 stay as they were, the app writes its own");
+	want(file("Lone.iso.log").find("redump=no_match\n") != std::string::npos, "check all: the lone .iso");
+	gframe("games-pair-bin-checked", v);
+	gv_close(v);
+	// a rip: its readers find an old log, its writers take the new names
+	{
+		OnCard o(0);
+		put("Rip.bin", std::string(2 * RAW_SIZE, '\0'));
+		put("Rip.log", "PSX Ripper rip log\ntitle=Rip\nserial=SLES_999.99\nunreadable=5\nunreadable=6\n");
+		put("Rip.md5", "dddd  track 01\n");
+		static RipIdx x;   // (the host's vf_list lists nothing: the index's entry for one file)
+		memset(&x, 0, sizeof x);
+		snprintf(x.dir, sizeof x.dir, "%s", P);
+		idx_add("Rip.bin", &x);
+		want(x.n == 1 && !strcmp(x.e[0].serial, "SLES_999.99") && !strcmp(x.e[0].name, "Rip"), "the rip index reads the old log");
+		snprintf(g_base, sizeof g_base, "%s", at("Rip"));
+		want(riplog_open_count() == 2, "known errors from the old log");
+		char line[200];
+		redump_line_of(g_base, ".bin", line, sizeof line);
+		want(!strcmp(line, "unchecked"), "the Redump line of the old log");
+		snprintf(g_serial, sizeof g_serial, "SLES_999.99");
+		snprintf(g_res_title, sizeof g_res_title, "Rip");
+		g_ntracks = 0; g_nhard = 0; g_nsuspect = 0;
+		write_riplog();
+		want(file("Rip.bin.log").find(LIB_LOG_MARK "\ntitle=Rip\nserial=SLES_999.99\n") == 0 && !vf_exists(at("Rip.log")) &&
+		     vf_exists(at("Rip.bin.md5")) && !vf_exists(at("Rip.md5")), "the rip log written as .bin.log (the old log and .md5 took the new names)");
+		memset(&x, 0, sizeof x);
+		snprintf(x.dir, sizeof x.dir, "%s", P);
+		idx_add("Rip.bin", &x);
+		want(x.n == 1 && !strcmp(x.e[0].serial, "SLES_999.99") && riplog_open_count() == 0, "the index and the known errors from the new log");
+		g_base[0] = 0; g_serial[0] = 0;
+	}
+	host_rd_local = 0;
+	g_redump = RD_OFF;
+	host_root[0] = 0;
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	snprintf(g_games_source, sizeof g_games_source, "all");
+	audit_set_move_hooks(NULL, NULL);
+	system("rm -rf out/audit");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   game list log names (%s): migration, undo, busy, taken, same-base pair □ and check all, rip writers and readers\n", sv ? "sv" : "en");
+}
 
 // ---------------------------------------------------------------- game list: rename, trash, restore, empty
 static void fframe(const char *name, const FnView &f)
@@ -1081,6 +1269,7 @@ static void games_file_scenarios()
 		fn_open(f, &g);
 		fframe("games-rename-preview", f);
 		want(has_text("Alundra [SLES_011.35].bin") && has_text(AL) && !has_text("Motorhead") && has_text(T(STR_HINT_RENAME)), "the preview shows the selected game, now and new");
+		want(has_text(".cue · .bin.log · .bin.md5 · .jpg") && has_text(sv ? "Byter också namn" : "Also renamed"), "the preview names the files that take the new name too");
 		want(fn_input(f, B_START) == 2, "START renames");
 		FnView s0;
 		fn_open(s0, NULL);
@@ -1088,11 +1277,14 @@ static void games_file_scenarios()
 		want(has_text("Motorhead [SLUS_007.17].bin") && !has_text("Alundra") && fn_input(s0, B_START) == 0, "the setting's view: the drive's disc, no rename");
 	}
 	// rename: every file of the set, the cue's FILE line; the log's title stays
-	std::string log0 = gc_file("out/gl/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].log");
+	// (opened, the list renamed the app's old Alundra .log and its .md5 after the image: .bin.log, .bin.md5)
+	want(vf_exists("/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].bin.log") && vf_exists("/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].bin.md5") &&
+	     !vf_exists("/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].log"), "the old log names renamed when the list opened");
+	std::string log0 = gc_file("out/gl/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].bin.log");
 	want(gm_move(v, GM_RENAME, "%T [%D]") == 0, "renamed");
 	const char *NEWN = "Alundra [SLES_011.35]";
 	int moved = 0, left = 0;
-	for (const char *e : {".bin", ".cue", ".log", ".md5", ".jpg"}) {
+	for (const char *e : {".bin", ".cue", ".bin.log", ".bin.md5", ".jpg"}) {
 		char a[300], b[300];
 		snprintf(a, sizeof a, "/dev_hdd0/PSXISO/%s%s", AL, e);
 		snprintf(b, sizeof b, "/dev_hdd0/PSXISO/%s%s", NEWN, e);
@@ -1101,7 +1293,7 @@ static void games_file_scenarios()
 	want(moved == 5 && left == 0, "all five files renamed");
 	std::string cue = gc_file("out/gl/dev_hdd0/PSXISO/Alundra [SLES_011.35].cue");
 	want(cue == "FILE \"Alundra [SLES_011.35].bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n", "the cue's FILE line renamed, the rest as it was");
-	want(gc_file("out/gl/dev_hdd0/PSXISO/Alundra [SLES_011.35].log") == log0 && log0.find("title=Alundra\n") != std::string::npos, "the log (its title= line) stays");
+	want(gc_file("out/gl/dev_hdd0/PSXISO/Alundra [SLES_011.35].bin.log") == log0 && log0.find("title=Alundra\n") != std::string::npos, "the log (its title= line) stays");
 	want(strstr(v.note, NEWN) != NULL, "the note names the new name");
 	gv_poll(v);
 	want(gs_at(v, "Alundra") && strstr(g_gl.d[g_gl.g[v.shown[v.row]].first].base, NEWN) && v.mode == GV_LIST, "the renamed game stays focused");
@@ -1115,7 +1307,7 @@ static void games_file_scenarios()
 	}
 	// its undo (the audit screen's): the old names and the old cue back
 	char why[200];
-	want(audit_undo_job(rj, why, sizeof why) == 0 && vf_exists("/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].md5") && !vf_exists("/dev_hdd0/PSXISO/Alundra [SLES_011.35].bin"), "the rename undone");
+	want(audit_undo_job(rj, why, sizeof why) == 0 && vf_exists("/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].bin.md5") && !vf_exists("/dev_hdd0/PSXISO/Alundra [SLES_011.35].bin"), "the rename undone");
 	want(gc_file("out/gl/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].cue").find("FILE \"Alundra (Europe) [SLES_011.35].bin\" BINARY\n") == 0, "the cue's FILE line back");
 	want(audit_undo_job(rj, why, sizeof why) == 0 && vf_exists("/dev_hdd0/PSXISO/Alundra [SLES_011.35].bin") && gc_file("out/gl/dev_hdd0/PSXISO/Alundra [SLES_011.35].cue") == cue, "redone");
 	gl_changed(); gl_open("hdd"); gv_poll(v);
@@ -1218,7 +1410,7 @@ static void games_file_scenarios()
 		gl_changed(); gl_open("hdd"); gv_poll(v);
 		want(gs_find(v, "Metal Gear Solid") && g_gl.g[v.shown[v.row]].ndiscs == 2, "the two discs are one game");
 		want(gm_move(v, GM_RENAME, "%T [%D]") == 0 && vf_exists("/dev_hdd0/PSXISO/Metal Gear Solid (Disc 1) [SLES_016.86].bin") &&
-		     vf_exists("/dev_hdd0/PSXISO/Metal Gear Solid (Disc 2) [SLES_116.86].bin") && vf_exists("/dev_hdd0/PSXISO/Metal Gear Solid (Disc 2) [SLES_116.86].log") &&
+		     vf_exists("/dev_hdd0/PSXISO/Metal Gear Solid (Disc 2) [SLES_116.86].bin") && vf_exists("/dev_hdd0/PSXISO/Metal Gear Solid (Disc 2) [SLES_116.86].bin.log") &&
 		     !vf_exists("/dev_hdd0/PSXISO/MGS disc two [SLES_116.86].cue"), "the second disc renamed, the first left as it is");
 		system("rm -f 'out/gl/dev_hdd0/PSXISO/Metal Gear Solid'*");
 	}
@@ -1354,7 +1546,7 @@ static void games_file_scenarios()
 	gs_find(v, "Croc 2");
 	int row = v.row;
 	gv_input(v, B_TRIANGLE);
-	want(vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin") && vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].log") &&
+	want(vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin") && vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin.log") &&
 	     !vf_exists("/dev_hdd0/PSXISO/Croc 2 (Europe) [SLES_020.88].cue"), "the set in the trash");
 	gv_poll(v);
 	want(v.nshown == 4 && v.row == row && !gs_at(v, "Croc 2"), "gone from the list, the next one focused");
@@ -1394,7 +1586,7 @@ static void games_file_scenarios()
 	want(v.mode == GV_LIST && vf_exists("/dev_hdd0/PSXISO/.trash/Klonoa.bin"), "O: nothing deleted");
 	gv_input(v, B_START);
 	gv_input(v, B_CROSS);
-	want(!vf_exists("/dev_hdd0/PSXISO/.trash/Klonoa.bin") && !vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].log") && vf_exists("/dev_hdd0/PSXISO/Driver.bin"), "emptied, nothing else");
+	want(!vf_exists("/dev_hdd0/PSXISO/.trash/Klonoa.bin") && !vf_exists("/dev_hdd0/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin.log") && vf_exists("/dev_hdd0/PSXISO/Driver.bin"), "emptied, nothing else");
 	gv_poll(v);
 	gframe("games-emptied", v);
 	want(gv_listed(v) && !g_gl.ng && strstr(v.note, sv ? "tömdes" : "emptied"), "the empty trash and the note");
@@ -1421,7 +1613,8 @@ static void games_file_scenarios()
 		a.row = 2;
 		audit_open(a);
 		aframe("audit-files", a);
-		want(a.level == 1 && a.dom == AU_FILES && a.n == 8 && has_text(T(STR_GL_V_TRASH)) && has_text("Croc 2") && has_text("Alundra"), "Files lists the discs and the trash");
+		want(a.level == 1 && a.dom == AU_FILES && a.n == 9 && has_text(T(STR_GL_V_TRASH)) && has_text("Croc 2") && has_text("Alundra") && has_text("/dev_hdd0/PSXISO"),
+		     "Files lists the discs, the trash and the folder whose log names were renamed");
 		int ci = -1;
 		for (int i = 0; i < a.n; i++) if (!strcmp(av_keys[i], "SLES_020.88:3")) ci = i;
 		a.row = ci < 0 ? 0 : ci;
@@ -1579,7 +1772,7 @@ static void audit_scenarios()
 		uint8_t got[RAW_SIZE] = {1};
 		if (f) { fseek(f, (long)lba * RAW_SIZE, SEEK_SET); if (fread(got, 1, RAW_SIZE, f) != RAW_SIZE) got[0] = 1; fclose(f); }
 		if (memcmp(got, zero, RAW_SIZE) || !r || !r->undone || !audit_can_undo(v)) { printf("FAIL after the undo: bytes back %d, row undone %d, redo offered %d\n", !memcmp(got, zero, RAW_SIZE), r ? r->undone : -1, audit_can_undo(v)); bad++; }
-		if (!vf_exists("out/t5/alundra.md5")) { printf("FAIL the rip was not checked again after the undo\n"); bad++; }
+		if (!vf_exists("out/t5/alundra.bin.md5") || !vf_exists("out/t5/alundra.bin.log") || vf_exists("out/t5/alundra.log")) { printf("FAIL the rip was not checked again after the undo\n"); bad++; }
 		if (k.rd_state != -1 || strcmp(k.exist, "out/t5/alundra")) { printf("FAIL the card after the undo: redump state %d, exist \"%s\"\n", k.rd_state, k.exist); bad++; }
 		aframe("audit-rows-undone", v);
 		if (!has_text(T(STR_HINT_REDO)) || (g_sfx_sv && !has_text("Gör om"))) { printf("FAIL the undone sector row does not offer \"%s\"\n", T(STR_HINT_REDO)); bad++; }
@@ -2191,18 +2384,20 @@ int main()
 			std::string s;
 			char exp[200];
 			snprintf(exp, sizeof exp, "%s  track 01\n%s  track 02\n", want[0], want[1]);
-			if (r != 0 || !get_file("out/t4/two.md5", s) || s != exp) { printf("FAIL check_image .md5 (%d): \"%s\"\n", r, s.c_str()); bad++; }
-			// the log: the tracks' MD5 and the Redump line now (no local copy on the host: unchecked)
-			get_file("out/t4/two.log", s);
+			if (r != 0 || !get_file("out/t4/two.bin.md5", s) || s != exp) { printf("FAIL check_image .md5 (%d): \"%s\"\n", r, s.c_str()); bad++; }
+			// the log: the tracks' MD5 and the Redump line now (no local copy on the host: unchecked); the
+			// old-named log of the app took the image's name (<base>.bin.log) first, so its lines stay
+			if (vf_exists("out/t4/two.log")) { printf("FAIL check_image: the old two.log is still there\n"); bad++; }
+			get_file("out/t4/two.bin.log", s);
 			char t1[80], t2[80];
 			snprintf(t1, sizeof t1, "track=01 start=0 md5=%s\n", want[0]);
 			snprintf(t2, sizeof t2, "track=02 start=3 md5=%s\n", want[1]);
 			if (s.find(t1) == std::string::npos || s.find(t2) == std::string::npos || s.find("redump=unchecked\n") == std::string::npos || s.find("verified") != std::string::npos || s.find("unreadable_count=0\n") == std::string::npos)
 				{ printf("FAIL check_image log:\n%s", s.c_str()); bad++; }
 			// the audit's recheck hook takes the image's path
-			remove("out/t4/two.md5");
+			remove("out/t4/two.bin.md5");
 			recheck_hook("out/t4/two.bin", NULL, NULL, 0, 0);
-			if (!get_file("out/t4/two.md5", s) || s != exp) { printf("FAIL recheck hook\n"); bad++; }
+			if (!get_file("out/t4/two.bin.md5", s) || s != exp) { printf("FAIL recheck hook\n"); bad++; }
 			if (check_image("out/t4/none") == 0) { printf("FAIL check_image without an image\n"); bad++; }
 		}
 		// R9: undoing a repair puts its sectors back into the rip's log, so a later repair reads them again
@@ -2233,7 +2428,7 @@ int main()
 			char why[200] = "";
 			if (audit_undo_job(job, why, sizeof why) != 0) { printf("FAIL undo of the repair: %s\n", why); bad++; }
 			std::string s;
-			get_file("out/t4/rep.log", s);
+			get_file("out/t4/rep.bin.log", s);
 			auto has = [&](const char *l) { return s.find(l) != std::string::npos; };
 			if (!has("\nunreadable=1\n") || !has("\nbad=2\n") || !has("unreadable_count=1\n") || !has("bad_count=1\n") || !has("fixed_count=0\n") || !has("uncertain=3 unconfirmed\n"))
 				{ printf("FAIL the log after the undo:\n%s", s.c_str()); bad++; }
@@ -2244,7 +2439,7 @@ int main()
 			uint32_t l2[2] = {1, 2};
 			uint8_t z2[2] = {1, 0};
 			recheck_hook("out/t4/rep.bin", l2, z2, 2, 0);
-			get_file("out/t4/rep.log", s);
+			get_file("out/t4/rep.bin.log", s);
 			size_t a = s.find("unreadable=1\n"), b = s.find("bad=2\n");
 			if (a == std::string::npos || s.find("unreadable=1\n", a + 1) != std::string::npos || s.find("bad=2\n", b + 1) != std::string::npos || !has("unreadable_count=1\n") || !has("bad_count=1\n"))
 				{ printf("FAIL the log after a second recheck:\n%s", s.c_str()); bad++; }
@@ -2252,14 +2447,14 @@ int main()
 			if (audit_undo_job(job, why, sizeof why) != 0) { printf("FAIL redo of the repair: %s\n", why); bad++; }
 			get_file("out/t4/rep.bin", s);
 			if (s.size() != sizeof rep || memcmp(s.data() + RAW_SIZE, good, RAW_SIZE) || memcmp(s.data() + 2 * RAW_SIZE, good, RAW_SIZE)) { printf("FAIL the image after the redo\n"); bad++; }
-			get_file("out/t4/rep.log", s);
+			get_file("out/t4/rep.bin.log", s);
 			if (has("unreadable=1\n") || has("bad=2\n") || !has("unreadable_count=0\n") || !has("bad_count=0\n") || !has("fixed_count=2\n") || !has("uncertain=3 unconfirmed\n"))
 				{ printf("FAIL the log after the redo:\n%s", s.c_str()); bad++; }
 			snprintf(g_base, sizeof(g_base), "out/t4/rep");
 			if ((open = riplog_open_count()) != 1) { printf("FAIL riplog_open_count after the redo: %d, want 1\n", open); bad++; }
 			// and undone again: back in the log once more
 			if (audit_undo_job(job, why, sizeof why) != 0) { printf("FAIL second undo of the repair: %s\n", why); bad++; }
-			get_file("out/t4/rep.log", s);
+			get_file("out/t4/rep.bin.log", s);
 			if (!has("\nunreadable=1\n") || !has("\nbad=2\n") || !has("unreadable_count=1\n") || !has("bad_count=1\n") || !has("fixed_count=0\n"))
 				{ printf("FAIL the log after the second undo:\n%s", s.c_str()); bad++; }
 		}
@@ -2304,10 +2499,12 @@ int main()
 	games_scenarios();
 	games_check_scenarios();
 	games_file_scenarios();
+	games_names_scenarios();
 	host_lang = PS3_LANG_ENGLISH_US; lang_init(); g_sfx_sv = 0;
 	games_scenarios();
 	games_check_scenarios();
 	games_file_scenarios();
+	games_names_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

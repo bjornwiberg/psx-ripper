@@ -449,6 +449,8 @@ enum StrId {
 	STR_AW_NOT_RESTORED,
 	STR_GM_CASE_ONLY,
 	STR_AW_NOT_PUT_BACK_BENT,
+	STR_AUDIT_MIGRATE,   // the audit's job that renamed old logs after their image
+	STR_FN_ALSO,         // the rename preview: the set's other files that take the new name
 	STR_COUNT
 };
 

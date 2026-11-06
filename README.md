@@ -77,7 +77,7 @@ size, and whether it is already ripped to the destination.
 | ○ | Cancel the rip on this tab, or exit when nothing is ripping |
 
 A full CD takes about four minutes on the internal drive. Each rip writes `<name>.bin`, `.cue`,
-`.md5` (MD5 per track) and `.log` (the rip log, which *Repair* uses). The app's own log is
+`.bin.md5` (MD5 per track) and `.bin.log` (the rip log, which *Repair* uses). The app's own log is
 `/dev_hdd0/tmp/psxrip.log`.
 
 More: **[user guide](docs/user-guide.md)** · [FAQ](docs/faq.md) ·

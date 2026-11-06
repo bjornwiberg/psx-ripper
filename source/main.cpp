@@ -2715,6 +2715,10 @@ static int gl_io_read(const char *p, char *buf, int max)
 static int gl_io_exists(const char *p) { return vf_exists(p); }
 static int gl_io_lc(const char *id) { return is_libcrypt_disc(id); }
 static LibIo gl_libio() { LibIo io = {vf_listdir, vf_size, gl_io_read, gl_io_exists, gl_io_lc, SBI_DIR}; return io; }
+// The app's own log or .md5 (what = "log", "md5") of an image to read: <base><type>.<what>, else the
+// old <base>.<what> when it is this image's (lib_own_find). 1 when there is one; out = its path.
+static int own_find(const char *base, const char *image, const char *what, char *out, int n) { return lib_own_find(base, image, what, gl_io_exists, out, n); }
+static void own_adopt(const char *base, const char *image);
 
 // The source's drive is still connected (the hard disk always is). Asks the system, no mount.
 static int gl_drive_there(const GlSource &s) { return s.port < 0 || vf_drive_present(s.port); }
@@ -3017,8 +3021,10 @@ static void idx_add(const char *name, void *ctx)
 	if (l < 5 || strcasecmp(name + l - 4, ".bin") || x->n >= IDX_MAX) return;
 	char base[200], path[320], serial[16] = "";
 	snprintf(base, sizeof(base), "%.*s", (int)(l - 4), name);
-	snprintf(path, sizeof(path), "%s/%s.log", x->dir, base);
-	VFile *f = vf_open(path, "rb");
+	snprintf(path, sizeof(path), "%s/%s", x->dir, base);
+	char lp[340];
+	own_find(path, ".bin", "log", lp, sizeof(lp));
+	VFile *f = vf_open(lp, "rb");
 	if (f) {
 		char b[1024];
 		int k = (int)vf_read(f, b, sizeof(b) - 1);
@@ -3079,11 +3085,10 @@ static uint32_t pregap_junk_in(VFile *bin, const char *log)
 
 static int riplog_open_count()
 {
-	char path[320];
-	snprintf(path, sizeof(path), "%s.log", g_base);
-	snprintf(path + strlen(path) - 4, 8, ".bin");
+	char path[340];
+	snprintf(path, sizeof(path), "%s.bin", g_base);
 	if (!vf_exists(path)) return 0;
-	snprintf(path, sizeof(path), "%s.log", g_base);
+	own_find(g_base, ".bin", "log", path, sizeof(path));
 	VFile *f = vf_open(path, "rb");
 	if (!f) return 0;
 	char (&buf)[65536] = CX.log_buf;
@@ -3260,8 +3265,8 @@ static void prev_rip_check()
 	k.rd_done[0] = 0;
 	k.rd_state = -1;
 	if (g_prev_rip) {
-		char lp[320];
-		snprintf(lp, sizeof(lp), "%s.log", g_base);
+		char lp[340];
+		own_find(g_base, ".bin", "log", lp, sizeof(lp));
 		VFile *lf = vf_open(lp, "rb");
 		if (lf) {
 			char b[2048];
@@ -3992,6 +3997,7 @@ static void fn_name_line(int L, int R, int y, const char *fb)
 }
 // A disc's new name by a pattern (from its log's title, Redump name and disc ID), its image's
 // extension on the preview.
+static int gm_owned(const char *name, const char *leaf);
 static void fn_game_name(const char *pat, const GameDisc &d, char *out, size_t n) { name_from(pat, d.rdname, d.title, d.id, out, n); }
 
 static void fn_draw(const FnView &f)
@@ -4041,8 +4047,9 @@ static void fn_draw(const FnView &f)
 	y += ls + ls / 2;
 	y += section_head(L, R, y, T(STR_FN_PREVIEW));
 	int step = lb + ls * 2 + ls / 3;
-	if (f.game) {   // the game: each disc's new name, and its name now
+	if (f.game) {   // the game: each disc's new name, its name now, and its other files that follow
 		const Game &g = *f.game;
+		step += ls;
 		for (int i = 0; i < g.ndiscs; i++) {
 			if (i && y + step > hint_y() - ls * 2) {   // no room for the rest
 				char more[64];
@@ -4059,6 +4066,20 @@ static void fn_draw(const FnView &f)
 			const char *sl = strrchr(d.base, '/');
 			snprintf(now, sizeof(now), T(STR_FN_NOW), sl ? sl + 1 : d.base);
 			ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, now, R - L - ui_w() / 60);
+			// the set's other files named after it (cue, log, .md5, cover, ...): by their ending
+			const char *old = sl ? sl + 1 : d.base, *il = d.image[0] ? strrchr(d.image, '/') : NULL;
+			char ends[200] = "";
+			size_t off = 0;
+			for (int k = 0; k < d.nfiles; k++, off += strlen(d.files + off) + 1) {
+				const char *nm = d.files + off;
+				if (!gm_owned(nm, old) || (il && !strcmp(nm, il + 1))) continue;
+				size_t el = strlen(ends);
+				snprintf(ends + el, sizeof(ends) - el, "%s%s", el ? " · " : "", nm + strlen(old));
+			}
+			if (ends[0]) {
+				snprintf(now, sizeof(now), T(STR_FN_ALSO), ends);
+				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb + ls, 0x8FA8D8, now, R - L - ui_w() / 60);
+			}
 			y += step;
 		}
 	} else {   // each disc in a drive, else an example
@@ -4520,7 +4541,7 @@ static void av_row_label(const AuditRow &r, char *out, size_t n)
 	if (!strcmp(r.kind, "job")) {
 		static const struct { const char *what; StrId s; } jobs[] = {
 			{"repair", STR_HINT_REPAIR}, {"check", STR_HINT_CHECK}, {"rename", STR_HINT_RENAME}, {"trash", STR_HINT_TRASH},
-			{"restore", STR_HINT_RESTORE}, {"empty", STR_HINT_EMPTY_TRASH}};
+			{"restore", STR_HINT_RESTORE}, {"empty", STR_HINT_EMPTY_TRASH}, {"migrate", STR_AUDIT_MIGRATE}};
 		StrId s = STR_HINT_RIP;
 		for (auto &j : jobs) if (!strcmp(r.what, j.what)) s = j.s;
 		snprintf(out, n, "%s", T(s));
@@ -4773,7 +4794,7 @@ static void audit_screen()
 #define GD_LINES 200     // lines of a detail view
 
 // The check job (□ / START): the discs it checks are its own copy (the list may be read again meanwhile).
-struct GcItem { char base[200], image[220], id[16], title[128]; uint64_t size; };
+struct GcItem { char base[200], image[220], id[16], title[128]; uint64_t size; int cue; /* the set has its own .cue */ };
 static struct {
 	volatile int running, abort;
 	GcItem *items; int n;            // the discs to check; the screen frees them when the job ended
@@ -4808,6 +4829,7 @@ struct GamesView {
 	int ftrash, frow;     // the panel's "Show" value and its focused row
 	int dfirst;           // the detail view's first line on the screen
 	char fbase[200];      // the focused game's first disc (base): it stays focused when the list is read again
+	char fimage[220];     // and its image (two sets of one base: an .iso and a rip), "" = any
 	int checking;         // a check job of this screen runs: its progress screen shows
 	int back_detail;      // it was started from the detail view: back there when the list is read again
 	uint32_t gc_sig;      // the progress last drawn
@@ -4862,6 +4884,12 @@ static void gc_item(const GameDisc &d, GcItem &it)
 	snprintf(it.id, sizeof(it.id), "%s", d.id);
 	snprintf(it.title, sizeof(it.title), "%s", d.title);
 	it.size = d.size;
+	it.cue = 0;
+	char p[320];
+	for (int i = 0; lib_file_path(&d, i, p, sizeof(p)); i++) {
+		size_t l = strlen(p);
+		if (l > 4 && !strcasecmp(p + l - 4, ".cue")) it.cue = 1;
+	}
 }
 static int gv_listed(const GamesView &v);
 static void gv_scan_key(const GamesView &v, char *out, size_t n);
@@ -5014,7 +5042,8 @@ static int gm_move(GamesView &v, int what, const char *pat)
 			if (!sl || !strcmp(leaf[i], sl + 1)) continue;
 			same = 0;
 			// a set of that name there already (any of its files): refused, nothing mixed into it
-			static const char *const ext[] = {".bin", ".cue", ".log", ".md5", ".jpg", ".sbi", ".iso", ".img", ".bin.part"};
+			static const char *const ext[] = {".bin", ".cue", ".log", ".md5", ".jpg", ".sbi", ".iso", ".img", ".bin.part", ".bin.log",
+			                                  ".bin.md5", ".iso.log", ".iso.md5", ".img.log", ".img.md5"};
 			for (const char *e : ext) {
 				char q[340];
 				snprintf(q, sizeof(q), "%.*s/%s%s", (int)(sl - d.base), d.base, leaf[i], e);
@@ -5087,7 +5116,7 @@ static int gm_move(GamesView &v, int what, const char *pat)
 		for (int c = 0; c < NCARDS; c++)   // a drive's card showing one of these rips looks again
 			for (int i = g.first; i < g.first + g.ndiscs; i++)
 				if (!strcmp(g_cards[c].exist, g_gl.d[i].base) || !strcmp(g_cards[c].base, g_gl.d[i].base)) g_cards[c].recheck = 1;
-		if (newbase[0]) snprintf(v.fbase, sizeof(v.fbase), "%s", newbase);   // the renamed game stays focused
+		if (newbase[0]) { snprintf(v.fbase, sizeof(v.fbase), "%s", newbase); v.fimage[0] = 0; }   // the renamed game stays focused
 	}
 	free(leaf);
 	v.mode = GV_LIST;
@@ -5217,18 +5246,23 @@ static void gv_fix(GamesView &v)
 	int vis = gv_vis();
 	if (v.row >= v.first + vis) v.first = v.row - vis + 1;
 	if (v.first > v.nshown - vis) v.first = v.nshown > vis ? v.nshown - vis : 0;
-	if (v.shown && v.row < v.nshown && v.gen == g_gl.gen && g_gl.g)
-		snprintf(v.fbase, sizeof(v.fbase), "%s", g_gl.d[g_gl.g[v.shown[v.row]].first].base);
+	if (v.shown && v.row < v.nshown && v.gen == g_gl.gen && g_gl.g) {
+		const GameDisc &d = g_gl.d[g_gl.g[v.shown[v.row]].first];
+		snprintf(v.fbase, sizeof(v.fbase), "%s", d.base);
+		snprintf(v.fimage, sizeof(v.fimage), "%s", d.image);
+	}
 }
 
-// The row (position in shown) whose game has a disc with this base, -1 when none shows.
-static int gv_row_of(const GamesView &v, const char *base)
+// The row (position in shown) whose game has a disc with this base (and this image, when one is
+// given and a row has it: two sets of one base), -1 when none shows.
+static int gv_row_of(const GamesView &v, const char *base, const char *image = "")
 {
 	if (!base[0]) return -1;
-	for (int pass = 0; pass < 2; pass++)   // its first disc first, then any of its discs
+	for (int pass = image && image[0] ? 0 : 1; pass < 3; pass++)   // base and image, its first disc, any of its discs
 		for (int r = 0; r < v.nshown; r++) {
 			const Game &g = g_gl.g[v.shown[r]];
-			for (int i = g.first; i < g.first + (pass ? g.ndiscs : 1); i++) if (!strcmp(g_gl.d[i].base, base)) return r;
+			for (int i = g.first; i < g.first + (pass == 2 ? g.ndiscs : 1); i++)
+				if (!strcmp(g_gl.d[i].base, base) && (pass || !strcmp(g_gl.d[i].image, image))) return r;
 		}
 	return -1;
 }
@@ -5237,8 +5271,9 @@ static int gv_row_of(const GamesView &v, const char *base)
 // still shows (found by its first disc's file, also in a result read again).
 static void gv_refilter(GamesView &v)
 {
-	char keep[sizeof(v.fbase)];
+	char keep[sizeof(v.fbase)], keepi[sizeof(v.fimage)];
 	snprintf(keep, sizeof(keep), "%s", v.fbase);
+	snprintf(keepi, sizeof(keepi), "%s", v.fimage);
 	int old = v.row;
 	free(v.shown);
 	v.shown = NULL;
@@ -5249,7 +5284,7 @@ static void gv_refilter(GamesView &v)
 		if (!v.shown) v.nomem = 1;
 		else v.nshown = lib_filter(g_gl.g, g_gl.ng, g_gl.d, &g_games_filter, v.shown);
 	}
-	int r = gv_row_of(v, keep);
+	int r = gv_row_of(v, keep, keepi);
 	v.row = r >= 0 ? r : old;
 	gv_fix(v);
 }
@@ -5260,7 +5295,7 @@ static void gv_switch(GamesView &v)
 	char k[8];
 	gv_scan_key(v, k, sizeof(k));
 	v.row = v.first = v.gen = 0;   // (gen 0: no result is worked out yet)
-	v.fbase[0] = 0;
+	v.fbase[0] = v.fimage[0] = 0;
 	free(v.shown);
 	v.shown = NULL;
 	v.nshown = 0;
@@ -5274,6 +5309,102 @@ static void gv_open(GamesView &v)
 	snprintf(v.key, sizeof(v.key), "%s", g_games_source);
 	v.nsrc = gl_sources(v.src, GL_SRCS);
 	gv_switch(v);
+}
+
+// ---- the app's old log names (<base>.log / .md5) renamed after their image (<base>.bin.log, ...)
+// The list takes a scan of games (not the trash) with sets whose log is an old one the app wrote
+// (GameDisc.old_log): each folder's renames are one audit job `migrate` in the Files domain, a move
+// row per file, so the audit screen can undo them. Never a set a drive or the check job works on,
+// never onto a name that is taken (lib_own_migration), never a file whose earlier rename was undone.
+#define MIG_FAILED 4
+static char g_mig_failed[MIG_FAILED][48];   // folders whose renames failed this session: not tried again
+static int g_mig_nfailed;
+// The files of folder dir whose migrate rows were undone (each path ending in a 0), n of them.
+static char *mig_undone(const char *dir, int *n)
+{
+	*n = 0;
+	AuditRow *e = (AuditRow *)malloc(32 * sizeof(AuditRow)), *rr = (AuditRow *)malloc(16 * sizeof(AuditRow));
+	char *out = NULL;
+	size_t used = 0;
+	int ne = e && rr ? audit_events(AU_FILES, dir, e, 32) : 0;
+	for (int i = 0; i < ne; i++) {
+		if (strcmp(e[i].kind, "job") || strcmp(e[i].what, "migrate")) continue;
+		for (int first = 0, got; (got = audit_rows(e[i].job, rr, first, 16)) > 0; first += got)
+			for (int k = 0; k < got; k++) {
+				if (strcmp(rr[k].kind, "move") || !rr[k].undone) continue;
+				size_t l = strlen(rr[k].before) + 1;
+				char *b = (char *)realloc(out, used + l);
+				if (!b) continue;
+				out = b;
+				memcpy(out + used, rr[k].before, l);
+				used += l;
+				(*n)++;
+			}
+	}
+	free(e); free(rr);
+	return out;
+}
+static int mig_listed(const char *list, int n, const char *path)
+{
+	for (int i = 0; i < n; i++, list += strlen(list) + 1) if (!strcmp(list, path)) return 1;
+	return 0;
+}
+// Returns 1 when files were renamed (the list is then read again).
+static int gl_migrate()
+{
+	if (!g_gl.n || !g_gl.d || !strncmp(g_gl.key, "t:", 2) || g_gc.running || g_files_busy) return 0;
+	int want = 0;
+	for (int i = 0; i < g_gl.n && !want; i++) want = g_gl.d[i].old_log;
+	if (!want) return 0;
+	char (*from)[320] = (char (*)[320])malloc((size_t)g_gl.n * 2 * 320), (*to)[320] = (char (*)[320])malloc((size_t)g_gl.n * 2 * 320);
+	const char **fp = (const char **)malloc((size_t)g_gl.n * 2 * sizeof(char *)), **tp = (const char **)malloc((size_t)g_gl.n * 2 * sizeof(char *));
+	char *done = (char *)calloc((size_t)g_gl.n, 1);
+	int moved = 0;
+	LibIo io = gl_libio();
+	for (int i = 0; from && to && fp && tp && done && i < g_gl.n; i++) {
+		if (done[i] || !g_gl.d[i].old_log) continue;
+		const char *sl = strrchr(g_gl.d[i].base, '/');
+		if (!sl) continue;
+		char dir[200];
+		snprintf(dir, sizeof(dir), "%.*s", (int)(sl - g_gl.d[i].base), g_gl.d[i].base);
+		int failed = 0;
+		for (int f = 0; f < g_mig_nfailed; f++) if (!strcmp(g_mig_failed[f], dir)) failed = 1;
+		int nu = 0, n = 0;
+		char *undone = failed ? NULL : mig_undone(dir, &nu);
+		for (int j = i; j < g_gl.n; j++) {
+			const GameDisc &d = g_gl.d[j];
+			const char *dl = strrchr(d.base, '/');
+			if (done[j] || !d.old_log || !dl || dl - d.base != sl - g_gl.d[i].base || strncmp(d.base, dir, (size_t)(dl - d.base))) continue;
+			done[j] = 1;
+			if (failed) continue;
+			if (gc_card_busy(d.base)) { logf("log names: %s is busy, left for later", d.base); continue; }
+			char f2[2][320], t2[2][320];
+			int k = lib_own_migration(d.base, d.image, &io, f2, t2), keep = k;
+			for (int m = 0; m < k; m++) if (mig_listed(undone, nu, f2[m])) keep = 0;   // the user put it back
+			const char *a[2] = {f2[0], f2[1]}, *b[2] = {t2[0], t2[1]};
+			if (keep && audit_move_check(a, b, k, NULL, 0)) { logf("log names: %s cannot be renamed now", d.base); keep = 0; }
+			for (int m = 0; keep && m < k; m++, n++) {
+				memcpy(from[n], f2[m], 320); memcpy(to[n], t2[m], 320);
+				fp[n] = from[n]; tp[n] = to[n];
+			}
+		}
+		free(undone);
+		if (!n) continue;
+		char why[200];
+		AuditReason rs;
+		g_files_busy = 1;
+		int rc = audit_move(AU_APP, dir, dir, "migrate", fp, tp, n, why, sizeof(why), &rs);
+		g_files_busy = 0;
+		if (rc) {
+			logf("log names in %s: not renamed (%s)", dir, why);
+			if (g_mig_nfailed < MIG_FAILED) snprintf(g_mig_failed[g_mig_nfailed++], sizeof(g_mig_failed[0]), "%s", dir);
+		} else {
+			logf("log names in %s: %d file(s) renamed after their image", dir, n);
+			moved += n;
+		}
+	}
+	free(from); free(to); free(fp); free(tp); free(done);
+	return moved > 0;
 }
 
 // Takes a finished scan; returns 1 when the screen changed. The rows are worked out once per
@@ -5306,14 +5437,23 @@ static int gv_poll(GamesView &v)
 		gl_open(k);
 		took = 1;
 	}
-	took |= gl_poll();
+	if (gl_poll()) {
+		took = 1;
+		if (gl_migrate()) {   // old log names renamed after their image: the list is read again
+			char k[8];
+			gv_scan_key(v, k, sizeof(k));
+			gl_changed();
+			gl_open(k);
+			gl_poll();
+		}
+	}
 	if (gv_ready(v)) {
 		if (v.gen == g_gl.gen) return took;
 		if (v.mode == GV_DETAIL) v.mode = GV_LIST;   // the detail view was read from the old result
 		gv_refilter(v);
 		if (v.back_detail) {   // a check from the detail view: back in it, read again
 			v.back_detail = 0;
-			if (v.nshown && gv_row_of(v, v.fbase) == v.row) { gd_build(g_gl.g[v.shown[v.row]]); v.dfirst = 0; v.mode = GV_DETAIL; }
+			if (v.nshown && gv_row_of(v, v.fbase, v.fimage) == v.row) { gd_build(g_gl.g[v.shown[v.row]]); v.dfirst = 0; v.mode = GV_DETAIL; }
 		}
 		return 1;
 	}
@@ -5486,7 +5626,7 @@ static void gd_disc(const GameDisc &d, int num, int of)
 	gd_add(0, G, T(STR_GL_D_COVER), "%s", T(d.has_cover ? STR_HINT_YES : STR_HINT_NO));
 	time_t lt;
 	char lp[260];
-	snprintf(lp, sizeof(lp), "%s.log", d.base);
+	snprintf(lp, sizeof(lp), "%s%s", d.base, d.log_sfx);
 	if (d.rd != -1 && d.has_log && !vf_mtime(lp, &lt)) { fmt_local(lt, t, sizeof(t)); gd_add(0, G, T(STR_GL_D_CHECKED), "%s", t); }
 	else gd_add(0, G, T(STR_GL_D_CHECKED), "%s", T(STR_GL_D_NEVER));
 	if (d.libcrypt) gd_add(0, d.libcrypt < 0 ? 0xF0C060 : G, "LibCrypt", "%s", T(d.libcrypt < 0 ? STR_GL_SBI_SHORT : STR_GL_SBI_THERE));
@@ -5500,7 +5640,7 @@ static void gd_disc(const GameDisc &d, int num, int of)
 	// the log: the tracks and their MD5s, the sectors still wrong (the first few)
 	char *buf = (char *)malloc(65536);
 	int tracks = 0;
-	if (buf && d.has_log && gd_read(d, ".log", buf, 65536)) {
+	if (buf && d.has_log && gd_read(d, d.log_sfx, buf, 65536)) {
 		char secs[120] = "";
 		int listed = 0;
 		for (char *l = buf; *l; ) {
@@ -5522,7 +5662,7 @@ static void gd_disc(const GameDisc &d, int num, int of)
 			gd_add(0, 0xF0C060, T(STR_GL_D_ERRORS), "%s", t);
 		}
 	}
-	if (!tracks && buf && gd_read(d, ".md5", buf, 65536)) {   // a check's .md5: "<md5>  track NN"
+	if (!tracks && buf && d.md5_sfx[0] && gd_read(d, d.md5_sfx, buf, 65536)) {   // a check's .md5: "<md5>  track NN"
 		for (char *l = buf; *l; ) {
 			char *e = strchr(l, '\n');
 			if (e) *e = 0;
@@ -7008,13 +7148,13 @@ static const char *rd_result_str() { return rd_code(g_rd_result); }
 
 // ---------------------------------------------------------------- jobs in the audit log
 
-// The Redump line of a rip's log ("verified Alundra (Europe)"), "unchecked" when there is none.
-static void redump_line_of(const char *base, char *out, size_t n)
+// The Redump line of an image's log ("verified Alundra (Europe)"), "unchecked" when there is none.
+static void redump_line_of(const char *base, const char *image, char *out, size_t n)
 {
 	snprintf(out, n, "unchecked");
 	if (!base[0]) return;
-	char p[320], b[4096];
-	snprintf(p, sizeof(p), "%s.log", base);
+	char p[340], b[4096];
+	own_find(base, image, "log", p, sizeof(p));
 	VFile *f = vf_open(p, "rb");
 	if (!f) return;
 	int got = (int)vf_read(f, b, sizeof(b) - 1);
@@ -7036,7 +7176,7 @@ static void audit_card_begin(int c, AuditSrc src, const char *what)
 	disc_key(k.audit_disc, sizeof(k.audit_disc));
 	const char *slash = strrchr(k.exist, '/');
 	const char *name = !strcmp(what, "rip") || !k.exist[0] ? k.fname : slash ? slash + 1 : k.exist;
-	redump_line_of(k.exist, k.rd_before, sizeof(k.rd_before));
+	redump_line_of(k.exist, ".bin", k.rd_before, sizeof(k.rd_before));
 	k.job_src = src;
 	k.audit_job = audit_job_begin(src, k.audit_disc, name, what);
 }
@@ -7305,8 +7445,8 @@ static int rip_disc_inner(int fresh, int autorip)
 		if (vf_rename(part, bin)) logf("rename %s failed", part);
 		Card &k = g_cards[cur_card()];
 		if (k.exist[0] && strcmp(k.exist, g_base)) {   // the same disc under another name: this rip replaces it
-			static const char *ext[] = {".bin", ".cue", ".md5", ".log", ".sbi"};
-			for (int i = 0; i < 5; i++) { char o[300]; snprintf(o, sizeof(o), "%s%s", k.exist, ext[i]); vf_unlink(o); }
+			static const char *ext[] = {".bin", ".cue", ".md5", ".log", ".sbi", ".bin.md5", ".bin.log"};
+			for (const char *e : ext) { char o[300]; snprintf(o, sizeof(o), "%s%s", k.exist, e); vf_unlink(o); }
 			logf("replaced the earlier rip %s", k.exist);
 		}
 		idx_stale();
@@ -7315,9 +7455,10 @@ static int rip_disc_inner(int fresh, int autorip)
 	char binname[256];
 	snprintf(binname, sizeof(binname), "%s.bin", slash + 1);
 	write_cue(binname);
+	own_adopt(g_base, ".bin");   // an earlier rip's log of this name (old name): replaced below, as before
 	{
-		char mpath[300];
-		snprintf(mpath, sizeof(mpath), "%s.md5", g_base);
+		char mpath[340];
+		lib_own_name(g_base, ".bin", "md5", mpath, sizeof(mpath));
 		VFile *mf = vf_open(mpath, "wb");
 		if (mf) {
 			for (int t = 0; t < g_ntracks; t++) vf_printf(mf, "%s  track %02d\n", g_track_md5[t], g_tracks[t].num);
@@ -7490,6 +7631,28 @@ static void tmp_restore(const char *path)
 	else logf("%s put back from its .tmp", path);
 }
 
+// Before the app writes an image's log or .md5 (image: its path or type): a lone <file>.tmp of
+// either is put back (tmp_restore), and an old <base>.log the app wrote and its .md5, when they are
+// this image's, take the typed names (lib_own_migration) the writer then works on. The game list
+// renames old logs as an audit job (gl_migrate); this covers a rip, repair or check that comes first.
+static void own_adopt(const char *base, const char *image)
+{
+	char p[340], from[2][320], to[2][320];
+	static const char *const whats[] = {"log", "md5"};
+	for (const char *w : whats) {
+		lib_own_name(base, image, w, p, sizeof(p));
+		tmp_restore(p);
+		snprintf(p, sizeof(p), "%s.%s", base, w);
+		if (lib_old_is_of(base, image, gl_io_exists)) tmp_restore(p);
+	}
+	LibIo io = gl_libio();
+	int n = lib_own_migration(base, image, &io, from, to);
+	for (int i = 0; i < n; i++) {
+		if (vf_rename(from[i], to[i])) logf("%s: could not be renamed to %s", from[i], to[i]);
+		else logf("%s renamed to %s (named after its image)", from[i], to[i]);
+	}
+}
+
 // The FILE lines of a cue renamed from leaf `from` to leaf `to` (file names without folder and
 // extension): each file named after the old leaf gets the new one (gm_owned); every other byte stays.
 // Written through <cue>.tmp (file_replace). 0 = done, also when no line names the old leaf.
@@ -7584,6 +7747,7 @@ static int gm_busy_hook(const char *path)
 struct CheckFile {
 	int (*busy)(const char *base);     // checked right before writing: 1 = a drive rips into the set now (nothing written)
 	const char *image;                 // the image file (an .iso/.img without a cue: one track)
+	int cue;                           // the set has its own <base>.cue (the track layout; a .bin's always)
 	const char *title, *serial;        // a new log's title= and serial=; serial is also the online lookup's
 	volatile int *abort;               // set: stop
 	volatile uint32_t *done, *total;   // progress in sectors
@@ -7598,7 +7762,8 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 	uint32_t st[MAX_TRACKS + 1];
 	int nt = 0;
 	snprintf(path, sizeof(path), "%s.cue", base);
-	VFile *cuef = vf_open(path, "rb");
+	// never another set's cue: an .iso/.img next to a rip of its base reads none (unless its set has it)
+	VFile *cuef = !cf || cf->cue || !strcmp(lib_image_type(cf->image), ".bin") ? vf_open(path, "rb") : NULL;
 	if (cuef) {
 		char cb[8192];
 		int n = (int)vf_read(cuef, cb, sizeof(cb) - 1);
@@ -7680,12 +7845,13 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 	}
 	logf("check %s: %d track(s), redump %s %s", base, nt, rd_code(rd), rdname);
 	if (cf && cf->busy && cf->busy(base)) { logf("check %s: a drive rips into it now, nothing written", base); return -1; }
-	snprintf(path, sizeof(path), "%s.md5", base); tmp_restore(path);
-	snprintf(path, sizeof(path), "%s.log", base); tmp_restore(path);
-	// the .md5 and the log are written next to them (<file>.tmp) and then put in their place: an app
-	// stopped (or the power lost) in the middle leaves the old file whole
-	char tmp[330];
-	snprintf(path, sizeof(path), "%s.md5", base);
+	// the image's own .md5 and log (<base>.bin.md5, <base>.iso.log, ...; an old <base>.log of the app
+	// takes that name first). They are written next to them (<file>.tmp) and then put in their place:
+	// an app stopped (or the power lost) in the middle leaves the old file whole
+	const char *itype = cf ? lib_image_type(cf->image) : ".bin";
+	own_adopt(base, itype);
+	char tmp[350];
+	lib_own_name(base, itype, "md5", path, sizeof(path));
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 	TmpOut mo = {vf_open(tmp, "wb"), 1, 0};
 	if (mo.f) {
@@ -7695,7 +7861,7 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 	// its log: the tracks' MD5s and the Redump line replaced, or a small log. From the game list
 	// (cf) a Redump that could not be asked (-1) leaves the line the log has.
 	int keep_rd = cf && rd == -1;
-	snprintf(path, sizeof(path), "%s.log", base);
+	lib_own_name(base, itype, "log", path, sizeof(path));
 	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 	char *lb = (char *)malloc(65536);
 	int n = 0;
@@ -7730,7 +7896,7 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 		} else {
 			const Card *k = job ? &g_cards[cur_card()] : NULL;
 			const char *slash = strrchr(base, '/');
-			to_printf(of, "PSX Ripper rip log\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n",
+			to_printf(of, LIB_LOG_MARK "\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n",
 			          k ? k->title : cf && cf->title ? cf->title : slash ? slash + 1 : base, k ? k->serial : cf && cf->serial ? cf->serial : "");
 			to_printf(of, "sectors=%u\n", lba);
 			for (int i = 0; i < nt; i++) to_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], hex[i]);
@@ -7747,8 +7913,9 @@ static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 // already, and the counts follow; so a later repair reads them again.
 static void riplog_put_back(const char *base, const uint32_t *lbas, const uint8_t *zero, int n)
 {
-	char path[320];
-	snprintf(path, sizeof(path), "%s.log", base);
+	char path[340];
+	own_adopt(base, ".bin");
+	lib_own_name(base, ".bin", "log", path, sizeof(path));
 	char *lb = (char *)malloc(65536);
 	uint8_t *add = (uint8_t *)malloc(n);
 	if (!lb || !add) { free(lb); free(add); return; }
@@ -7799,8 +7966,9 @@ static void riplog_put_back(const char *base, const uint32_t *lbas, const uint8_
 // unreadable= / bad= lines leave the log and the counts follow.
 static void riplog_take_out(const char *base, const uint32_t *lbas, int n)
 {
-	char path[320];
-	snprintf(path, sizeof(path), "%s.log", base);
+	char path[340];
+	own_adopt(base, ".bin");
+	lib_own_name(base, ".bin", "log", path, sizeof(path));
 	char *lb = (char *)malloc(65536);
 	if (!lb) return;
 	int len = 0;
@@ -7968,11 +8136,10 @@ static void image_serial(const char *image, char *out)
 // MD5s are written, the log keeps its Redump line).
 static int gc_check_one(const GcItem &it, AuditSrc src)
 {
-	char cue[320], serial[16] = "", title[128];
-	snprintf(cue, sizeof(cue), "%s.cue", it.base);
+	char serial[16] = "", title[128];
 	const char *leaf = strrchr(it.base, '/');
 	leaf = leaf ? leaf + 1 : it.base;
-	int single = !vf_exists(cue);
+	int single = !it.cue;   // (a .cue of the same base next to an .iso is the other set's)
 	if (single) image_serial(it.image, serial);
 	if (!serial[0]) snprintf(serial, sizeof(serial), "%s", it.id);
 	const char *known = single && serial[0] ? lookup_title(serial) : NULL;
@@ -7980,11 +8147,11 @@ static int gc_check_one(const GcItem &it, AuditSrc src)
 	if (g_redump == RD_ONLINE && !serial[0]) { logf("game list check %s: no disc ID to look up online, left out", it.base); return -2; }
 	char key[160], before[RD_NAME + 16], after[RD_NAME + 16];
 	snprintf(key, sizeof(key), "%s:%u", serial[0] ? serial : title, (unsigned)(it.size / RAW_SIZE));
-	redump_line_of(it.base, before, sizeof(before));
+	redump_line_of(it.base, it.image, before, sizeof(before));
 	uint32_t job = audit_job_begin(src, key, leaf, "check");
 	CheckFile cf = {};
 	cf.busy = gc_card_busy;
-	cf.image = it.image; cf.title = title; cf.serial = serial;
+	cf.image = it.image; cf.cue = it.cue; cf.title = title; cf.serial = serial;
 	cf.abort = &g_gc.abort; cf.done = &g_gc.done; cf.total = &g_gc.total;
 	int r = check_image(it.base, 0, &cf);
 	if (r == 0 && cf.rd != -1 && job) {   // (Redump not asked: the log's line stays, no change to note)
@@ -8100,17 +8267,18 @@ static void rip_job_start(int c, AuditSrc src, int fresh)
 	}
 }
 
-// Rip log next to the image (<name>.log): what was read and which sectors are still wrong, so a
+// Rip log next to the image (<name>.bin.log): what was read and which sectors are still wrong, so a
 // later "repair" (after cleaning the disc) can re-read just those sectors.
 static void write_riplog()
 {
-	char path[320];
-	snprintf(path, sizeof(path), "%s.log", g_base);
+	char path[340];
+	own_adopt(g_base, ".bin");
+	lib_own_name(g_base, ".bin", "log", path, sizeof(path));
 	VFile *f = vf_open(path, "wb");
 	if (!f) return;
 	time_t now = time(NULL);
 	struct tm *g = gmtime(&now);
-	vf_printf(f, "PSX Ripper rip log\n");
+	vf_printf(f, LIB_LOG_MARK "\n");
 	vf_printf(f, "title=%s\nserial=%s\n", g_res_title, g_serial);
 	if (g) vf_printf(f, "date=%04d-%02d-%02d %02d:%02d UTC\n", g->tm_year + 1900, g->tm_mon + 1, g->tm_mday, g->tm_hour, g->tm_min);
 	vf_printf(f, "sectors=%u\ncheck=%s\nretries=%d\n", g_leadout, g_check == CHECK_OFF ? "off" : g_check == CHECK_ON ? "on" : "bitperfect", g_retries);
@@ -8194,8 +8362,8 @@ static int repair_disc_inner()
 	int err = 0, code = 0;
 	if (prepare_disc(&err, &code)) { if (g_use == SRC_BD) lv1_storage_unpatch(); return 0; }
 	if (g_cards[cur_card()].exist[0]) snprintf(g_base, sizeof(g_base), "%s", g_cards[cur_card()].exist);   // maybe another name
-	char path[320];
-	snprintf(path, sizeof(path), "%s.log", g_base);
+	char path[340];
+	own_find(g_base, ".bin", "log", path, sizeof(path));
 	VFile *lf = vf_open(path, "rb");
 	// its own buffer: riplog_open_count() below reads the log into CX.log_buf and would overwrite
 	// this one while it is being parsed (that once wrote a log without its sector list)
@@ -8319,8 +8487,9 @@ static int repair_disc_inner()
 	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
 	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);
 	{
-		char mpath[300];
-		snprintf(mpath, sizeof(mpath), "%s.md5", g_base);
+		char mpath[340];
+		own_adopt(g_base, ".bin");
+		lib_own_name(g_base, ".bin", "md5", mpath, sizeof(mpath));
 		VFile *mf = vf_open(mpath, "wb");
 		if (mf) { for (int t = 0; t < g_ntracks; t++) vf_printf(mf, "%s  track %02d\n", g_track_md5[t], g_tracks[t].num); vf_close(mf); }
 	}

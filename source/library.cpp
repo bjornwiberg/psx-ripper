@@ -1,7 +1,9 @@
 // Game library, see include/library.h. A folder's names are read once, sorted, and turned into
 // sets: each .cue first (its FILE lines decide which images are its own), then the images without
 // a cue, then what is left of a set whose image is gone (a log, an .md5, a .part). The log is read
-// for the rest. No static state: the app runs the scan in a background thread.
+// for the rest. The app's own log and .md5 are named after their image (<base>.bin.log, .iso.md5):
+// they go to the set of that image; an old <base>.log / .md5 to the first set of the base, as
+// before. No static state: the app runs the scan in a background thread.
 #include "library.h"
 #include <stdio.h>
 #include <string.h>
@@ -13,9 +15,10 @@
 
 namespace {
 
-enum Kind { K_NONE, K_BIN, K_CUE, K_LOG, K_MD5, K_JPG, K_ISO, K_IMG, K_SBI, K_PART };
+enum Kind { K_NONE, K_BIN, K_CUE, K_LOG, K_MD5, K_JPG, K_ISO, K_IMG, K_SBI, K_PART, K_OWN_LOG, K_OWN_MD5 };
 
-struct Name { std::string s; Kind k; size_t blen; int owner; };
+// own: for K_OWN_LOG / K_OWN_MD5 the image kind in its name (K_BIN, K_ISO, K_IMG)
+struct Name { std::string s; Kind k; size_t blen; int owner; Kind own; };
 
 struct Extra {   // what the scan knows about a set beyond GameDisc
 	int cue = 0, cue_files = 0, cue_missing = 0, cue_unread = 0, has2048 = 0, has2352 = 0, part = 0, image_kind = 0, image_bad = 0;
@@ -34,26 +37,31 @@ int ends_ci(const std::string &s, const char *ext)
 	return 1;
 }
 
-Kind kind_of(const std::string &s, size_t *blen)
+Kind kind_of(const std::string &s, size_t *blen, Kind *own)
 {
-	static const struct { const char *ext; Kind k; } ex[] = {
-		{".bin.part", K_PART}, {".bin", K_BIN}, {".cue", K_CUE}, {".log", K_LOG}, {".md5", K_MD5},
-		{".jpg", K_JPG}, {".iso", K_ISO}, {".img", K_IMG}, {".sbi", K_SBI},
+	static const struct { const char *ext; Kind k, own; } ex[] = {
+		{".bin.part", K_PART, K_NONE},
+		{".bin.log", K_OWN_LOG, K_BIN}, {".bin.md5", K_OWN_MD5, K_BIN}, {".iso.log", K_OWN_LOG, K_ISO},
+		{".iso.md5", K_OWN_MD5, K_ISO}, {".img.log", K_OWN_LOG, K_IMG}, {".img.md5", K_OWN_MD5, K_IMG},
+		{".bin", K_BIN, K_NONE}, {".cue", K_CUE, K_NONE}, {".log", K_LOG, K_NONE}, {".md5", K_MD5, K_NONE},
+		{".jpg", K_JPG, K_NONE}, {".iso", K_ISO, K_NONE}, {".img", K_IMG, K_NONE}, {".sbi", K_SBI, K_NONE},
 	};
 	for (const auto &e : ex)
-		if (ends_ci(s, e.ext)) { *blen = s.size() - strlen(e.ext); return e.k; }
+		if (ends_ci(s, e.ext)) { *blen = s.size() - strlen(e.ext); *own = e.own; return e.k; }
+	*own = K_NONE;
 	return K_NONE;
 }
 
 int is_image(Kind k) { return k == K_BIN || k == K_ISO || k == K_IMG; }
-int is_companion(Kind k) { return k == K_LOG || k == K_MD5 || k == K_JPG || k == K_SBI || k == K_PART; }
+int is_companion(Kind k) { return k == K_LOG || k == K_MD5 || k == K_JPG || k == K_SBI || k == K_PART; }   // of the base's first set
+int is_own(Kind k) { return k == K_OWN_LOG || k == K_OWN_MD5; }   // of the set of its image kind
 
 void on_name(const char *name, void *ctx)
 {
 	if (!name || name[0] == '.' || !name[0]) return;   // ., .., .trash, hidden files
 	Name n;
 	n.s = name;
-	n.k = kind_of(n.s, &n.blen);
+	n.k = kind_of(n.s, &n.blen, &n.own);
 	n.owner = -1;
 	if (n.k != K_NONE && n.blen) ((std::vector<Name> *)ctx)->push_back(n);
 }
@@ -255,16 +263,36 @@ void parse_cue(std::vector<Name> &names, int di, GameDisc &d, Extra &x, char *bu
 	}
 }
 
-void attach_companions(std::vector<Name> &names, int di, GameDisc &d, Extra &x, const char *base, size_t blen)
+// The files of base that go with set di: the app's log and .md5 of its image kind (own), and with
+// first (the base's first set) the old-named log and .md5, the cover, the .sbi and a .part.
+void attach_companions(std::vector<Name> &names, int di, GameDisc &d, Extra &x, const char *base, size_t blen, Kind own, int first)
 {
+	if (own != K_ISO && own != K_IMG) own = K_BIN;
 	for (auto &m : names)
-		if (m.owner < 0 && is_companion(m.k) && same_base(m, base, blen)) {
+		if (m.owner < 0 && same_base(m, base, blen) && ((is_own(m.k) && m.own == own) || (first && is_companion(m.k)))) {
 			m.owner = di;
 			add_file(d, m.s);
 			if (m.k == K_PART) x.part = 1;
-			if (m.k == K_LOG) d.has_log = 1;
+			if (m.k == K_LOG || m.k == K_OWN_LOG) d.has_log = 1;
 			if (m.k == K_JPG) d.has_cover = 1;
+			char *sfx = m.k == K_LOG || m.k == K_OWN_LOG ? d.log_sfx : m.k == K_MD5 || m.k == K_OWN_MD5 ? d.md5_sfx : NULL;
+			if (sfx && (is_own(m.k) || !sfx[0])) snprintf(sfx, sizeof d.log_sfx, "%s", m.s.c_str() + blen);   // the typed one wins
 		}
+}
+
+int exists_at(int (*exists)(const char *), const char *base, const char *ext)
+{
+	char p[400];
+	snprintf(p, sizeof p, "%s%s", base, ext);
+	return exists(p);
+}
+// The old <base>.<what> is this image type's: the scan gives it to the base's first set (a cue's,
+// then the images without one in name order: .bin, .img, .iso).
+int old_is_of(const char *base, const char *type, int (*exists)(const char *))
+{
+	if (!strcmp(type, ".bin")) return 1;
+	if (exists_at(exists, base, ".cue") || exists_at(exists, base, ".bin")) return 0;
+	return strcmp(type, ".iso") || !exists_at(exists, base, ".img");
 }
 
 }  // namespace
@@ -322,9 +350,9 @@ int lib_scan(const char *dir, const LibIo *io, GameDisc *discs, int max)
 					if (!x.image_kind) x.image_kind = m.k;
 				}
 		}
-		attach_companions(names, di, d, x, names[i].s.c_str(), names[i].blen);
+		attach_companions(names, di, d, x, names[i].s.c_str(), names[i].blen, (Kind)x.image_kind, 1);
 	}
-	// 2. images without a cue; a base's first one takes its companions
+	// 2. images without a cue; a base's first one takes its companions, each its own log and .md5
 	for (size_t i = 0; i < names.size() && n < max; i++) {
 		if (!is_image(names[i].k) || names[i].owner >= 0) continue;
 		int taken = 0;
@@ -339,14 +367,14 @@ int lib_scan(const char *dir, const LibIo *io, GameDisc *discs, int max)
 		add_file(d, names[i].s);
 		x.image_kind = names[i].k;
 		x.images.push_back(names[i].s);
-		if (!taken) attach_companions(names, di, d, x, names[i].s.c_str(), names[i].blen);
+		attach_companions(names, di, d, x, names[i].s.c_str(), names[i].blen, names[i].k, !taken);
 	}
 	// 3. what is left of a set without its image (a lone cover or .sbi is not a game)
 	for (size_t i = 0; i < names.size() && n < max; i++) {
 		Kind k = names[i].k;
-		if (names[i].owner >= 0 || !(k == K_LOG || k == K_MD5 || k == K_PART)) continue;
+		if (names[i].owner >= 0 || !(k == K_LOG || k == K_MD5 || k == K_PART || is_own(k))) continue;
 		int di = new_disc(names[i]);
-		attach_companions(names, di, discs[di], ex[di], names[i].s.c_str(), names[i].blen);
+		attach_companions(names, di, discs[di], ex[di], names[i].s.c_str(), names[i].blen, is_own(k) ? names[i].own : K_BIN, 1);
 	}
 	// each set: sizes, format, log, ID, title, status, LibCrypt
 	for (int di = 0; di < n; di++) {
@@ -367,8 +395,10 @@ int lib_scan(const char *dir, const LibIo *io, GameDisc *discs, int max)
 			else d.fmt = m2352 ? GF_2352 : m2048 ? GF_2048 : GF_UNKNOWN;
 		}
 		if (d.has_log) {
-			snprintf(path, sizeof path, "%s.log", d.base);
+			snprintf(path, sizeof path, "%s%s", d.base, d.log_sfx);
 			int got = io->read(path, buf, LOG_MAX - 1);
+			size_t ml = strlen(LIB_LOG_MARK);
+			d.old_log = !strcmp(d.log_sfx, ".log") && got >= (int)ml && !memcmp(buf, LIB_LOG_MARK, ml) && (got == (int)ml || buf[ml] == '\n' || buf[ml] == '\r');
 			if (got >= 0) parse_log(d, buf, got);
 		}
 		const char *leaf = leaf_of(d.base);
@@ -390,6 +420,54 @@ int lib_scan(const char *dir, const LibIo *io, GameDisc *discs, int max)
 		}
 	}
 	free(buf);
+	return n;
+}
+
+const char *lib_image_type(const char *image)
+{
+	size_t l = image ? strlen(image) : 0;
+	if (l >= 4 && !strcasecmp(image + l - 4, ".iso")) return ".iso";
+	if (l >= 4 && !strcasecmp(image + l - 4, ".img")) return ".img";
+	return ".bin";
+}
+
+void lib_own_name(const char *base, const char *image, const char *what, char *out, int n)
+{
+	snprintf(out, (size_t)n, "%s%s.%s", base, lib_image_type(image), what);
+}
+
+int lib_own_find(const char *base, const char *image, const char *what, int (*exists)(const char *), char *out, int n)
+{
+	lib_own_name(base, image, what, out, n);
+	if (exists(out)) return 1;
+	char old[400];
+	snprintf(old, sizeof old, "%s.%s", base, what);
+	if (!exists(old) || !old_is_of(base, lib_image_type(image), exists)) return 0;
+	snprintf(out, (size_t)n, "%s", old);
+	return 1;
+}
+
+int lib_old_is_of(const char *base, const char *image, int (*exists)(const char *)) { return old_is_of(base, lib_image_type(image), exists); }
+
+int lib_own_migration(const char *base, const char *image, const LibIo *io, char (*from)[320], char (*to)[320])
+{
+	const char *type = lib_image_type(image);
+	char p[400], head[64];
+	snprintf(p, sizeof p, "%s.log", base);
+	size_t ml = strlen(LIB_LOG_MARK);
+	int got = io->exists(p) ? io->read(p, head, (int)sizeof head - 1) : -1;
+	if (got < (int)ml || memcmp(head, LIB_LOG_MARK, ml) || (got > (int)ml && head[ml] != '\n' && head[ml] != '\r')) return 0;
+	if (!old_is_of(base, type, io->exists)) return 0;
+	int n = 0;
+	for (const char *what : {"log", "md5"}) {
+		char a[400], b[400];
+		snprintf(a, sizeof a, "%s.%s", base, what);
+		snprintf(b, sizeof b, "%s%s.%s", base, type, what);
+		if (!io->exists(a) || io->exists(b) || strlen(a) >= 320 || strlen(b) >= 320) continue;
+		snprintf(from[n], 320, "%s", a);
+		snprintf(to[n], 320, "%s", b);
+		n++;
+	}
 	return n;
 }
 
@@ -446,7 +524,9 @@ int lib_group(GameDisc *d, int n, Game *games, int max)
 		if (c) return c < 0;
 		c = strcmp(rows[a].name, rows[b].name);
 		if (c) return c < 0;
-		return strcmp(d[rows[a].discs[0]].base, d[rows[b].discs[0]].base) < 0;
+		c = strcmp(d[rows[a].discs[0]].base, d[rows[b].discs[0]].base);
+		if (c) return c < 0;
+		return strcmp(d[rows[a].discs[0]].image, d[rows[b].discs[0]].image) < 0;   // one base, two images: one order
 	});
 	// the discs in row order; dup indices follow
 	std::vector<int> newpos((size_t)n);

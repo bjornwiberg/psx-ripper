@@ -1,5 +1,6 @@
 // Game library: the game images in a source's PSXISO folder, as sets of files sharing a base name
-// (.bin/.cue/.log/.md5/.jpg/.sbi, or a single .iso/.img), each with its format and status, grouped
+// (.bin/.cue/.jpg/.sbi, or a single .iso/.img, and the app's log and .md5 named after the image:
+// .bin.log/.bin.md5, .iso.log/.iso.md5, .img.log/.img.md5), each with its format and status, grouped
 // into the rows of the game list. Pure logic over an injected file interface (LibIo), so the host
 // tests run it on real folders and the app on its own file layer.
 #ifndef PSXRIP_LIBRARY_H
@@ -28,6 +29,10 @@ struct GameFilter { int fmt;     /* 0 any, 1 only 2352, 2 only 2048 */
 struct GameDisc { char base[200], image[220], id[16], title[128], rdname[160], date[24], drive[32];
                   uint64_t size; GameFmt fmt; int tracks, errors, bad; GameStatus st; int has_cover,
                   has_log, libcrypt /*0 n/a, 1 sbi present, -1 missing*/, dup /*index of the other, -1*/, rd;
+                  // the set's log and .md5 after its base: "<type>.log" (".bin.log", ".iso.log", ...) or
+                  // the old ".log" / ".md5"; "" none. old_log: that log is an old <base>.log the app wrote
+                  // (first line LIB_LOG_MARK), so the list renames it to the typed name
+                  char log_sfx[10], md5_sfx[10]; int old_log;
                   // every file of the set (names in base's folder, each ending in a 0), so moving the
                   // set moves exactly these; files_cut = the names did not all fit (do not move it)
                   int nfiles, files_cut; char files[LIB_FILES]; };
@@ -63,5 +68,25 @@ void lib_summary(const GameDisc *d, int n, int *total, int *verified, int *error
 int lib_first_letter_next(const Game *g, const int *shown, int n, int from, int dir);
 // Full path of a set's i-th file into out; 0 when i is out of range.
 int lib_file_path(const GameDisc *d, int i, char *out, int n);
+
+// The app's own log and .md5 carry the type of the image they describe: <base>.bin.log and
+// <base>.bin.md5 for a rip (.bin/.cue), <base>.iso.* and <base>.img.* for a single image, so two
+// sets of one base name in a folder each keep their own. Before, they were <base>.log / <base>.md5.
+#define LIB_LOG_MARK "PSX Ripper rip log"   // the first line of every log the app writes
+// The type of an image (its path, name or type): ".iso", ".img", else ".bin".
+const char *lib_image_type(const char *image);
+// <base><type>.<what> (what = "log" or "md5") into out.
+void lib_own_name(const char *base, const char *image, const char *what, char *out, int n);
+// The file a reader opens: the typed one when it exists, else the old <base>.<what> when it exists
+// and is this image's (a .bin; an .img or .iso only when no set before it in the scan's order has
+// that base: .cue/.bin, then .img, then .iso). Returns 1 with its path in out; 0 when there is
+// neither (out = the typed name).
+int lib_own_find(const char *base, const char *image, const char *what, int (*exists)(const char *), char *out, int n);
+// 1 when the old <base>.log / .md5 would be this image's (the rule of lib_own_find).
+int lib_old_is_of(const char *base, const char *image, int (*exists)(const char *));
+// The moves that give an old log the app wrote (first line LIB_LOG_MARK) and its .md5 their typed
+// names: <base>.log -> <base><type>.log, <base>.md5 -> <base><type>.md5, each only when the old one
+// is this image's (as lib_own_find) and the new name is free. Returns how many (0 to 2).
+int lib_own_migration(const char *base, const char *image, const LibIo *io, char (*from)[320], char (*to)[320]);
 
 #endif

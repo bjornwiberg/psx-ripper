@@ -95,7 +95,7 @@ means Redump was off or knows no such disc.
 ## Damaged discs and Repair
 
 Scratches can make sectors unreadable. The rip still finishes; the sectors that could not be
-read are written into the rip's log (`<name>.log`) and the tab shows the warning icon and
+read are written into the rip's log (`<name>.bin.log`) and the tab shows the warning icon and
 *Known errors: n sectors*.
 
 1. Clean the disc.
@@ -137,9 +137,22 @@ Each rip writes:
 | File | Content |
 |---|---|
 | `<name>.bin` / `.cue` | The image: every track, raw 2352-byte sectors |
-| `<name>.md5` | MD5 of every track |
-| `<name>.log` | The rip log: tracks, MD5s, Redump result, unreadable sectors (used by Repair) |
+| `<name>.bin.md5` | MD5 of every track |
+| `<name>.bin.log` | The rip log: tracks, MD5s, Redump result, unreadable sectors (used by Repair) |
 | `/dev_hdd0/tmp/sbi/<SERIAL>.sbi` | LibCrypt data, only for the PAL discs that use LibCrypt |
+
+The log and the `.md5` are named after the image they describe. Checking a single `.iso` or
+`.img` from another tool against Redump writes `<name>.iso.log` and `<name>.iso.md5` (or
+`.img.log`/`.img.md5`); such a log says on its `checked=` line that it comes from a check, not a
+rip. So a rip and an `.iso` with the same name in one folder each keep their own result.
+Covers (`<name>.jpg`) and `.sbi` files keep the plain name, as emulators and webMAN expect.
+
+Earlier versions wrote `<name>.log` and `<name>.md5`. The app still reads them. When the game
+list reads a folder, it renames the logs it wrote itself (first line `PSX Ripper rip log`), and
+their `.md5`, to the new names, for the image they belong to: the `.bin` when a rip has that name,
+otherwise the single image. It is one job per folder in the audit log (*Files*, *Rename logs*)
+and can be undone there; an undone rename is not done again. A log another program wrote, a
+name that is already taken, and a game a drive is working on are left as they are.
 
 The file name follows the *File name* setting; the default is `%T [%D]`, for example
 `Final Fantasy IX (Disc 1) [SLES_029.65]`. webMAN hides the part in brackets in its list.
@@ -194,7 +207,7 @@ below).
 - A **repair's sectors**: the old bytes are written back into the image, as long as the sector
   in the image is still what the repair wrote and the saved copy has not been removed. The rip
   is then checked again (MD5 and Redump) and the sectors that were unreadable or bad before go
-  back into the rip's `.log`, so *Repair* can try them again.
+  back into the rip's `.bin.log`, so *Repair* can try them again.
 - The sectors a **finished rip** corrected in its later passes, the same way: the image gets the
   first read back. Undoing a disc includes them.
 - Not the rip itself, a check or a Redump result: they are records, not changes. Delete a rip
@@ -214,7 +227,7 @@ select it and △ says *Redo* (*Gör om* in Swedish); it applies the change agai
 longer undone, so △ undoes it again, as often as you like. (The undo rows stay in the list as
 history; △ on the newest one does the same.) A setting gets the value the change gave
 it, as long as it still has the value the undo put back. A sector gets the repaired bytes again,
-as long as the image still has the bytes the undo put back, and leaves the rip's `.log` again;
+as long as the image still has the bytes the undo put back, and leaves the rip's `.bin.log` again;
 the rip is checked again. The rules above apply here too (a running job, a file ripped again
 since, a removed copy). A job or disc whose changes are all undone is redone the same way, oldest
 row first, stopping at the first row that cannot be redone. The redo is logged as well, so it
@@ -245,4 +258,5 @@ start it from the XMB. Cobra applies the `.sbi` of LibCrypt discs by itself.
 
 - `/dev_hdd0/tmp/psxrip.log`: what the app did, for bug reports (remove webhook addresses and
   headers before you share it).
-- `<name>.log` next to each rip: that rip's tracks, MD5s, Redump result and unreadable sectors.
+- `<name>.bin.log` next to each rip: that rip's tracks, MD5s, Redump result and unreadable sectors
+  (`<name>.log` from earlier versions).

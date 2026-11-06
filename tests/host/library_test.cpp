@@ -6,6 +6,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <utility>
 #include "../../include/library.h"
 
 static int g_fail;
@@ -546,6 +547,129 @@ static void folder_gone_midway(int &bad)
 	CHECK((i = find(n, "B")) >= 0 && g_d[i].size == 0 && g_d[i].fmt == GF_UNKNOWN && g_d[i].st == GS_BROKEN);
 }
 
+// The app's own companions carry their image's type (<base>.bin.log, <base>.iso.md5): two sets of
+// one base name each keep their own; an old <base>.log goes to the .bin/.cue set as before.
+static const char *APP_LOG_ISO =
+	"PSX Ripper rip log\ntitle=Breath of Fire IV\nserial=SLUS_013.24\nchecked=from the image (no rip log before)\n"
+	"track=01 start=0 md5=0123456789abcdef0123456789abcdef\nredump=verified Breath of Fire IV (USA)\n";
+static void typed_companions(int &bad)
+{
+	fresh();
+	const char *B = "Breath of Fire IV [SLUS_013.24]";
+	char f[300];
+	rip(B, 10, NULL);
+	snprintf(f, sizeof f, "%s.bin.log", B); put(f, LOG_OK);
+	snprintf(f, sizeof f, "%s.bin.md5", B); put(f, "x  track 01\n");
+	snprintf(f, sizeof f, "%s.iso", B); put_size(f, 2352ull * 10);
+	snprintf(f, sizeof f, "%s.iso.log", B); put(f, APP_LOG_ISO);
+	snprintf(f, sizeof f, "%s.iso.md5", B); put(f, "y  track 01\n");
+	snprintf(f, sizeof f, "%s_.jpg", B); put(f, "jpg");
+	int n = scan();
+	CHECK(n == 2);
+	int bin = -1, iso = -1;
+	for (int i = 0; i < n; i++) {
+		size_t l = strlen(g_d[i].image);
+		if (l > 4 && !strcmp(g_d[i].image + l - 4, ".bin")) bin = i;
+		if (l > 4 && !strcmp(g_d[i].image + l - 4, ".iso")) iso = i;
+	}
+	CHECK(bin >= 0 && iso >= 0);
+	if (bin < 0 || iso < 0) return;
+	snprintf(f, sizeof f, "%s.bin.log", B); CHECK(has_file(g_d[bin], f));
+	snprintf(f, sizeof f, "%s.bin.md5", B); CHECK(has_file(g_d[bin], f));
+	snprintf(f, sizeof f, "%s.iso.log", B); CHECK(!has_file(g_d[bin], f) && has_file(g_d[iso], f));
+	snprintf(f, sizeof f, "%s.iso.md5", B); CHECK(has_file(g_d[iso], f));
+	CHECK(g_d[bin].nfiles == 4 && g_d[iso].nfiles == 3);
+	CHECK(g_d[bin].has_log && !strcmp(g_d[bin].log_sfx, ".bin.log") && !strcmp(g_d[bin].md5_sfx, ".bin.md5") && g_d[bin].rd == 1 && !g_d[bin].old_log);
+	CHECK(g_d[iso].has_log && !strcmp(g_d[iso].log_sfx, ".iso.log") && !strcmp(g_d[iso].md5_sfx, ".iso.md5") && g_d[iso].rd == 1 && g_d[iso].st == GS_VERIFIED);
+	CHECK(!strcmp(g_d[iso].rdname, "Breath of Fire IV (USA)") && !strcmp(g_d[bin].rdname, "Alundra (Europe)"));
+	// an old <base>.log (and .md5) of the app goes to the .bin/.cue set and is marked for the migration
+	fresh();
+	rip(B, 10, LOG_OK);
+	snprintf(f, sizeof f, "%s.md5", B); put(f, "x  track 01\n");
+	snprintf(f, sizeof f, "%s.iso", B); put_size(f, 2352ull * 10);
+	n = scan();
+	CHECK(n == 2);
+	for (int i = 0; i < n; i++) {
+		size_t l = strlen(g_d[i].image);
+		int is_iso = l > 4 && !strcmp(g_d[i].image + l - 4, ".iso");
+		if (is_iso) CHECK(!g_d[i].has_log && !g_d[i].log_sfx[0] && !g_d[i].old_log && g_d[i].nfiles == 1 && g_d[i].rd == -1);
+		else CHECK(g_d[i].has_log && !strcmp(g_d[i].log_sfx, ".log") && !strcmp(g_d[i].md5_sfx, ".md5") && g_d[i].old_log && g_d[i].rd == 1);
+	}
+	// a log another tool wrote under the old name: read as before, not the app's (no migration)
+	fresh();
+	rip("Other", 10, "some tool's log\nredump=verified Other\n");
+	n = scan();
+	CHECK(n == 1 && g_d[0].has_log && !g_d[0].old_log && g_d[0].rd == 1);
+	// the typed log wins over an old one next to it
+	fresh();
+	rip("Both", 10, "PSX Ripper rip log\nredump=no_match\n");
+	put("Both.bin.log", LOG_OK);
+	n = scan();
+	CHECK(n == 1 && !strcmp(g_d[0].log_sfx, ".bin.log") && g_d[0].rd == 1 && !g_d[0].old_log && g_d[0].nfiles == 4);
+	// what is left of a lone .iso: its typed log alone is a broken set of that base
+	fresh();
+	put("Gone.iso.log", APP_LOG_ISO);
+	n = scan();
+	CHECK(n == 1 && g_d[0].st == GS_BROKEN && !strcmp(g_d[0].log_sfx, ".iso.log") && !strcmp(leaf_name(g_d[0].base), "Gone"));
+	// the same name and title: the two rows keep one order (by image) whatever the folder order
+	fresh();
+	rip(B, 10, NULL);
+	snprintf(f, sizeof f, "%s.iso", B); put_size(f, 2352ull * 10);
+	n = scan();
+	int ng = lib_group(g_d, n, g_g, 600);
+	CHECK(ng == 2 && strstr(g_d[g_g[0].first].image, ".bin") && strstr(g_d[g_g[1].first].image, ".iso"));
+	std::swap(g_d[0], g_d[1]);
+	ng = lib_group(g_d, n, g_g, 600);
+	CHECK(ng == 2 && strstr(g_d[g_g[0].first].image, ".bin") && strstr(g_d[g_g[1].first].image, ".iso"));
+}
+
+// The names: typed for each image, the reader's fallback to the old name only for the image it
+// belongs to, and the migration's moves (only an app-written log, never onto a taken name).
+static void own_names(int &bad)
+{
+	fresh();
+	char b[300], out[400], from[2][320], to[2][320];
+	snprintf(b, sizeof b, "%s/X", DIR_);
+	CHECK(!strcmp(lib_image_type("/a/X.iso"), ".iso") && !strcmp(lib_image_type("X.IMG"), ".img") && !strcmp(lib_image_type("X.bin"), ".bin") &&
+	      !strcmp(lib_image_type(""), ".bin") && !strcmp(lib_image_type(NULL), ".bin") && !strcmp(lib_image_type(".iso"), ".iso"));
+	lib_own_name(b, "X.iso", "log", out, sizeof out);
+	CHECK(strstr(out, "/X.iso.log") && strlen(out) == strlen(b) + 8);
+	lib_own_name(b, ".bin", "md5", out, sizeof out);
+	CHECK(strstr(out, "/X.bin.md5"));
+	// nothing there: the typed name, 0
+	CHECK(!lib_own_find(b, ".bin", "log", IO.exists, out, sizeof out) && strstr(out, "/X.bin.log"));
+	// a lone .iso with an old log: it is the .iso's
+	put("X.iso", "i");
+	put("X.log", "PSX Ripper rip log\n");
+	put("X.md5", "m");
+	CHECK(lib_own_find(b, ".iso", "log", IO.exists, out, sizeof out) && strstr(out, "/X.log"));
+	CHECK(lib_own_migration(b, ".iso", &IO, from, to) == 2 && strstr(from[0], "/X.log") && strstr(to[0], "/X.iso.log") &&
+	      strstr(from[1], "/X.md5") && strstr(to[1], "/X.iso.md5"));
+	// a .cue of that base: the old log is the .bin set's, not the .iso's
+	put("X.cue", "FILE \"X.bin\" BINARY\n");
+	CHECK(!lib_own_find(b, ".iso", "log", IO.exists, out, sizeof out) && strstr(out, "/X.iso.log"));
+	CHECK(lib_own_find(b, ".bin", "log", IO.exists, out, sizeof out) && strstr(out, "/X.log"));
+	CHECK(lib_own_migration(b, ".iso", &IO, from, to) == 0);
+	CHECK(lib_own_migration(b, ".bin", &IO, from, to) == 2 && strstr(to[0], "/X.bin.log") && strstr(to[1], "/X.bin.md5"));
+	// the typed one there: found first; a taken target is never moved onto
+	put("X.bin.md5", "n");
+	CHECK(lib_own_find(b, ".bin", "md5", IO.exists, out, sizeof out) && strstr(out, "/X.bin.md5"));
+	CHECK(lib_own_migration(b, ".bin", &IO, from, to) == 1 && strstr(from[0], "/X.log") && strstr(to[0], "/X.bin.log"));
+	put("X.bin.log", "new");
+	CHECK(lib_own_migration(b, ".bin", &IO, from, to) == 0);
+	// .img before .iso (the scan's order): a lone .img and .iso, the old log is the .img's
+	fresh();
+	put("Y.iso", "i"); put("Y.img", "i"); put("Y.log", "PSX Ripper rip log\r\ntitle=Y\n");
+	snprintf(b, sizeof b, "%s/Y", DIR_);
+	CHECK(lib_own_migration(b, ".iso", &IO, from, to) == 0 && lib_own_migration(b, ".img", &IO, from, to) == 1 && strstr(to[0], "/Y.img.log"));
+	// a log the app did not write stays (and so does its .md5)
+	fresh();
+	put("Z.bin", "b"); put("Z.cue", "c"); put("Z.log", "EAC extraction logfile\n"); put("Z.md5", "m");
+	snprintf(b, sizeof b, "%s/Z", DIR_);
+	CHECK(lib_own_migration(b, ".bin", &IO, from, to) == 0);
+	CHECK(lib_own_find(b, ".bin", "log", IO.exists, out, sizeof out) && strstr(out, "/Z.log"));   // still read, as before
+}
+
 int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
@@ -557,6 +681,7 @@ int main()
 		{"many_sets_bounded", many_sets_bounded}, {"long_names_cut", long_names_cut},
 		{"folder_gone_midway", folder_gone_midway}, {"regions_stay_apart", regions_stay_apart},
 		{"same_set_two_folders", same_set_two_folders}, {"empty_image_broken", empty_image_broken},
+		{"typed_companions", typed_companions}, {"own_names", own_names},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {
