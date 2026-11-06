@@ -141,6 +141,7 @@ static bool parse_line(char *line, AuditRow *r)
 			else if (!strcmp(k, "before")) copyn(r->before, sizeof r->before, v);
 			else if (!strcmp(k, "after")) copyn(r->after, sizeof r->after, v);
 			else if (!strcmp(k, "rev")) r->norev = !strcmp(v, "0");
+			else if (!strcmp(k, "aside")) r->aside = !strcmp(v, "1");
 			else if (!strcmp(k, "end")) has_end = true;
 			else if (!strcmp(k, "file")) copyn(r->file, sizeof r->file, v);
 		}
@@ -317,7 +318,7 @@ static JobSlot *slot_of(uint32_t job)
 // Appends one row; the caller holds the lock. Returns the id, 0 when the row could not be written.
 static uint32_t write_row(uint32_t job, AuditSrc src, AuditDom dom, const char *disc, const char *kind,
                           const char *what, const char *before, const char *after,
-                          const char *file, bool sector, uint32_t lba, uint32_t blob, bool norev = false)
+                          const char *file, bool sector, uint32_t lba, uint32_t blob, bool norev = false, bool aside = false)
 {
 	static char line[LINE_MAX_LEN];
 	uint32_t id = g_next_id++;
@@ -337,6 +338,7 @@ static uint32_t write_row(uint32_t job, AuditSrc src, AuditDom dom, const char *
 	}
 	if (sector) n += (size_t)snprintf(line + n, sizeof line - n, "\tlba=%u\tblob=%u", (unsigned)lba, (unsigned)blob);
 	if (norev) n += (size_t)snprintf(line + n, sizeof line - n, "\trev=0");
+	if (aside) n += (size_t)snprintf(line + n, sizeof line - n, "\taside=1");
 	n += (size_t)snprintf(line + n, sizeof line - n, "\tend=1\n");
 	char p[256];
 	path_log(p, sizeof p);
@@ -1003,7 +1005,8 @@ static int undo_setting_row(const AuditRow &r, char *why, size_t n, AuditReason 
 struct MoveT { AuditRow row; uint32_t named; };
 
 // The move rows of a job: those not undone, newest first; when all are undone, all of them oldest
-// first, each named by its chain's newest undo row (*redo). Caller holds the lock.
+// first, each named by its chain's newest undo row (*redo), except the rows that took a file aside:
+// replayed, they would put it under its .case name again. Caller holds the lock.
 static void collect_moves(uint32_t job, const UndoState &st, std::vector<MoveT> &ts, bool *redo)
 {
 	std::vector<MoveT> fwd, back;
@@ -1014,7 +1017,10 @@ static void collect_moves(uint32_t job, const UndoState &st, std::vector<MoveT> 
 		(u ? back : fwd).push_back(t);
 	});
 	*redo = fwd.empty() && !back.empty();
-	if (*redo) ts.swap(back);
+	if (*redo) {
+		back.erase(std::remove_if(back.begin(), back.end(), [](const MoveT &t) { return t.row.aside != 0; }), back.end());
+		ts.swap(back);
+	}
 	else { std::reverse(fwd.begin(), fwd.end()); ts.swap(fwd); }
 }
 
@@ -1089,9 +1095,10 @@ static uint32_t step_row(uint32_t job, AuditSrc src, const char *disc, const cha
 // back is lost: its row stays (or is written, when it moved after all), so the log stays true and an
 // undo of the job can try again; the reason is then AW_NOT_PUT_BACK (lba = how many, file = the
 // first). A file left aside by its rename (MV_ASIDE) is lost under that name, with a new move row
-// from where the log has it to where it is, so the job's undo brings it home. A file back in its
-// place whose app's part could not be undone (MV_BENT: no row, no undo reaches it) is said apart
-// (AW_NOT_RESTORED, when nothing is lost). Returns 0, or -1 with msg and rs.
+// (flagged aside) from where the log has it to where it is, so the job's undo brings it home. A file
+// back in its place whose app's part could not be undone (MV_BENT: no row, no undo reaches it) is
+// said apart (AW_NOT_RESTORED when nothing is lost, else AW_NOT_PUT_BACK with its name in `what`).
+// Returns 0, or -1 with msg and rs.
 static int run_moves(uint32_t job, AuditSrc src, const char *disc, const char *name, const std::vector<MoveStep> &steps,
                      char *msg, size_t n, AuditReason *rs)
 {
@@ -1102,7 +1109,7 @@ static int run_moves(uint32_t job, AuditSrc src, const char *disc, const char *n
 	// left aside: a row from where the log has it to where it is (the job's undo takes it home)
 	auto lose_aside = [&](const std::string &logged) {
 		lock();
-		write_row(job, src, AU_FILES, disc, "move", name, logged.c_str(), aside.c_str(), NULL, false, 0, 0);
+		write_row(job, src, AU_FILES, disc, "move", name, logged.c_str(), aside.c_str(), NULL, false, 0, 0, false, true);
 		unlock();
 		lose(aside);
 	};
@@ -1153,6 +1160,7 @@ static int run_moves(uint32_t job, AuditSrc src, const char *disc, const char *n
 		}
 		if (!bent.empty()) {   // in its place, its content not
 			if (!lost) { reason(rs, AW_NOT_RESTORED, r); reason_file(rs, bent.c_str()); }
+			else if (rs) copyn(rs->what, sizeof rs->what, base_name(bent.c_str()));   // named next to the lost
 			size_t l = strlen(msg);
 			snprintf(msg + l, n - l, "; %s went back but its FILE lines could not be restored", base_name(bent.c_str()));
 		}
@@ -1183,6 +1191,9 @@ static int undo_moves(uint32_t job, char *why, size_t n, AuditReason *rs)
 	return 0;
 }
 
+// The longest path a move takes: the log keeps 191 characters of a path, and a file left aside is
+// logged as "<path>.case".
+static const size_t MOVE_PATH_MAX = 191 - 5;
 // audit_move's checks: msg empty when the moves may start.
 static void move_check(const char *const *from, const char *const *to, int n, char *msg, size_t mn, AuditReason *rs)
 {
@@ -1190,9 +1201,9 @@ static void move_check(const char *const *from, const char *const *to, int n, ch
 	if (n <= 0) { rs->code = AW_NOTHING; snprintf(msg, mn, "nothing to move"); }
 	for (int i = 0; !msg[0] && i < n; i++) {
 		const char *a = from[i], *b = to[i];
-		if (strlen(a) > 191 || strlen(b) > 191) {
-			rs->code = AW_TOO_LONG; reason_file(rs, strlen(a) > 191 ? a : b);
-			snprintf(msg, mn, "%s: the path is too long for the log", base_name(strlen(a) > 191 ? a : b));
+		if (strlen(a) > MOVE_PATH_MAX || strlen(b) > MOVE_PATH_MAX) {
+			rs->code = AW_TOO_LONG; reason_file(rs, strlen(a) > MOVE_PATH_MAX ? a : b);
+			snprintf(msg, mn, "%s: the path is too long for the log", base_name(strlen(a) > MOVE_PATH_MAX ? a : b));
 		} else if (busy && (busy(a) || busy(b))) {
 			rs->code = AW_FILE_BUSY; reason_file(rs, a);
 			snprintf(msg, mn, "%s is in use", base_name(a));

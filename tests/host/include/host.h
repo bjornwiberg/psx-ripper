@@ -12,6 +12,7 @@ extern char host_root[256];
 extern int host_exfat[8];
 extern int (*host_rename_hook)(const char *from, const char *to);   // nonzero: vf_rename fails
 extern char host_label[8][24];
+extern const char *host_listdir_extra;   // a name vf_listdir adds to every folder (NULL = none)
 // Redump's local copy: host_rd_local = there is one; it knows one disc of one track, with MD5
 // host_rd_md5, named host_rd_name (0 = no copy, as before: every check is "unchecked").
 extern int host_rd_local;

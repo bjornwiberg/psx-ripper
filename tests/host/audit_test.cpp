@@ -1505,6 +1505,14 @@ static void move_put_back_fails(int &bad)
 	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 3, why, sizeof why, &rs) == -1 && rs.code == AW_NOT_RESTORED && !strcmp(rs.file, "P.cue"));
 	CHECK(strstr(why, "P.cue went back but its FILE lines could not be restored") != NULL);
 	CHECK(mv_has("P.bin") && mv_has("P.cue") && mv_has("P.log") && !mv_has(".trash/P.bin"));
+	// the cue bent and another file lost: the reason names both (the bent one in `what`)
+	g_moved_fail = ".cue";
+	g_rename_fail = "/.trash/P.bin";
+	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 3, why, sizeof why, &rs) == -1 && rs.code == AW_NOT_PUT_BACK &&
+	      !strcmp(rs.file, "P.bin") && rs.lba == 1 && !strcmp(rs.what, "P.cue"));
+	CHECK(mv_has(".trash/P.bin") && mv_has("P.cue") && mv_has("P.log"));
+	g_moved_fail.clear(); g_rename_fail.clear();
+	CHECK(audit_undo_job(newest_job(), why, sizeof why, &rs) == 0 && mv_has("P.bin") && !mv_has(".trash/P.bin"));
 	// a rollback whose rename fails: the file stays moved with its row, counted
 	g_moved_fail = "/.trash/P.log";
 	g_rename_fail = "/.trash/P.bin";
@@ -1571,6 +1579,100 @@ static void move_aside(int &bad)
 	audit_init(DIR, &IOM);
 }
 
+// A file left aside has a row (flagged aside) that brings it home; a redo never replays that row, so
+// it never puts a file under its .case name again. Asides written during an undo and during a redo.
+static bool mv_any_case()
+{
+	bool any = false;
+	char cmd[96], line[256];
+	snprintf(cmd, sizeof cmd, "ls -a %s %s/.trash", MV, MV);
+	FILE *p = popen(cmd, "r");
+	while (p && fgets(line, sizeof line, p)) {
+		line[strcspn(line, "\n")] = 0;
+		size_t l = strlen(line);
+		if (l > 5 && !strcmp(line + l - 5, ".case")) any = true;
+	}
+	if (p) pclose(p);
+	return any;
+}
+static void move_aside_redo(int &bad)
+{
+	static const AuditIo IOA = {io_open, io_read, io_write, io_seek, io_close, mv_rename_aside, mv_exists};
+	const char *a[] = {"P.bin", "P.cue"}, *t[] = {".trash/P.bin", ".trash/P.cue"};
+	MvSet m;
+	char why[200] = "";
+	AuditReason rs;
+	AuditRow mv[4];
+	int redo;
+	// during an undo of a finished job: newest first, P.cue left at .trash/P.cue.case
+	mv_fresh();
+	audit_init(DIR, &IOA);
+	for (const char *f : a) mv_put(f);
+	mv_set(m, a, 2, t);
+	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 2, why, sizeof why, &rs) == 0);
+	uint32_t job = newest_job();
+	g_aside = "/.trash/P.cue";
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == -1 && rs.code == AW_NOT_PUT_BACK && !strcmp(rs.file, "P.cue.case") && mv_has(".trash/P.cue.case"));
+	g_aside.clear();
+	CHECK(rows_of_kind(job, "move", mv, 4) == 3 && !mv[0].aside && !mv[1].aside && mv[2].aside);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("P.bin") && mv_has("P.cue") && !mv_any_case());
+	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 1);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has(".trash/P.bin") && mv_has(".trash/P.cue") && !mv_has("P.cue") && !mv_any_case());
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("P.bin") && mv_has("P.cue") && !mv_any_case());
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has(".trash/P.cue") && !mv_any_case());
+	// during a redo: oldest first, P.bin moved, P.cue left at P.cue.case, P.bin back
+	mv_fresh();
+	audit_init(DIR, &IOA);
+	for (const char *f : a) mv_put(f);
+	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 2, why, sizeof why, &rs) == 0);
+	job = newest_job();
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("P.cue"));
+	g_aside = "/P.cue";
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == -1 && rs.code == AW_NOT_PUT_BACK && !strcmp(rs.file, "P.cue.case") && mv_has("P.bin") && mv_has("P.cue.case"));
+	g_aside.clear();
+	CHECK(rows_of_kind(job, "move", mv, 4) == 3 && mv[2].aside);
+	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 0);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("P.bin") && mv_has("P.cue") && !mv_any_case());
+	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 1);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has(".trash/P.bin") && mv_has(".trash/P.cue") && !mv_any_case());
+	audit_set_move_hooks(NULL, NULL);
+	audit_init(DIR, &IOM);
+}
+
+// A path is at most 186 characters (the log's 191 less ".case"), so a file left aside always has a
+// row that names it whole.
+static void move_path_limit(int &bad)
+{
+	mv_fresh();
+	static const AuditIo IOA = {io_open, io_read, io_write, io_seek, io_close, mv_rename_aside, mv_exists};
+	audit_init(DIR, &IOA);
+	size_t d = strlen(MV) + 1;
+	std::string ok = std::string(186 - d - 4, 'p') + ".bin", over = std::string(187 - d - 4, 'q') + ".bin";
+	mv_put(ok.c_str()); mv_put(over.c_str());
+	std::string okp = mvp(ok.c_str()), overp = mvp(over.c_str()), s = mvp("S.bin");
+	std::string okt = mvp((std::string(186 - d - 4, 'r') + ".bin").c_str()), overt = mvp((std::string(187 - d - 4, 'r') + ".bin").c_str());
+	CHECK(okp.size() == 186 && overp.size() == 187 && okt.size() == 186 && overt.size() == 187);
+	char why[200] = "";
+	AuditReason rs;
+	const char *f1[] = {okp.c_str()}, *t1[] = {s.c_str()};
+	CHECK(audit_move_check(f1, t1, 1, why, sizeof why, &rs) == 0);
+	const char *f2[] = {overp.c_str()};
+	CHECK(audit_move_check(f2, t1, 1, why, sizeof why, &rs) == -1 && rs.code == AW_TOO_LONG && !strncmp(rs.file, over.c_str(), sizeof rs.file - 1));
+	const char *t3[] = {okt.c_str()};
+	CHECK(audit_move_check(f1, t3, 1, why, sizeof why, &rs) == 0);
+	const char *t4[] = {overt.c_str()};
+	CHECK(audit_move_check(f1, t4, 1, why, sizeof why, &rs) == -1 && rs.code == AW_TOO_LONG);
+	// a 186-character file left aside: its row names the .case path whole, the undo brings it home
+	g_aside = "/" + ok;
+	CHECK(audit_move(AU_PAD, "", "L", "rename", f1, t1, 1, why, sizeof why, &rs) == -1 && rs.code == AW_NOT_PUT_BACK);
+	g_aside.clear();
+	AuditRow mv[2];
+	CHECK(rows_of_kind(newest_job(), "move", mv, 2) == 1 && !strcmp(mv[0].after, (okp + ".case").c_str()));
+	CHECK(audit_undo_job(newest_job(), why, sizeof why, &rs) == 0 && mv_has(ok.c_str()) && !mv_any_case());
+	audit_set_move_hooks(NULL, NULL);
+	audit_init(DIR, &IOM);
+}
+
 // A rename that changes only the case: its target is the file itself on a case-blind file system,
 // not a file in the way.
 static bool mv_listed(const char *name)
@@ -1626,6 +1728,7 @@ int main()
 		{"move_rename_and_undo", move_rename_and_undo}, {"move_refusals", move_refusals},
 		{"move_partial_failure", move_partial_failure}, {"move_trash_restore_empty", move_trash_restore_empty},
 		{"move_put_back_fails", move_put_back_fails}, {"move_case_only", move_case_only}, {"move_aside", move_aside},
+		{"move_aside_redo", move_aside_redo}, {"move_path_limit", move_path_limit},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {

@@ -4493,7 +4493,10 @@ static void av_reason(const AuditReason &rs, char *out, size_t n)
 	case AW_CANNOT_MOVE: snprintf(out, n, T(STR_AW_CANNOT_MOVE), rs.file); break;
 	case AW_TOO_LONG: snprintf(out, n, T(STR_AW_TOO_LONG), rs.file); break;
 	case AW_MOVE_FAILED: snprintf(out, n, "%s", T(STR_AW_MOVE_FAILED)); break;
-	case AW_NOT_PUT_BACK: snprintf(out, n, T(STR_AW_NOT_PUT_BACK), (int)rs.lba, rs.file); break;
+	case AW_NOT_PUT_BACK:   // and a cue back without its own FILE lines: named too
+		if (rs.what[0]) snprintf(out, n, T(STR_AW_NOT_PUT_BACK_BENT), (int)rs.lba, rs.file, rs.what);
+		else snprintf(out, n, T(STR_AW_NOT_PUT_BACK), (int)rs.lba, rs.file);
+		break;
 	case AW_NOT_RESTORED: snprintf(out, n, T(STR_AW_NOT_RESTORED), rs.file); break;
 	default: snprintf(out, n, "%s", T(STR_AUDIT_NO_UNDO)); break;
 	}
@@ -4923,6 +4926,15 @@ static int case_only_utf8(const char *a, const char *b)
 	while (*p && *q) if (utf8_lower(p) != utf8_lower(q)) return 0;
 	return !*p && !*q;
 }
+// A folder lists an entry of exactly this name (bytes, case and all): 1, 0 when not, -1 when it
+// cannot be read.
+struct DirFind { const char *name; int found; };
+static void dir_find_cb(const char *n, void *c) { DirFind *f = (DirFind *)c; if (!strcmp(n, f->name)) f->found = 1; }
+static int dir_lists(const char *dir, const char *name)
+{
+	DirFind f = {name, 0};
+	return vf_listdir(dir, dir_find_cb, &f) < 0 ? -1 : f.found;
+}
 // The disc key the audit groups a set's jobs by: its disc ID (its title without one) and its size,
 // as its checks have it.
 static void gm_key(const GameDisc &d, char *out, size_t n) { snprintf(out, n, "%s:%u", d.id[0] ? d.id : d.title, (unsigned)(d.size / RAW_SIZE)); }
@@ -5011,9 +5023,14 @@ static int gm_move(GamesView &v, int what, const char *pat)
 				if (!strcasecmp(leaf[i], sl + 1) && vf_exists(own)) continue;   // a case-only rename: the file found may be its own
 				// (a different file of that name: the move refuses it)
 				if (!vf_exists(q)) continue;
-				// only the case of a letter outside ASCII differs and the file system finds the set's
-				// own file by the new name: it does not tell that case apart, and the move cannot rename it
-				if (case_only_utf8(leaf[i], sl + 1) && vf_exists(own)) snprintf(v.note, sizeof(v.note), "%s", T(STR_GM_CASE_ONLY));
+				// only the case of a letter outside ASCII differs and the file found is the set's own (the
+				// folder lists no entry of the new name: the file system folds that case), so the move
+				// cannot rename it; a file listed by the new name is a different one: already there
+				char nm[220];
+				snprintf(nm, sizeof(nm), "%s%s", leaf[i], e);
+				char dir[340];
+				snprintf(dir, sizeof(dir), "%.*s", (int)(sl - d.base), d.base);
+				if (case_only_utf8(leaf[i], sl + 1) && vf_exists(own) && dir_lists(dir, nm) == 0) snprintf(v.note, sizeof(v.note), "%s", T(STR_GM_CASE_ONLY));
 				else snprintf(v.note, sizeof(v.note), T(STR_GM_EXISTS), leaf[i]);
 				n = -1;
 				break;

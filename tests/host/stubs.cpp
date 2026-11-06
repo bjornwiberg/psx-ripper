@@ -174,6 +174,7 @@ int vf_scan(VfVolume *out, int max)
 }
 int vf_free_mb(const char *, uint64_t *mb) { *mb = 338 * 1024; return 0; }   // a hard disk with room
 int vf_list(const char *, void (*)(const char *, void *), void *) { return 0; }
+const char *host_listdir_extra;   // a name every listing adds (a file a case-sensitive file system has too)
 int vf_listdir(const char *dir, void (*cb)(const char *, void *), void *ctx)
 {
 	char b[512];
@@ -183,6 +184,7 @@ int vf_listdir(const char *dir, void (*cb)(const char *, void *), void *ctx)
 	struct dirent *de;
 	while ((de = readdir(d))) if (de->d_name[0] != '.') { cb(de->d_name, ctx); n++; }
 	closedir(d);
+	if (host_listdir_extra) { cb(host_listdir_extra, ctx); n++; }
 	return n;
 }
 int vf_size(const char *path, uint64_t *size) { char b[512]; struct stat st; if (stat(hp(path, b, sizeof b), &st)) return -1; *size = (uint64_t)st.st_size; return 0; }

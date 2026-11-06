@@ -39,7 +39,8 @@ enum AuditWhy {
 	AW_CANNOT_MOVE,       // the file could not be moved (row, file); the files moved before went back
 	AW_TOO_LONG,          // a path is too long to be kept in the log (file)
 	AW_MOVE_FAILED,       // the move failed and was put back: it is never done again (row)
-	AW_NOT_PUT_BACK,      // a move failed and lba file(s) could not be put back, `file` the first: the set is split (row)
+	AW_NOT_PUT_BACK,      // a move failed and lba file(s) could not be put back, `file` the first: the set is split (row);
+	                      // `what` (or "") a file that went back but whose app's part could not be undone, as AW_NOT_RESTORED
 	AW_NOT_RESTORED       // a move failed, `file` went back to its place but the app's part could not be undone (a cue's FILE lines) (row)
 };
 struct AuditReason {
@@ -77,6 +78,8 @@ struct AuditRow {
 	int redo;    // undoing this row applies a change again: an undone sector or setting row, or an
 	             // undo row whose change is undone now
 	int norev;   // the row was written with rev=0: its value is not in the log, it can never be undone
+	int aside;   // a move row written with aside=1: it takes a file to where a rename left it aside
+	             // ("<path>.case"); its undo brings the file home, a redo never replays it
 	AuditWhy why;       // not reversible: why (AW_NONE when it is)
 	uint32_t why_job;   // for AW_RUNNING / AW_JOB_ON_DISC / AW_UNFINISHED / AW_DROPPED: the job meant
 };
@@ -154,13 +157,15 @@ void audit_set_progress(int (*tick)(uint32_t done, uint32_t total));
 // an `undo` row, and the job ends "failed"; a failed job is never redone. A file that cannot be put
 // back keeps its row (the log stays true, an undo of the job can try again later) and the reason is
 // AW_NOT_PUT_BACK; a file left at "<from>.case" by the rename (AUDIT_ASIDE) is counted so under that
-// name, with a move row to it. A file back in its place whose moved hook could not be undone (no row
-// reaches it) gives AW_NOT_RESTORED when nothing is lost. Returns 0 when every file moved, else -1
-// with why[] and rs.
+// name, with a move row to it (aside=1). A file back in its place whose moved hook could not be undone
+// (no row reaches it) gives AW_NOT_RESTORED when nothing is lost, else its name in rs->what. A path
+// longer than 186 characters is refused (191 kept in the log, less ".case"). Returns 0 when every
+// file moved, else -1 with why[] and rs.
 //
 // Undo of moves: a move row, an undo row of one, or its job undo the job's moves together (a set is
 // never split): newest first, each back from `after` to `before`; when all are undone the undo is a
-// redo, oldest first, before -> after again (only for a job that finished). Every file is checked
+// redo, oldest first, before -> after again (only for a job that finished; the aside rows are not
+// replayed: a redo never puts a file under a .case name). Every file is checked
 // first (the file there, its place free, not busy; a file deleted by an `empty` job since: the
 // trash was emptied); a refusal moves nothing. A move that fails then puts back the ones done.
 // Emptying the trash: a job `empty` with a `delete` row per deleted file (before = its path), a

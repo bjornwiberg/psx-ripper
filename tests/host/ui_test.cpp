@@ -1001,11 +1001,13 @@ static bool gm_listed(const char *dir, const char *name)
 // The renames the tests make fail: a cue's .tmp (its rewrite cut short), the put-back of a renamed
 // cue; and a file put in the way of a move right after the move's checks.
 static int g_rh_tmp_fail;          // renames of a <cue>.tmp left to fail
+static const char *g_rh_tmp_seq;   // the next renames of a <cue>.tmp, one letter each: F fails, S goes through
 static const char *g_rh_putback;   // a rename from this path fails
 static const char *g_rh_plant_on, *g_rh_plant;   // the rename from plant_on first puts a file at plant
 static int rename_fails(const char *from, const char *to)
 {
 	size_t l = strlen(from);
+	if (g_rh_tmp_seq && *g_rh_tmp_seq && l > 8 && !strcmp(from + l - 8, ".cue.tmp")) return *g_rh_tmp_seq++ == 'F';
 	if (g_rh_tmp_fail > 0 && l > 8 && !strcmp(from + l - 8, ".cue.tmp")) { g_rh_tmp_fail--; return 1; }
 	if (g_rh_putback && !strcmp(from, g_rh_putback)) return 1;
 	if (g_rh_plant_on && !strcmp(from, g_rh_plant_on)) {
@@ -1266,6 +1268,32 @@ static void games_file_scenarios()
 	gframe("games-move-aside", v);
 	want(audit_undo_job(gm_job("Driver:3", "rename"), why, sizeof why) == 0 && gm_listed(H, "Driver.cue") && !gm_listed(H, "DRIVER.cue.case") &&
 	     gc_file("out/gl/dev_hdd0/PSXISO/Driver.cue").find("FILE \"Driver.bin\"") == 0, "home, its FILE line too");
+	// an undo whose cue goes back without its own FILE lines (its rewrite back failed both ways) while
+	// the bin, back first (newest first), cannot be put back in its rollback: the reason names both
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	gs_find(v, "Driver");
+	want(gm_move(v, GM_RENAME, "DRIVER") == 0 && gm_listed(H, "DRIVER.bin") && gm_listed(H, "DRIVER.cue"), "renamed for the undo");
+	{
+		uint32_t dj = gm_job("Driver:3", "rename");
+		host_rename_hook = rename_fails;
+		g_rh_tmp_seq = "FFSFFS";   // the rewrite fails, its .tmp put back; the rewrite back the same
+		g_rh_putback = "/dev_hdd0/PSXISO/Driver.bin";
+		AuditReason rs = {};
+		want(audit_undo_job(dj, why, sizeof why, &rs) == -1 && rs.code == AW_NOT_PUT_BACK && gm_listed(H, "Driver.bin") && gm_listed(H, "DRIVER.cue"),
+		     "the cue bent, the bin not back");
+		g_rh_putback = NULL;
+		g_rh_tmp_seq = NULL;
+		host_rename_hook = NULL;
+		char rt[200];
+		av_reason(rs, rt, sizeof rt);
+		want(strstr(rt, "Driver.bin") && strstr(rt, "DRIVER.cue"), "the reason names the bin and the cue");
+		snprintf(v.note, sizeof v.note, T(STR_GM_NOT_MOVED), rt);   // as gm_move shows a reason
+		gv_poll(v);
+		gs_find(v, "DRIVER");
+		gframe("games-move-bent-lost", v);
+		want(audit_undo_job(dj, why, sizeof why) == 0 && gm_listed(H, "Driver.bin") && gm_listed(H, "Driver.cue") && !gm_listed(H, "DRIVER.bin"), "home");
+		gl_text("out/gl/dev_hdd0/PSXISO/Driver.cue", "FILE \"Driver.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
+	}
 	// a case-only rename in a letter outside ASCII on a file system that does not tell that case
 	// apart (exFAT, the host's): refused as such, not as "already there"
 	{
@@ -1277,6 +1305,13 @@ static void games_file_scenarios()
 			gl_changed(); gl_open("hdd"); gv_poll(v);
 			want(gs_find(v, "\xc3\xa5sa"), "the game \xc3\xa5sa listed");
 			want(gm_move(v, GM_RENAME, "\xc3\x85sa") == -1 && !strcmp(v.note, T(STR_GM_CASE_ONLY)) && gm_listed(H, "\xc3\xa5sa.bin"), "non-ASCII case only: its own note");
+			// a file system that tells the case apart, a different \xc3\x85sa.bin there (listed by that name):
+			// "already there", not the case note
+			host_listdir_extra = "\xc3\x85sa.bin";
+			char ex[160];
+			snprintf(ex, sizeof ex, T(STR_GM_EXISTS), "\xc3\x85sa");
+			want(gm_move(v, GM_RENAME, "\xc3\x85sa") == -1 && !strcmp(v.note, ex) && gm_listed(H, "\xc3\xa5sa.bin"), "a different file of that name: already there");
+			host_listdir_extra = NULL;
 			gv_poll(v);
 			gs_find(v, "\xc3\xa5sa");
 			gframe("games-rename-case-only", v);
