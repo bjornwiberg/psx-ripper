@@ -450,6 +450,8 @@ static const char *en[STR_COUNT] = {
 	"Deleted: %s",
 	"%d file(s) did not go back (%s): undo it in the audit log",
 	"%s is too big to be rewritten: the game cannot be renamed",
+	"%s went back but its FILE lines could not be restored",
+	"Only the case differs; this file system cannot rename that here",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -896,6 +898,8 @@ static const char *sv[STR_COUNT] = {
 	"Raderad: %s",
 	"%d fil(er) kom inte tillbaka (%s): ångra i ändringsloggen",
 	"%s är för stor för att skrivas om: spelet kan inte döpas om",
+	"%s kom tillbaka men dess FILE-rader kunde inte återställas",
+	"Bara skiftläget skiljer sig; filsystemet här kan inte döpa om det",
 };
 
 static const char **table = en;

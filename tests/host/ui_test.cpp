@@ -1226,6 +1226,75 @@ static void games_file_scenarios()
 	want(gm_move(v, GM_RENAME, "DRIVER") == 0 && gm_listed(H, "DRIVER.bin") && gm_listed(H, "DRIVER.cue") && !gm_listed(H, "Driver.bin"), "a case-only rename");
 	want(gc_file("out/gl/dev_hdd0/PSXISO/DRIVER.cue").find("FILE \"DRIVER.bin\"") == 0, "its FILE line too");
 	want(audit_undo_job(gm_job("Driver:3", "rename"), why, sizeof why) == 0 && gm_listed(H, "Driver.bin") && gm_listed(H, "Driver.cue") && !gm_listed(H, "DRIVER.cue"), "and back");
+	// a case-only rename whose second step fails and whose way back fails too: the file is at
+	// Driver.bin.case, the note names it, and the job's undo brings it home
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	gs_find(v, "Driver");
+	host_rename_hook = rename_fails;
+	g_rh_putback = "/dev_hdd0/PSXISO/Driver.bin.case";
+	want(gm_move(v, GM_RENAME, "DRIVER") == -1 && gm_listed(H, "Driver.bin.case") && !gm_listed(H, "Driver.bin") && !gm_listed(H, "DRIVER.bin"),
+	     "case-only, cannot finish nor go back: the file at its .case name");
+	g_rh_putback = NULL;
+	host_rename_hook = NULL;
+	{
+		char rt[200], m[300];
+		AuditReason rs = {};
+		rs.code = AW_NOT_PUT_BACK; rs.lba = 1; snprintf(rs.file, sizeof rs.file, "Driver.bin.case");
+		av_reason(rs, rt, sizeof rt);
+		snprintf(m, sizeof m, T(STR_GM_NOT_MOVED), rt);
+		want(!strcmp(v.note, m), "the note names the .case file");
+	}
+	{
+		uint32_t dj = gm_job("Driver:3", "rename");   // the newest
+		want(dj && audit_undo_job(dj, why, sizeof why) == 0 && gm_listed(H, "Driver.bin") && gm_listed(H, "Driver.cue") && !gm_listed(H, "Driver.bin.case") &&
+		     gc_file("out/gl/dev_hdd0/PSXISO/Driver.cue").find("FILE \"Driver.bin\"") == 0, "the job's undo finds it");
+	}
+	// the same for the cue on its way back: its rewrite failed (its new FILE lines kept), and its
+	// put-back leaves it at DRIVER.cue.case; the job's undo brings it home with its own FILE line
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	gs_find(v, "Driver");
+	host_rename_hook = rename_fails;
+	g_rh_tmp_fail = 2;
+	g_rh_putback = "/dev_hdd0/PSXISO/DRIVER.cue.case";
+	want(gm_move(v, GM_RENAME, "DRIVER") == -1 && gm_listed(H, "DRIVER.cue.case") && gm_listed(H, "Driver.bin") && !gm_listed(H, "Driver.cue"),
+	     "the cue's put-back left it at its .case name");
+	g_rh_putback = NULL;
+	host_rename_hook = NULL;
+	want(strstr(v.note, "DRIVER.cue.case") != NULL, "the note names it");
+	gv_poll(v);
+	gs_find(v, "Driver");
+	gframe("games-move-aside", v);
+	want(audit_undo_job(gm_job("Driver:3", "rename"), why, sizeof why) == 0 && gm_listed(H, "Driver.cue") && !gm_listed(H, "DRIVER.cue.case") &&
+	     gc_file("out/gl/dev_hdd0/PSXISO/Driver.cue").find("FILE \"Driver.bin\"") == 0, "home, its FILE line too");
+	// a case-only rename in a letter outside ASCII on a file system that does not tell that case
+	// apart (exFAT, the host's): refused as such, not as "already there"
+	{
+		put_bin("out/gl/probe_\xc3\xa5", "x", 1);
+		bool blind = gc_file("out/gl/probe_\xc3\x85") == "x";
+		remove("out/gl/probe_\xc3\xa5");
+		if (blind) {
+			gs_set(H, "\xc3\xa5sa", 3, NULL);
+			gl_changed(); gl_open("hdd"); gv_poll(v);
+			want(gs_find(v, "\xc3\xa5sa"), "the game \xc3\xa5sa listed");
+			want(gm_move(v, GM_RENAME, "\xc3\x85sa") == -1 && !strcmp(v.note, T(STR_GM_CASE_ONLY)) && gm_listed(H, "\xc3\xa5sa.bin"), "non-ASCII case only: its own note");
+			gv_poll(v);
+			gs_find(v, "\xc3\xa5sa");
+			gframe("games-rename-case-only", v);
+			system("rm -f 'out/gl/dev_hdd0/PSXISO/\xc3\xa5sa'*");
+		} else printf("  (games files: the host tells \xc3\xa5 from \xc3\x85, the non-ASCII case check skipped)\n");
+	}
+	// a cue of many FILE lines renamed to a long name: the rewrite grows past its input, all of it kept
+	{
+		std::string cue;
+		while (cue.size() < 32000) cue += "FILE \"Driver.bin\" BINARY\n";
+		gl_text("out/gl/dev_hdd0/PSXISO/Big.cue", cue.c_str());
+		std::string lng(150, 'L');
+		want(cue_rename_files("/dev_hdd0/PSXISO/Big.cue", "Driver", lng.c_str()) == 0, "a cue that grows past 40000 bytes rewritten");
+		std::string got = gc_file("out/gl/dev_hdd0/PSXISO/Big.cue"), line = "FILE \"" + lng + ".bin\" BINARY\n", all;
+		for (size_t i = 0; i < cue.size() / 25; i++) all += line;
+		want(got == all, "every FILE line renamed");
+		remove("out/gl/dev_hdd0/PSXISO/Big.cue");
+	}
 	// a cue naming its file in another case: its FILE line renamed all the same
 	gl_text("out/gl/dev_hdd0/PSXISO/Driver.cue", "FILE \"driver.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n");
 	gl_changed(); gl_open("hdd"); gv_poll(v);

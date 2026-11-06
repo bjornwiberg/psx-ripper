@@ -1499,9 +1499,11 @@ static void move_put_back_fails(int &bad)
 	int redo;
 	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 0);
 	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("P.bin") && mv_has("P.cue") && mv_has("P.log") && !mv_has(".trash/P.cue"));
-	// the app's part fails, the file goes back, and the app's part of going back fails too: lost
+	// the app's part fails, the file goes back, and the app's part of going back fails too: the file
+	// is in its place (no undo can reach it, nothing to undo), its content is not: its own reason
 	g_moved_fail = ".cue";   // both ways
-	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 3, why, sizeof why, &rs) == -1 && rs.code == AW_NOT_PUT_BACK && !strcmp(rs.file, "P.cue") && rs.lba == 1);
+	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 3, why, sizeof why, &rs) == -1 && rs.code == AW_NOT_RESTORED && !strcmp(rs.file, "P.cue"));
+	CHECK(strstr(why, "P.cue went back but its FILE lines could not be restored") != NULL);
 	CHECK(mv_has("P.bin") && mv_has("P.cue") && mv_has("P.log") && !mv_has(".trash/P.bin"));
 	// a rollback whose rename fails: the file stays moved with its row, counted
 	g_moved_fail = "/.trash/P.log";
@@ -1512,6 +1514,59 @@ static void move_put_back_fails(int &bad)
 	CHECK(rows_of_kind(job, "move", mv, 4) == 2 && !mv[0].undone && mv[1].undone && rows_of_kind(job, "undo") == 1);
 	g_moved_fail.clear(); g_rename_fail.clear();
 	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("P.bin") && !mv_has(".trash/P.bin"));
+	audit_set_move_hooks(NULL, NULL);
+	audit_init(DIR, &IOM);
+}
+
+// A case-only rename that could neither finish nor go back leaves the file at <from>.case (the rename
+// says so with AUDIT_ASIDE): counted as lost under that name, with a row saying where it is, so an
+// undo of the job finds it.
+static std::string g_aside;   // a rename whose source ends with this leaves it at <source>.case
+static int mv_rename_aside(const char *a, const char *b)
+{
+	size_t l = strlen(a);
+	if (!g_aside.empty() && l >= g_aside.size() && !strcmp(a + l - g_aside.size(), g_aside.c_str())) {
+		std::string t = std::string(a) + ".case";
+		return rename(a, t.c_str()) ? -1 : AUDIT_ASIDE;
+	}
+	return mv_rename(a, b);
+}
+static void move_aside(int &bad)
+{
+	mv_fresh();
+	static const AuditIo IOA = {io_open, io_read, io_write, io_seek, io_close, mv_rename_aside, mv_exists};
+	audit_init(DIR, &IOA);
+	const char *a[] = {"P.bin", "P.cue"}, *t[] = {".trash/P.bin", ".trash/P.cue"};
+	for (const char *f : a) mv_put(f);
+	MvSet m;
+	mv_set(m, a, 2, t);
+	char why[200] = "";
+	AuditReason rs;
+	// the step itself: P.cue left at P.cue.case, P.bin back
+	g_aside = "/P.cue";
+	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 2, why, sizeof why, &rs) == -1);
+	CHECK(rs.code == AW_NOT_PUT_BACK && !strcmp(rs.file, "P.cue.case") && rs.lba == 1);
+	CHECK(mv_has("P.bin") && mv_has("P.cue.case") && !mv_has("P.cue") && !mv_has(".trash/P.bin"));
+	uint32_t job = newest_job();
+	AuditRow mv[4];
+	CHECK(rows_of_kind(job, "move", mv, 4) == 2 && mv[0].undone && !mv[1].undone && !strcmp(mv[1].before, m.f[1]) &&
+	      !strcmp(mv[1].after, (m.from[1] + ".case").c_str()));
+	g_aside.clear();
+	int redo;
+	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 0);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("P.bin") && mv_has("P.cue") && !mv_has("P.cue.case"));
+	// the rollback: P.bin moved, P.cue fails, P.bin on its way back is left at .trash/P.bin.case
+	g_rename_fail = "/P.cue";
+	g_aside = "/.trash/P.bin";
+	CHECK(audit_move(AU_PAD, "P:1", "P", "trash", m.f, m.t, 2, why, sizeof why, &rs) == -1);
+	CHECK(rs.code == AW_NOT_PUT_BACK && !strcmp(rs.file, "P.bin.case") && rs.lba == 1);
+	CHECK(mv_has(".trash/P.bin.case") && mv_has("P.cue") && !mv_has("P.bin"));
+	job = newest_job();
+	CHECK(rows_of_kind(job, "move", mv, 4) == 2 && !mv[0].undone && !mv[1].undone && !strcmp(mv[1].after, (m.to[0] + ".case").c_str()));
+	g_aside.clear(); g_rename_fail.clear();
+	// the job's undo: the two rows of the one file, newest first (.case back to .trash/P.bin, then home)
+	CHECK(audit_job_reversible(job, &rs, &redo) == 1 && redo == 0);
+	CHECK(audit_undo_job(job, why, sizeof why, &rs) == 0 && mv_has("P.bin") && mv_has("P.cue") && !mv_has(".trash/P.bin") && !mv_has(".trash/P.bin.case"));
 	audit_set_move_hooks(NULL, NULL);
 	audit_init(DIR, &IOM);
 }
@@ -1570,7 +1625,7 @@ int main()
 		{"redo_job", redo_job}, {"redo_disc", redo_disc}, {"redo_original_row", redo_original_row},
 		{"move_rename_and_undo", move_rename_and_undo}, {"move_refusals", move_refusals},
 		{"move_partial_failure", move_partial_failure}, {"move_trash_restore_empty", move_trash_restore_empty},
-		{"move_put_back_fails", move_put_back_fails}, {"move_case_only", move_case_only},
+		{"move_put_back_fails", move_put_back_fails}, {"move_case_only", move_case_only}, {"move_aside", move_aside},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {

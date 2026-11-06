@@ -39,7 +39,8 @@ enum AuditWhy {
 	AW_CANNOT_MOVE,       // the file could not be moved (row, file); the files moved before went back
 	AW_TOO_LONG,          // a path is too long to be kept in the log (file)
 	AW_MOVE_FAILED,       // the move failed and was put back: it is never done again (row)
-	AW_NOT_PUT_BACK       // a move failed and lba file(s) could not be put back, `file` the first: the set is split (row)
+	AW_NOT_PUT_BACK,      // a move failed and lba file(s) could not be put back, `file` the first: the set is split (row)
+	AW_NOT_RESTORED       // a move failed, `file` went back to its place but the app's part could not be undone (a cue's FILE lines) (row)
 };
 struct AuditReason {
 	AuditWhy code;
@@ -49,6 +50,7 @@ struct AuditReason {
 
 // The image files (undo reads and writes sectors through this): main passes the vf_* functions,
 // the host test stdio. Modes: "rb", "r+b".
+#define AUDIT_ASIDE (-2)
 struct AuditIo {
 	void *(*open)(const char *path, const char *mode);
 	size_t (*read)(void *f, void *p, size_t n);
@@ -56,7 +58,9 @@ struct AuditIo {
 	int (*seek)(void *f, uint64_t pos);
 	int (*close)(void *f);
 	// moves (rename, trash): NULL = stdio rename / stat
-	int (*rename)(const char *from, const char *to);   // 0 = moved; never over an existing file
+	// 0 = moved; never over an existing file. AUDIT_ASIDE: the file is at neither name but at
+	// "<from>.case" (a case-only rename through that temp name that could neither finish nor go back).
+	int (*rename)(const char *from, const char *to);
 	int (*exists)(const char *path);                    // 1 = there
 };
 
@@ -149,7 +153,10 @@ void audit_set_progress(int (*tick)(uint32_t done, uint32_t total));
 // When a move fails (or the moved hook does), the files moved so far go back, newest first, each with
 // an `undo` row, and the job ends "failed"; a failed job is never redone. A file that cannot be put
 // back keeps its row (the log stays true, an undo of the job can try again later) and the reason is
-// AW_NOT_PUT_BACK. Returns 0 when every file moved, else -1 with why[] and rs.
+// AW_NOT_PUT_BACK; a file left at "<from>.case" by the rename (AUDIT_ASIDE) is counted so under that
+// name, with a move row to it. A file back in its place whose moved hook could not be undone (no row
+// reaches it) gives AW_NOT_RESTORED when nothing is lost. Returns 0 when every file moved, else -1
+// with why[] and rs.
 //
 // Undo of moves: a move row, an undo row of one, or its job undo the job's moves together (a set is
 // never split): newest first, each back from `after` to `before`; when all are undone the undo is a

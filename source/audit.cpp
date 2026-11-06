@@ -13,6 +13,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <set>
 #include <algorithm>
 
 #define LINE_MAX_LEN 4096
@@ -648,9 +649,20 @@ static void reason_file(AuditReason *rs, const char *path) { if (rs) copyn(rs->f
 // The newest row of a root's chain (the root itself when it has none).
 static uint32_t chain_last(const UndoState &s, uint32_t root) { uint32_t t = s.tip(root); return t ? t : root; }
 
+// The files an undo's moves checked so far will have moved: a later move of the same undo finds a
+// file one before it puts there (a file left aside has two rows: back from aside, then home) and
+// a place one before it frees.
+struct MoveSim {
+	std::set<std::string> come, gone;
+	bool there(const char *p) const { return come.count(p) || (!gone.count(p) && io_exists(p)); }
+	void move(const char *a, const char *b) { come.erase(a); gone.insert(a); gone.erase(b); come.insert(b); }
+};
+
 // Why move row m (redo: moved again, before -> after; else back, after -> before) cannot be done
-// now, or NULL. `named` is the row the reason names. Caller holds the lock.
-static const char *move_block(const AuditRow &m, const UndoState &s, bool redo, char *msg, size_t n, AuditReason *rs, uint32_t named)
+// now, or NULL. `named` is the row the reason names; sim (may be NULL) the moves before it in the
+// same undo. Caller holds the lock.
+static const char *move_block(const AuditRow &m, const UndoState &s, bool redo, char *msg, size_t n, AuditReason *rs, uint32_t named,
+                              const MoveSim *sim = NULL)
 {
 	AuditRow r = m;
 	r.id = named;
@@ -672,12 +684,12 @@ static const char *move_block(const AuditRow &m, const UndoState &s, bool redo, 
 	// (a set of the same name trashed later), not this chain's
 	auto d = s.deleted.find(src);
 	bool emptied = d != s.deleted.end() && d->second > chain_last(s, m.id);
-	if (emptied || !io_exists(src)) {
+	if (emptied || !(sim ? sim->there(src) : io_exists(src))) {
 		reason(rs, emptied ? AW_TRASH_EMPTIED : AW_MOVE_GONE, r); reason_file(rs, src);
 		snprintf(msg, n, emptied ? "%s was deleted (the trash was emptied)" : "%s is gone", base_name(src));
 		return msg;
 	}
-	if (dst_taken(src, dst)) {
+	if (sim ? sim->there(dst) && !(strcmp(src, dst) && !strcasecmp(src, dst)) : dst_taken(src, dst)) {
 		reason(rs, AW_MOVE_TAKEN, r); reason_file(rs, dst);
 		snprintf(msg, n, "%s is in the way", base_name(dst));
 		return msg;
@@ -1015,7 +1027,11 @@ static bool plan_moves(uint32_t job, std::vector<MoveT> &ts, bool *redo, const c
 	build_state(st);
 	collect_moves(job, st, ts, redo);
 	*e = NULL;
-	for (const MoveT &t : ts) if ((*e = move_block(t.row, st, *redo, msg, n, rs, t.named))) break;
+	MoveSim sim;
+	for (const MoveT &t : ts) {
+		if ((*e = move_block(t.row, st, *redo, msg, n, rs, t.named, &sim))) break;
+		sim.move(*redo ? t.row.before : t.row.after, *redo ? t.row.after : t.row.before);
+	}
 	unlock();
 	return !ts.empty();
 }
@@ -1033,15 +1049,20 @@ static bool job_has_moves(uint32_t job)
 enum { MV_THERE,     // moved, the app's part done
        MV_HERE,      // not moved (the rename failed, or the app's part did and the file went back whole)
        MV_STUCK,     // moved, the app's part failed and the file could not go back: it is at b
-       MV_BENT };    // the app's part failed, the file went back, and the app's part of that failed too: at a
+       MV_BENT,      // the app's part failed, the file went back, and the app's part of that failed too: at a
+       MV_ASIDE };   // a rename left it at neither name (AUDIT_ASIDE): at *aside
 // Moves one file and tells the app (outside the lock); when the app's part fails the file goes back
 // (and the app is told of that move too, so its part is undone). Returns where the file is.
-static int do_move(const char *a, const char *b)
+static int do_move(const char *a, const char *b, std::string *aside)
 {
-	if (io_rename(a, b) != 0) return MV_HERE;
+	int r = io_rename(a, b);
+	if (r == AUDIT_ASIDE) { *aside = std::string(a) + ".case"; return MV_ASIDE; }
+	if (r != 0) return MV_HERE;
 	int (*moved)(const char *, const char *) = g_moved;
 	if (!moved || moved(a, b) == 0) return MV_THERE;
-	if (io_rename(b, a) != 0) return MV_STUCK;
+	r = io_rename(b, a);
+	if (r == AUDIT_ASIDE) { *aside = std::string(b) + ".case"; return MV_ASIDE; }
+	if (r != 0) return MV_STUCK;
 	return moved(b, a) == 0 ? MV_HERE : MV_BENT;
 }
 
@@ -1067,25 +1088,36 @@ static uint32_t step_row(uint32_t job, AuditSrc src, const char *disc, const cha
 // row naming the row it wrote, so the set is whole again and the log says so. A file that cannot go
 // back is lost: its row stays (or is written, when it moved after all), so the log stays true and an
 // undo of the job can try again; the reason is then AW_NOT_PUT_BACK (lba = how many, file = the
-// first). Returns 0, or -1 with msg and rs.
+// first). A file left aside by its rename (MV_ASIDE) is lost under that name, with a new move row
+// from where the log has it to where it is, so the job's undo brings it home. A file back in its
+// place whose app's part could not be undone (MV_BENT: no row, no undo reaches it) is said apart
+// (AW_NOT_RESTORED, when nothing is lost). Returns 0, or -1 with msg and rs.
 static int run_moves(uint32_t job, AuditSrc src, const char *disc, const char *name, const std::vector<MoveStep> &steps,
                      char *msg, size_t n, AuditReason *rs)
 {
 	std::vector<MoveDone> done;
 	int lost = 0;
-	std::string first_lost;
+	std::string first_lost, bent, aside;
 	auto lose = [&](const std::string &path) { if (!lost++) first_lost = path; };
+	// left aside: a row from where the log has it to where it is (the job's undo takes it home)
+	auto lose_aside = [&](const std::string &logged) {
+		lock();
+		write_row(job, src, AU_FILES, disc, "move", name, logged.c_str(), aside.c_str(), NULL, false, 0, 0);
+		unlock();
+		lose(aside);
+	};
 	for (const MoveStep &m : steps) {
 		AuditRow r;
 		memset(&r, 0, sizeof r);
 		r.id = m.named; r.job = job;
-		int at = do_move(m.from.c_str(), m.to.c_str());
+		int at = do_move(m.from.c_str(), m.to.c_str(), &aside);
 		if (at == MV_THERE) {
 			uint32_t w = step_row(job, src, disc, name, m);
 			if (w) { MoveDone d = {m.from, m.to, w}; done.push_back(d); continue; }
 			// not in the log: it must not have happened
-			int back = do_move(m.to.c_str(), m.from.c_str());
-			if (back != MV_THERE) lose(back == MV_STUCK ? m.from : m.to);   // STUCK: back at from, the app's part not undone
+			int back = do_move(m.to.c_str(), m.from.c_str(), &aside);
+			if (back == MV_ASIDE) lose_aside(m.from);
+			else if (back != MV_THERE) lose(back == MV_STUCK ? m.from : m.to);   // STUCK: back at from, the app's part not undone
 			reason(rs, AW_LOG_WRITE, r);
 			snprintf(msg, n, "the log row could not be written");
 		} else {
@@ -1093,7 +1125,8 @@ static int run_moves(uint32_t job, AuditSrc src, const char *disc, const char *n
 				uint32_t w = step_row(job, src, disc, name, m);
 				if (w) { MoveDone d = {m.from, m.to, w}; done.push_back(d); }
 				lose(m.to);
-			} else if (at == MV_BENT) lose(m.from);
+			} else if (at == MV_ASIDE) lose_aside(m.from);
+			else if (at == MV_BENT) bent = m.from;
 			reason(rs, AW_CANNOT_MOVE, r);
 			reason_file(rs, m.from.c_str());
 			snprintf(msg, n, "%s could not be moved", base_name(m.from.c_str()));
@@ -1101,8 +1134,9 @@ static int run_moves(uint32_t job, AuditSrc src, const char *disc, const char *n
 		uint32_t stuck_row = at == MV_STUCK && !done.empty() && done.back().to == m.to ? done.back().row : 0;
 		for (auto it = done.rbegin(); it != done.rend(); ++it) {
 			if (it->row == stuck_row) continue;   // could not go back just now: counted
-			int back = do_move(it->to.c_str(), it->from.c_str());
+			int back = do_move(it->to.c_str(), it->from.c_str(), &aside);
 			if (back == MV_HERE || back == MV_BENT) { lose(it->to); continue; }   // stays moved: its row says so
+			if (back == MV_ASIDE) { lose_aside(it->to); continue; }
 			char id[16];
 			snprintf(id, sizeof id, "%u", (unsigned)it->row);
 			lock();
@@ -1116,6 +1150,11 @@ static int run_moves(uint32_t job, AuditSrc src, const char *disc, const char *n
 			if (rs) rs->lba = (uint32_t)lost;
 			size_t l = strlen(msg);
 			snprintf(msg + l, n - l, "; %d file(s) could not be moved back (%s): the set is split", lost, base_name(first_lost.c_str()));
+		}
+		if (!bent.empty()) {   // in its place, its content not
+			if (!lost) { reason(rs, AW_NOT_RESTORED, r); reason_file(rs, bent.c_str()); }
+			size_t l = strlen(msg);
+			snprintf(msg + l, n - l, "; %s went back but its FILE lines could not be restored", base_name(bent.c_str()));
 		}
 		return -1;
 	}
@@ -1140,7 +1179,7 @@ static int undo_moves(uint32_t job, char *why, size_t n, AuditReason *rs)
 		MoveStep m = {redo ? t.row.before : t.row.after, redo ? t.row.after : t.row.before, t.named};
 		steps.push_back(m);
 	}
-	if (run_moves(job, AU_UNDO, ts[0].row.disc, "", steps, msg, sizeof msg, rs)) { say(why, n, "row %u: %s", rs->row, msg); return -1; }
+	if (run_moves(job, AU_UNDO, ts[0].row.disc, ts[0].row.what, steps, msg, sizeof msg, rs)) { say(why, n, "row %u: %s", rs->row, msg); return -1; }
 	return 0;
 }
 

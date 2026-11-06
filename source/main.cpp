@@ -169,14 +169,20 @@ static int au_seek(void *f, uint64_t pos) { return vf_seek((VFile *)f, pos); }
 static int au_close(void *f) { return vf_close((VFile *)f); }
 // A move's rename never goes over a file: the internal disk's rename() would replace it, so the
 // target is looked at right before. A case-only rename goes through a temp name: on a case-blind
-// file system the target found is the file itself, on another it may be a different one.
+// file system the target found is the file itself, on another it may be a different one. When the
+// second step fails and so does the way back, the file is at the temp name: AUDIT_ASIDE says so.
+static void logf(const char *fmt, ...);
 static int au_rename(const char *a, const char *b)
 {
 	if (strcmp(a, b) && !strcasecmp(a, b)) {
 		char t[340];
 		snprintf(t, sizeof(t), "%s.case", a);
 		if (vf_exists(t) || vf_rename(a, t)) return -1;
-		if (vf_exists(b) || vf_rename(t, b)) { vf_rename(t, a); return -1; }   // a different file of that name
+		if (vf_exists(b) || vf_rename(t, b)) {   // a different file of that name, or the rename failed
+			if (!vf_rename(t, a)) return -1;
+			logf("rename %s: neither done nor put back, the file is at %s", a, t);
+			return AUDIT_ASIDE;
+		}
 		return 0;
 	}
 	if (vf_exists(b)) return -1;
@@ -4488,6 +4494,7 @@ static void av_reason(const AuditReason &rs, char *out, size_t n)
 	case AW_TOO_LONG: snprintf(out, n, T(STR_AW_TOO_LONG), rs.file); break;
 	case AW_MOVE_FAILED: snprintf(out, n, "%s", T(STR_AW_MOVE_FAILED)); break;
 	case AW_NOT_PUT_BACK: snprintf(out, n, T(STR_AW_NOT_PUT_BACK), (int)rs.lba, rs.file); break;
+	case AW_NOT_RESTORED: snprintf(out, n, T(STR_AW_NOT_RESTORED), rs.file); break;
 	default: snprintf(out, n, "%s", T(STR_AUDIT_NO_UNDO)); break;
 	}
 }
@@ -4879,6 +4886,43 @@ static int gm_owned_ci(const char *name, const char *leaf)
 	size_t l = strlen(leaf);
 	return l && !strncasecmp(name, leaf, l) && (name[l] == '.' || !strncasecmp(name + l, " (Track ", 8));
 }
+// One UTF-8 letter of s (advanced past it) in lower case: ASCII, Latin-1, Latin Extended-A, Greek
+// and Cyrillic, the letters exFAT's upcase table folds that game names use. Other code points as
+// they are; a stray byte as itself.
+static uint32_t utf8_lower(const unsigned char *&s)
+{
+	uint32_t c = *s++;
+	if (c >= 0xc0 && c < 0xf8) {
+		int k = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : 1;
+		uint32_t v = c & (0x3f >> k);
+		for (int i = 0; i < k; i++) {
+			if ((*s & 0xc0) != 0x80) return c;   // cut short: the lead byte alone
+			v = v << 6 | (*s++ & 0x3f);
+		}
+		c = v;
+	}
+	if (c >= 'A' && c <= 'Z') return c + 32;
+	if (c >= 0xc0 && c <= 0xde && c != 0xd7) return c + 0x20;
+	if (c == 0x178) return 0xff;
+	if (c >= 0x100 && c <= 0x17f) {   // pairs: upper even (0x139-0x148, 0x179-0x17e: upper odd)
+		bool odd_up = (c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17e);
+		if (c != 0x130 && c != 0x131 && c != 0x138 && c != 0x149 && c != 0x17f && ((c & 1) != 0) == odd_up) return c + 1;
+		return c;
+	}
+	if (c >= 0x391 && c <= 0x3ab && c != 0x3a2) return c + 0x20;
+	if (c >= 0x410 && c <= 0x42f) return c + 0x20;
+	if (c >= 0x400 && c <= 0x40f) return c + 0x50;
+	return c;
+}
+// Two names that differ only in the case of letters outside ASCII (a rename the audit's case-only
+// path, ASCII alone, does not take).
+static int case_only_utf8(const char *a, const char *b)
+{
+	if (!strcmp(a, b) || !strcasecmp(a, b)) return 0;
+	const unsigned char *p = (const unsigned char *)a, *q = (const unsigned char *)b;
+	while (*p && *q) if (utf8_lower(p) != utf8_lower(q)) return 0;
+	return !*p && !*q;
+}
 // The disc key the audit groups a set's jobs by: its disc ID (its title without one) and its size,
 // as its checks have it.
 static void gm_key(const GameDisc &d, char *out, size_t n) { snprintf(out, n, "%s:%u", d.id[0] ? d.id : d.title, (unsigned)(d.size / RAW_SIZE)); }
@@ -4962,12 +5006,17 @@ static int gm_move(GamesView &v, int what, const char *pat)
 			for (const char *e : ext) {
 				char q[340];
 				snprintf(q, sizeof(q), "%.*s/%s%s", (int)(sl - d.base), d.base, leaf[i], e);
-				if (!strcasecmp(leaf[i], sl + 1)) {   // a case-only rename: the file found may be its own
-					char own[340];
-					snprintf(own, sizeof(own), "%s%s", d.base, e);
-					if (vf_exists(own)) continue;   // (a different file of that name: the move refuses it)
-				}
-				if (vf_exists(q)) { snprintf(v.note, sizeof(v.note), T(STR_GM_EXISTS), leaf[i]); n = -1; break; }
+				char own[340];
+				snprintf(own, sizeof(own), "%s%s", d.base, e);
+				if (!strcasecmp(leaf[i], sl + 1) && vf_exists(own)) continue;   // a case-only rename: the file found may be its own
+				// (a different file of that name: the move refuses it)
+				if (!vf_exists(q)) continue;
+				// only the case of a letter outside ASCII differs and the file system finds the set's
+				// own file by the new name: it does not tell that case apart, and the move cannot rename it
+				if (case_only_utf8(leaf[i], sl + 1) && vf_exists(own)) snprintf(v.note, sizeof(v.note), "%s", T(STR_GM_CASE_ONLY));
+				else snprintf(v.note, sizeof(v.note), T(STR_GM_EXISTS), leaf[i]);
+				n = -1;
+				break;
 			}
 		}
 		if (n >= 0 && same) { snprintf(v.note, sizeof(v.note), "%s", T(STR_GM_SAME)); n = -1; }
@@ -7427,17 +7476,37 @@ static void tmp_restore(const char *path)
 // The FILE lines of a cue renamed from leaf `from` to leaf `to` (file names without folder and
 // extension): each file named after the old leaf gets the new one (gm_owned); every other byte stays.
 // Written through <cue>.tmp (file_replace). 0 = done, also when no line names the old leaf.
+// The rewrite is sized first: every FILE line may grow by the new leaf (a 32 KB cue of short lines
+// and a long name: several hundred KB), so it never runs out of room.
+static size_t cue_rename_pass(const char *in, const char *from, const char *to, char *out, int *changed);
 static int cue_rename_files(const char *cue, const char *from, const char *to)
 {
-	static char in[GM_CUE_MAX + 2], out[40000];   // (the UI thread only: moves run there)
+	static char in[GM_CUE_MAX + 2];   // (the UI thread only: moves run there)
 	VFile *f = vf_open(cue, "rb");
 	if (!f) return -1;
 	size_t n = vf_read(f, in, sizeof(in) - 1);
 	vf_close(f);
 	if (n >= sizeof(in) - 1) return -1;   // not a cue the app can rewrite whole
 	in[n] = 0;
-	size_t o = 0, fl = strlen(from), tl = strlen(to);
 	int changed = 0;
+	size_t o = cue_rename_pass(in, from, to, NULL, &changed);
+	if (!changed) return 0;
+	char *out = (char *)malloc(o + 1);
+	if (!out) { logf("cue %s: no memory for its rewrite (%u bytes)", cue, (unsigned)o); return -1; }
+	cue_rename_pass(in, from, to, out, &changed);
+	char tmp[340];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", cue);
+	TmpOut t = {vf_open(tmp, "wb"), 1, 0};
+	if (!t.f) { free(out); return -1; }
+	to_write(t, out, o);
+	free(out);
+	return file_replace(t, tmp, cue);
+}
+// cue_rename_files' rewrite of in: written to out when not NULL; returns its size.
+static size_t cue_rename_pass(const char *in, const char *from, const char *to, char *out, int *changed)
+{
+	size_t o = 0, fl = strlen(from), tl = strlen(to);
+	*changed = 0;
 	for (const char *p = in; *p; ) {
 		const char *eol = strchr(p, '\n');
 		size_t len = eol ? (size_t)(eol - p) + 1 : strlen(p);
@@ -7449,23 +7518,15 @@ static int cue_rename_files(const char *cue, const char *from, const char *to)
 			if (*nm == '"') nm++;
 			if (!gm_owned_ci(nm, from)) nm = NULL;
 		}
-		if (o + len + tl >= sizeof(out)) return -1;
 		if (nm) {   // the name's start, the new leaf, the rest of the line (extension, quote, type)
-			memcpy(out + o, p, (size_t)(nm - p)); o += (size_t)(nm - p);
-			memcpy(out + o, to, tl); o += tl;
-			size_t rest = len - (size_t)(nm - p) - fl;
-			memcpy(out + o, nm + fl, rest); o += rest;
-			changed = 1;
-		} else { memcpy(out + o, p, len); o += len; }
+			size_t head = (size_t)(nm - p), rest = len - head - fl;
+			if (out) { memcpy(out + o, p, head); memcpy(out + o + head, to, tl); memcpy(out + o + head + tl, nm + fl, rest); }
+			o += head + tl + rest;
+			*changed = 1;
+		} else { if (out) memcpy(out + o, p, len); o += len; }
 		p += len;
 	}
-	if (!changed) return 0;
-	char tmp[340];
-	snprintf(tmp, sizeof(tmp), "%s.tmp", cue);
-	TmpOut t = {vf_open(tmp, "wb"), 1, 0};
-	if (!t.f) return -1;
-	to_write(t, out, o);
-	return file_replace(t, tmp, cue);
+	return o;
 }
 
 // The audit moved a file of a set (a rename, the trash, an undo): a .cue that got another name gets
@@ -7476,8 +7537,11 @@ static int gm_moved_hook(const char *from, const char *to)
 	if (l < 4 || strcasecmp(to + l - 4, ".cue")) return 0;
 	const char *a = strrchr(from, '/'), *b = strrchr(to, '/');
 	a = a ? a + 1 : from; b = b ? b + 1 : to;
+	size_t al = strlen(a);
+	if (al > 9 && !strcmp(a + al - 5, ".case")) al -= 5;   // home from where a case-only rename left it
+	if (al < 4) return 0;
 	char fa[256], fb[256];
-	snprintf(fa, sizeof(fa), "%.*s", (int)(strlen(a) - 4), a);
+	snprintf(fa, sizeof(fa), "%.*s", (int)(al - 4), a);
 	snprintf(fb, sizeof(fb), "%.*s", (int)(strlen(b) - 4), b);
 	if (!strcmp(fa, fb)) return 0;   // the trash and back: same name
 	int rc = cue_rename_files(to, fa, fb);
