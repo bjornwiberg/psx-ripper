@@ -1268,6 +1268,9 @@ static void games_file_scenarios()
 		FnView f;
 		fn_open(f, &g);
 		fframe("games-rename-preview", f);
+		want(!strcmp(f.pat, "%T (%R) [%D]") && has_text("Alundra (Europe) [SLES_011.35].bin") && !f.foreign, "it opens with the pattern that gives its name now");
+		snprintf(f.pat, sizeof f.pat, "%%T [%%D]");
+		fframe("games-rename-preview-new", f);
 		want(has_text("Alundra [SLES_011.35].bin") && has_text(AL) && !has_text("Motorhead") && has_text(T(STR_HINT_RENAME)), "the preview shows the selected game, now and new");
 		want(has_text(".cue · .bin.log · .bin.md5 · .jpg") && has_text(sv ? "Byter också namn" : "Also renamed"), "the preview names the files that take the new name too");
 		want(fn_input(f, B_START) == 2, "START renames");
@@ -1662,6 +1665,83 @@ static void games_file_scenarios()
 	audit_init("out/audit", &vf_io);
 	reset_all();
 	if (bad) g_fail += bad; else printf("ok   game list files (%s): rename + cue, undo/redo, refusals, failed move put back, trash, restore, empty, audit Files\n", sv ? "sv" : "en");
+}
+
+// The rename screen of a game starts from a pattern that gives the game's current name; a name the
+// patterns cannot give (another tool's) keeps the setting's pattern and shows the name now above the preview.
+static int text_y(const char *s)
+{
+	for (auto &b : g_boxes) if (b.kind == UI_TRACE_TEXT && strstr(b.text.c_str(), s)) return b.y;
+	return -1;
+}
+static void games_rename_open_scenarios()
+{
+	int bad = 0, sv = g_sfx_sv;
+	auto want = [&](bool ok, const char *what) { if (!ok) { printf("FAIL rename open (%s): %s\n", sv ? "sv" : "en", what); bad++; } };
+	system("rm -rf out/gl && mkdir -p out/gl/dev_hdd0/PSXISO");
+	snprintf(host_root, 256, "out/gl");
+	memset(host_exfat, 0, sizeof(int) * 8);
+	reset_all();
+	const char *H = "out/gl/dev_hdd0/PSXISO";
+	gs_set(H, "Rollcage Stage II", 3, gs_log("Rollcage Stage II", "SLES_024.21", "verified Rollcage Stage II (Europe) (En,Fr,De,Es,It)").c_str());
+	gs_set(H, "[SLUS_007.17] USA - Motorhead", 3, gs_log("Motorhead", "SLUS_007.17", "verified Motorhead (USA)").c_str());
+	gs_set(H, "Metal Gear Solid (Disc 1) - Europe [SLES_016.86]", 3, gs_log("Metal Gear Solid (Disc 1)", "SLES_016.86", "verified Metal Gear Solid (Europe) (Disc 1)").c_str());
+	gs_set(H, "Metal Gear Solid (Disc 2) - Europe [SLES_116.86]", 3, gs_log("Metal Gear Solid (Disc 2)", "SLES_116.86", "verified Metal Gear Solid (Europe) (Disc 2)").c_str());
+	gs_set(H, "crash-bandicoot-pal-backup", 3, gs_log("Crash Bandicoot", "SCES_003.44", "verified Crash Bandicoot (Europe)").c_str());
+	gs_set(H, "Croc 2 (Europe) [SLES_020.88]", 3, gs_log("Croc 2", "SLES_020.88", "verified Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)").c_str());
+	g_redump = RD_OFF;
+	snprintf(g_games_source, sizeof g_games_source, "hdd");
+	snprintf(g_name_pat, sizeof g_name_pat, "%%T [%%D]");
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	g_gl_stale = 1;
+	GamesView v;
+	gv_open(v);
+	gv_poll(v);
+	want(gv_listed(v), "listed");
+	auto open = [&](const char *game, FnView &f) {
+		if (!gs_find(v, game)) { want(false, game); return false; }
+		fn_open(f, &g_gl.g[v.shown[v.row]]);
+		return true;
+	};
+	char now[300];
+	FnView f;
+	if (open("Rollcage", f)) {
+		fframe("games-rename-own-title", f);
+		want(!strcmp(f.pat, "%T") && has_text("Rollcage Stage II.bin"), "a set renamed to the title only opens with %T");
+		int st[100];
+		want(f.cur == fn_part_starts(f.pat, st), "the cursor at the end");
+		snprintf(now, sizeof now, T(STR_FN_NOW), "Rollcage Stage II");
+		want(text_y(now) > text_y(T(STR_FN_PREVIEW)), "no 'now' line above the preview when the pattern gives the name");
+	}
+	if (open("USA - Motorhead", f)) {
+		fframe("games-rename-own-order", f);
+		want(!strcmp(f.pat, "[%D] %R - %T") && has_text("[SLUS_007.17] USA - Motorhead.bin"), "ID and region in another order round-trip");
+	}
+	if (open("Metal Gear Solid", f)) {
+		want(g_gl.g[v.shown[v.row]].ndiscs == 2, "the two discs are one game");
+		fframe("games-rename-own-discs", f);
+		want(!strcmp(f.pat, "%T - %R [%D]") && has_text("Metal Gear Solid (Disc 1) - Europe [SLES_016.86].bin") &&
+		     has_text("Metal Gear Solid (Disc 2) - Europe [SLES_116.86].bin"), "a multi-disc set round-trips");
+	}
+	if (open("Croc 2", f)) want(!strcmp(f.pat, "%T (%R) [%D]"), "a name a ready-made pattern gives opens with that pattern");
+	if (open("crash-bandicoot", f)) {
+		fframe("games-rename-foreign", f);
+		snprintf(now, sizeof now, T(STR_FN_NOW), "crash-bandicoot-pal-backup");
+		int ny = text_y(now), py = text_y(T(STR_FN_PREVIEW));
+		want(!strcmp(f.pat, "%T [%D]") && ny >= 0 && py >= 0 && ny < py && has_text("Crash Bandicoot [SCES_003.44].bin"),
+		     "a foreign name keeps the setting's pattern and shows the name now above the preview");
+	}
+	{   // the setting: unchanged
+		FnView s;
+		fn_open(s, NULL);
+		want(!strcmp(s.pat, "%T [%D]"), "the setting opens with its pattern");
+	}
+	gv_close(v);
+	host_root[0] = 0;
+	snprintf(g_games_source, sizeof g_games_source, "all");
+	snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   rename opens from the game's name (%s): own title, other order, discs, preset, foreign\n", sv ? "sv" : "en");
 }
 
 // A prepared log: Alundra (a rip, and a repair that wrote 1015 sectors: 1017 rows), Final Fantasy IX
@@ -2499,11 +2579,13 @@ int main()
 	games_scenarios();
 	games_check_scenarios();
 	games_file_scenarios();
+	games_rename_open_scenarios();
 	games_names_scenarios();
 	host_lang = PS3_LANG_ENGLISH_US; lang_init(); g_sfx_sv = 0;
 	games_scenarios();
 	games_check_scenarios();
 	games_file_scenarios();
+	games_rename_open_scenarios();
 	games_names_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);

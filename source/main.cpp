@@ -2913,20 +2913,27 @@ static void region_of(const char *rdname, const char *serial, char *out, size_t 
 	else if (serial[2] == 'P' || (serial[0] == 'S' && serial[1] == 'I')) snprintf(out, n, "Japan");   // SLPS, SCPS, SLPM, SIPS
 }
 
-// The file name for a pattern; illegal characters replaced, empty brackets and double spaces gone.
-static void name_from(const char *pat, const char *rdname, const char *title, const char *serial, char *out, size_t n)
+// The values a pattern's %T and %R stand for: the title up to the first bracket (Redump's name or
+// the app's) with its disc ("Croc 2", "Metal Gear Solid (Disc 1)"), and the region.
+static void name_values(const char *rdname, const char *title, const char *serial, char *t, size_t tn, char *r, size_t rn)
 {
-	char t[160], r[64], b[300], dk[32] = "";
+	char dk[32] = "";
 	// a disc of several: "(Disc 1)" in Redump's name, else in the app's own title list (GameDB-PSX)
 	const char *dp = rdname && rdname[0] ? strstr(rdname, "(Disc ") : NULL;
 	if (!dp) dp = strstr(title, "(Disc ");
 	if (dp) { const char *e = strchr(dp, ')'); if (e) snprintf(dk, sizeof(dk), "%.*s", (int)(e - dp - 1), dp + 1); }
-	// the title: up to the first bracket (Redump's name or the app's), then its disc
 	const char *src = rdname && rdname[0] ? rdname : title;
 	const char *q = strstr(src, " (");
-	snprintf(t, sizeof(t), "%.*s", q ? (int)(q - src) : (int)strlen(src), src);
-	if (dk[0]) snprintf(t + strlen(t), sizeof(t) - strlen(t), " (%s)", dk);
-	region_of(rdname, serial, r, sizeof(r));
+	snprintf(t, tn, "%.*s", q ? (int)(q - src) : (int)strlen(src), src);
+	if (dk[0]) snprintf(t + strlen(t), tn - strlen(t), " (%s)", dk);
+	region_of(rdname, serial, r, rn);
+}
+
+// The file name for a pattern; illegal characters replaced, empty brackets and double spaces gone.
+static void name_from(const char *pat, const char *rdname, const char *title, const char *serial, char *out, size_t n)
+{
+	char t[160], r[64], b[300];
+	name_values(rdname, title, serial, t, sizeof(t), r, sizeof(r));
 	size_t o = 0;
 	for (const char *p = pat; *p && o < sizeof(b) - 1; p++) {
 		const char *ins = NULL;
@@ -3958,7 +3965,7 @@ static const char *FN_PARTS[] = {"%T", "%R", "%D", "%N", " ", "(", ")", "[", "]"
 static const StrId FN_PLBL[] = {STR_FN_B_TITLE, STR_FN_B_REGION, STR_FN_B_ID, STR_FN_B_NAME, STR_FN_B_SPACE};
 #define FN_NP 10   // parts to add
 #define FN_NL 5    // the first FN_NL have a name
-struct FnView { char pat[96]; int sel, cur; uint64_t blink0; const Game *game; };
+struct FnView { char pat[96]; int sel, cur; uint64_t blink0; const Game *game; int foreign; };   // foreign: no pattern gives the game's name now
 // the pattern as parts ("%T" or one character): offsets where each starts; returns the count
 static int fn_part_starts(const char *pat, int *st)
 {
@@ -3967,10 +3974,60 @@ static int fn_part_starts(const char *pat, int *st)
 	st[n] = (int)strlen(pat);
 	return n;
 }
+static const char *fn_leaf(const char *base) { const char *sl = strrchr(base, '/'); return sl ? sl + 1 : base; }
+static void fn_game_name(const char *pat, const GameDisc &d, char *out, size_t n);
+// Whether a pattern gives every disc of the game its name now.
+static int fn_gives(const char *pat, const Game &g)
+{
+	for (int i = 0; i < g.ndiscs; i++) {
+		const GameDisc &d = g_gl.d[g.first + i];
+		char fn[200];
+		fn_game_name(pat, d, fn, sizeof(fn));
+		if (strcmp(fn, fn_leaf(d.base))) return 0;
+	}
+	return 1;
+}
+// The pattern that gives the game's name now: the setting's or a ready-made one when it does, else
+// one read from the first disc's name, its values replaced greedily (longest first) by %N (Redump's
+// name), %T, %D, %R, the rest kept as characters; it must give every disc its name. 0: none does.
+static int fn_pattern_of(const Game &g, char *pat, size_t n)
+{
+	if (fn_gives(g_name_pat, g)) { snprintf(pat, n, "%s", g_name_pat); return 1; }
+	for (int i = 0; i < 4; i++) if (fn_gives(FN_PRESETS[i], g)) { snprintf(pat, n, "%s", FN_PRESETS[i]); return 1; }
+	const GameDisc &d = g_gl.d[g.first];
+	char t[160], r[64];
+	name_values(d.rdname, d.title, d.id, t, sizeof(t), r, sizeof(r));
+	struct { const char *tok, *val; } c[4] = {{"%N", d.rdname[0] ? d.rdname : d.title}, {"%T", t}, {"%D", d.id}, {"%R", r}};
+	const char *name = fn_leaf(d.base);
+	char out[96];
+	size_t o = 0;
+	int vars = 0;
+	for (const char *p = name; *p; ) {
+		int best = -1;
+		size_t bl = 0;
+		for (int k = 0; k < 4; k++) {
+			size_t l = strlen(c[k].val);
+			if (l > bl && !strncmp(p, c[k].val, l)) { best = k; bl = l; }
+		}
+		const char *add = best >= 0 ? c[best].tok : *p == '%' ? "%%" : NULL;
+		size_t al = add ? 2 : 1;
+		if (o + al >= sizeof(out)) return 0;   // too long for a pattern
+		if (add) { memcpy(out + o, add, 2); p += best >= 0 ? bl : 1; vars += best >= 0; }
+		else out[o] = *p++;
+		o += al;
+	}
+	out[o] = 0;
+	if (!vars || !fn_gives(out, g)) return 0;   // a name of the patterns' values only
+	snprintf(pat, n, "%s", out);
+	return 1;
+}
+// The view opened: the setting's pattern; a game's: the pattern that gives its name now (else the
+// setting's, and its name now is shown above the preview).
 static void fn_open(FnView &f, const Game *g)
 {
 	memset(&f, 0, sizeof(f));
 	snprintf(f.pat, sizeof(f.pat), "%s", g_name_pat);
+	if (g && !fn_pattern_of(*g, f.pat, sizeof(f.pat))) f.foreign = 1;
 	int st[100];
 	f.cur = fn_part_starts(f.pat, st);   // at the end
 	f.blink0 = now_ms();
@@ -4045,6 +4102,12 @@ static void fn_draw(const FnView &f)
 	y += ls * 2;
 	ui_text_fit(UI_SMALL, L, y, 0x8FA8D8, T(STR_FN_NOTE), R - L);
 	y += ls + ls / 2;
+	if (f.game && f.foreign) {   // no pattern gives its name: the name now, above what the pattern makes
+		char now[260];
+		snprintf(now, sizeof(now), T(STR_FN_NOW), fn_leaf(g_gl.d[f.game->first].base));
+		ui_text_fit(UI_BODY, L, y, 0xFFFFFF, now, R - L);
+		y += lb + ls / 2;
+	}
 	y += section_head(L, R, y, T(STR_FN_PREVIEW));
 	int step = lb + ls * 2 + ls / 3;
 	if (f.game) {   // the game: each disc's new name, its name now, and its other files that follow
