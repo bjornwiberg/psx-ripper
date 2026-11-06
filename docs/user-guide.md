@@ -151,7 +151,8 @@ Earlier versions wrote `<name>.log` and `<name>.md5`. The app still reads them. 
 list reads a folder, it renames the logs it wrote itself (first line `PSX Ripper rip log`), and
 their `.md5`, to the new names, for the image they belong to: the `.bin` when a rip has that name,
 otherwise the single image. It is one job per folder in the audit log (*Files*, *Rename logs*)
-and can be undone there; an undone rename is not done again. A log another program wrote, a
+and can be undone there. The list does not rename it again after an undo, but checking, ripping
+or repairing that game later writes its new name. A log another program wrote, a
 name that is already taken, and a game a drive is working on are left as they are.
 
 The file name follows the *File name* setting; the default is `%T [%D]`, for example
