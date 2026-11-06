@@ -1689,6 +1689,10 @@ static void games_rename_open_scenarios()
 	gs_set(H, "Metal Gear Solid (Disc 2) - Europe [SLES_116.86]", 3, gs_log("Metal Gear Solid (Disc 2)", "SLES_116.86", "verified Metal Gear Solid (Europe) (Disc 2)").c_str());
 	gs_set(H, "crash-bandicoot-pal-backup", 3, gs_log("Crash Bandicoot", "SCES_003.44", "verified Crash Bandicoot (Europe)").c_str());
 	gs_set(H, "Croc 2 (Europe) [SLES_020.88]", 3, gs_log("Croc 2", "SLES_020.88", "verified Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)").c_str());
+	// no Redump name: a title with ":" (the file has " - "), two discs in an own order; a single disc whose %N and %T agree
+	gs_set(H, "[SLUS_012.66] Fear Effect 2 - Retro Helix (Disc 1)", 3, gs_log("Fear Effect 2: Retro Helix (Disc 1)", "SLUS_012.66", NULL).c_str());
+	gs_set(H, "[SLUS_012.75] Fear Effect 2 - Retro Helix (Disc 2)", 3, gs_log("Fear Effect 2: Retro Helix (Disc 2)", "SLUS_012.75", NULL).c_str());
+	gs_set(H, "[SCES_011.15] Ape Escape", 3, gs_log("Ape Escape", "SCES_011.15", NULL).c_str());
 	g_redump = RD_OFF;
 	snprintf(g_games_source, sizeof g_games_source, "hdd");
 	snprintf(g_name_pat, sizeof g_name_pat, "%%T [%%D]");
@@ -1730,6 +1734,27 @@ static void games_rename_open_scenarios()
 		int ny = text_y(now), py = text_y(T(STR_FN_PREVIEW));
 		want(!strcmp(f.pat, "%T [%D]") && ny >= 0 && py >= 0 && ny < py && has_text("Crash Bandicoot [SCES_003.44].bin"),
 		     "a foreign name keeps the setting's pattern and shows the name now above the preview");
+		int nn = 0;
+		for (auto &b : g_boxes) nn += b.kind == UI_TRACE_TEXT && strstr(b.text.c_str(), now) != NULL;
+		want(nn == 1, "a single disc's name now shows once (no row of its own under the preview)");
+	}
+	if (open("Fear Effect", f)) {
+		want(g_gl.g[v.shown[v.row]].ndiscs == 2, "Fear Effect 2's two discs are one game");
+		fframe("games-rename-own-sanitized", f);
+		want(!strcmp(f.pat, "[%D] %T") && !f.foreign && has_text("[SLUS_012.66] Fear Effect 2 - Retro Helix (Disc 1).bin") &&
+		     has_text("[SLUS_012.75] Fear Effect 2 - Retro Helix (Disc 2).bin"), "a title with ':' and no Redump name, own order, two discs: that pattern");
+	}
+	if (open("Ape Escape", f)) want(!strcmp(f.pat, "[%D] %T"), "no Redump name: %T wins over %N on a tie");
+	if (open("Croc 2", f)) {   // renamed through START ("%T (%R)"), then opened again: the new pattern
+		int k = 0;
+		while (strcmp(f.pat, "%T (%R)") && k++ < 8) fn_input(f, B_SQUARE);
+		want(!strcmp(f.pat, "%T (%R)") && fn_input(f, B_START) == 2 && gm_move(v, GM_RENAME, f.pat) == 0, "renamed through START");
+		gv_poll(v);
+		FnView f2;
+		if (open("Croc 2", f2)) {
+			fframe("games-rename-reopened", f2);
+			want(!strcmp(f2.pat, "%T (%R)") && has_text("Croc 2 (Europe).bin") && !f2.foreign, "opened again after the rename: the new pattern");
+		}
 	}
 	{   // the setting: unchanged
 		FnView s;
@@ -1741,7 +1766,7 @@ static void games_rename_open_scenarios()
 	snprintf(g_games_source, sizeof g_games_source, "all");
 	snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
 	reset_all();
-	if (bad) g_fail += bad; else printf("ok   rename opens from the game's name (%s): own title, other order, discs, preset, foreign\n", sv ? "sv" : "en");
+	if (bad) g_fail += bad; else printf("ok   rename opens from the game's name (%s): own title, other order, discs, preset, foreign, sanitized title, tie, renamed and reopened\n", sv ? "sv" : "en");
 }
 
 // A prepared log: Alundra (a rip, and a repair that wrote 1015 sectors: 1017 rows), Final Fantasy IX

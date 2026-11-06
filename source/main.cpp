@@ -3988,16 +3988,19 @@ static int fn_gives(const char *pat, const Game &g)
 	return 1;
 }
 // The pattern that gives the game's name now: the setting's or a ready-made one when it does, else
-// one read from the first disc's name, its values replaced greedily (longest first) by %N (Redump's
-// name), %T, %D, %R, the rest kept as characters; it must give every disc its name. 0: none does.
+// one read from the first disc's name, its values (as sanitize writes them in a name) replaced
+// greedily (longest first) by %T, %N (Redump's name), %D, %R, the rest kept as characters; on a tie
+// %T wins over %N. It must give every disc its name. 0: none does.
 static int fn_pattern_of(const Game &g, char *pat, size_t n)
 {
 	if (fn_gives(g_name_pat, g)) { snprintf(pat, n, "%s", g_name_pat); return 1; }
 	for (int i = 0; i < 4; i++) if (fn_gives(FN_PRESETS[i], g)) { snprintf(pat, n, "%s", FN_PRESETS[i]); return 1; }
 	const GameDisc &d = g_gl.d[g.first];
-	char t[160], r[64];
-	name_values(d.rdname, d.title, d.id, t, sizeof(t), r, sizeof(r));
-	struct { const char *tok, *val; } c[4] = {{"%N", d.rdname[0] ? d.rdname : d.title}, {"%T", t}, {"%D", d.id}, {"%R", r}};
+	char t[256], nm[256], r[256];   // sanitize works in up to 256 bytes
+	name_values(d.rdname, d.title, d.id, t, 160, r, 64);
+	snprintf(nm, sizeof(nm), "%s", d.rdname[0] ? d.rdname : d.title);
+	sanitize(t); sanitize(nm); sanitize(r);   // "Gekido: Urban Fighters" is "Gekido - Urban Fighters" in the name
+	struct { const char *tok, *val; } c[4] = {{"%T", t}, {"%N", nm}, {"%D", d.id}, {"%R", r}};
 	const char *name = fn_leaf(d.base);
 	char out[96];
 	size_t o = 0;
@@ -4017,7 +4020,7 @@ static int fn_pattern_of(const Game &g, char *pat, size_t n)
 		o += al;
 	}
 	out[o] = 0;
-	if (!vars || !fn_gives(out, g)) return 0;   // a name of the patterns' values only
+	if (!vars || !fn_gives(out, g)) return 0;   // no value of the game in it, or not every disc's name
 	snprintf(pat, n, "%s", out);
 	return 1;
 }
@@ -4127,8 +4130,11 @@ static void fn_draw(const FnView &f)
 			snprintf(fb, sizeof(fb), "%s%s", fn, dot && !strchr(dot, '/') ? dot : ".bin");
 			fn_name_line(L, R, y, fb);
 			const char *sl = strrchr(d.base, '/');
-			snprintf(now, sizeof(now), T(STR_FN_NOW), sl ? sl + 1 : d.base);
-			ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, now, R - L - ui_w() / 60);
+			int nrow = !(f.foreign && g.ndiscs == 1);   // a single disc's name now is already above the preview
+			if (nrow) {
+				snprintf(now, sizeof(now), T(STR_FN_NOW), sl ? sl + 1 : d.base);
+				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, now, R - L - ui_w() / 60);
+			}
 			// the set's other files named after it (cue, log, .md5, cover, ...): by their ending
 			const char *old = sl ? sl + 1 : d.base, *il = d.image[0] ? strrchr(d.image, '/') : NULL;
 			char ends[200] = "";
@@ -4141,7 +4147,7 @@ static void fn_draw(const FnView &f)
 			}
 			if (ends[0]) {
 				snprintf(now, sizeof(now), T(STR_FN_ALSO), ends);
-				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb + ls, 0x8FA8D8, now, R - L - ui_w() / 60);
+				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb + (nrow ? ls : 0), 0x8FA8D8, now, R - L - ui_w() / 60);
 			}
 			y += step;
 		}
