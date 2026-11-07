@@ -67,6 +67,8 @@ simulator (`make -C tests/host remote`) and are shortened where `…` stands.
 - **Actions** (`rip`, `check`, … and the game tools) do the work the way the pad would, with the
   same checks, and answer with the screen state afterwards, or with the reason they were refused
   (in English, the app's own text). `set_setting` answers with the setting's new value.
+- **`show_games`** shows the game list on the screen with a source and filter, and answers with
+  what it shows and the screen state.
 - **`go_screen`, `go_tab` and `press_button`** move around the app as the pad does. The console's
   screen moves with them: whoever is in front of the TV sees what the agent does.
 
@@ -278,9 +280,10 @@ panel's, each criterion left out is *any*:
 | `other` | `any`, `broken`, `duplicates`, `sbi_missing` |
 | `show` | `games` (default), `trash` |
 
-The source and filter are only for the call. When a game tool needs another source than the list
-on the screen shows, the screen switches to it, but the remembered source (SELECT in the list) is
-not changed.
+For `list_games` and the actions the source and filter are only for the call. When a game tool
+needs another source than the list on the screen shows, the screen switches to it, but the
+remembered source (SELECT in the list) is not changed. Only [`show_games`](#show_games) sets the
+list's own source and filter, as SELECT and the filter panel do.
 
 ### list_games
 
@@ -345,6 +348,39 @@ lines in English).
 ```
 
 An unknown id: *No game with the id "…" is there now: list_games gives the ids.*
+
+### show_games
+
+Shows the game list on the screen with a source and filter, set in one step as SELECT and the
+filter panel set them, and saved as they save them: the list opens so the next time too, and the
+audit log has the change with the source *MCP*. Use it to show the agent's findings on the TV;
+`list_games` reads the games.
+
+| Argument | |
+|---|---|
+| `source` | `hdd`, `usbN` or `all`. Left out: the source shown now |
+| `filter` | The criteria to set (as above); each one left out keeps its value. `"clear"` (or `{}`) clears them, as L1 does. `show` (`games` or `trash`) is the panel's Show: it is not saved, as in the panel |
+
+The answer is what the list shows, its summary line and how many games the filter shows
+(`shown_text`, as the list's criteria line has it), and the screen state.
+
+Duplicates on all sources, `{"source":"all","filter":{"other":"duplicates"}}`:
+
+```json
+{"result":{"source":"all","label":"All","trash":false,
+  "filter":{"format":"any","redump":"any","errors":"any","other":"duplicates","show":"games"},
+  "summary":{"text":"22 games · 1 verified · 2 with errors · 1 re-rip · 1 broken","games":22,"verified":1,"errors":2,"rerip":1,"broken":1},
+  "shown":4,"shown_text":"4 of 22"},
+ "state":{"screen":"games","row":0,…}}
+```
+
+Then `{"filter":{"redump":"verified"}}` shows the verified duplicates (the source and `other` stay),
+and `{"filter":"clear"}` shows every game again.
+
+Refusals: a source that is not connected (*USB 5 is not connected; list_games gives the sources.*,
+nothing is changed), an unknown criterion or value (a parameter error that lists the allowed
+ones), while the game list checks, and while a dialog is open. The list cannot filter by name, so
+`show_games` has no `query`.
 
 ### check_game, check_games, cancel_check
 
@@ -478,8 +514,10 @@ or by the app itself.
   *Busy: …* with the screen it is on; a request the app took but did not finish in time answers
   *The app took the request but did not finish it within 5 s*. Look at `get_state` and try again.
 - **One request at a time.** Two agents (or two calls) are served one after the other.
-- **The game list's source is not saved.** A game tool may switch the list on the screen to
-  another source, but the source the list opens with next time stays the one you chose with SELECT.
+- **The game list's source is not saved by the actions.** A game tool may switch the list on the
+  screen to another source, but the source the list opens with next time stays the one you chose
+  with SELECT, or with `show_games`, which sets and saves the source and filter as SELECT and the
+  filter panel do.
 
 ## Security
 
@@ -508,7 +546,8 @@ or by the app itself.
   when the hard disk's folder changed, or after a minute for a USB drive.
 - A game action on another source than the one on the screen first reads that source; on a large
   USB drive this can take longer than the 5 seconds and answer *Busy*. The screen stays on the new
-  source, so trying again works.
+  source, so trying again works. So does `show_games`: its source and filter are set (and saved)
+  before the read, and stay set.
 - A page of `list_games` with many large games can be cut (`cut`); a smaller `limit` helps. If not
   even one game fits: *The answer is too large: use a smaller limit.*
 - A game whose file name is not valid UTF-8 can be listed but not acted on by id: its id shows
