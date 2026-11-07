@@ -37,7 +37,8 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
 - **Destinations**: the internal hard disk or USB drives (FAT32 and exFAT), a file name pattern
   (`%T` title, `%R` region, `%D` disc ID, `%N` Redump name) and detection of discs already
   ripped there.
-- **Game list**: every PS1 image on the hard disk or a USB drive (also from other tools) with
+- **Game list**: every PS1 image in the `PSXISO` folder of the hard disk or a USB
+  drive (also from other tools) with
   its format and status, filters, a check against Redump from the files without the disc,
   renaming, and a trash; all undoable in the audit log.
 - **Audit log with undo**: every rip, repair and setting change is logged with what started it;

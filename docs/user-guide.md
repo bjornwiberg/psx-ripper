@@ -158,7 +158,7 @@ example *142 games · 98 verified · 6 with errors · 12 re-rip · 1 broken*.
 | *Not checked* | No Redump result yet: press □, or START for all of them |
 | *1 error* / *n errors* | The rip log still lists sectors that could not be read or were bad: put the disc back in and repair it (see [Damaged discs and Repair](#damaged-discs-and-repair)) |
 | *Re-rip to verify* | A 2048 image (data only, from another tool): Redump cannot be compared with it, so rip the disc again to verify it |
-| *Broken* | An incomplete set: a `.bin` without its `.cue`, a `.cue` whose file is missing, or a `.bin.part` left by a cancelled rip |
+| *Broken* | An incomplete set: a `.bin` without its `.cue`, a `.cue` whose file is missing, a `.bin.part` left by a cancelled rip, a log or `.md5` whose image is gone, or an empty or unreadable image |
 
 After the status the row shows the format (*2352* or *2048*) and *n discs* or *n tracks*, and two
 marks: *Duplicate*, when the same disc is there twice (the same disc ID and size, or the same
@@ -192,7 +192,7 @@ back to the list.
 needed) and compares them with Redump, also for a game that was checked before. **START** does
 this for every game shown that has no Redump result yet, so a filter picks what is checked. A
 progress screen shows *Game n of m*, the file and the percentage; **○** cancels the
-check; the games not reached stay unchecked. At the end a line says how many were checked and
+check: the game being checked and those not reached yet keep the result they had. At the end a line says how many were checked and
 how many could not be.
 
 The result goes into the game's log next to the image: `<name>.bin.log` and `<name>.bin.md5` for a
@@ -217,9 +217,10 @@ the cursor, □ removes the part before it, △ types freely). The preview shows
 and the files that are also renamed. **START** renames; ○ goes back and the game keeps its name.
 Your *File name* setting is not changed.
 
-The rename takes every file of the set named after it: the `.bin` (also `(Track n)` files),
-`.cue`, `.bin.log`, `.bin.md5`, the cover `.jpg` and the `.sbi`. The `FILE` lines in the `.cue` are
-changed to the new names. The title in the log stays as it is.
+The rename takes every file of the set named after it: the image (also `(Track n)` files), its
+`.cue`, its log and `.md5` (`.bin.log`, `.iso.log`, …), the cover `.jpg` and the `.sbi`. When an
+`.iso` has the same name as a rip, the cover and the `.sbi` stay with the rip. The `FILE` lines in
+the `.cue` are changed to the new names. The title in the log stays as it is.
 
 It is refused when the name stays the same, when a game with the new name is already there, when a
 drive or a check is using the game, or when the `.cue` is too big to be rewritten.
@@ -231,8 +232,9 @@ To see the trash, open the filter (R1) and set *Show* to *Trash*. There, **△**
 selected game to its folder, and **START** empties the trash after a question that names the
 number of games and their size: ✕ deletes, ○ keeps them.
 
-Emptying deletes only the files of the games the trash lists. Other files in `.trash` stay. It is
-final: deleted files cannot be restored, also not from the audit log.
+Emptying deletes only the files of the games the trash lists. Other files in `.trash` stay. With
+*All*, the trash of every drive is emptied. It is final: deleted files cannot be restored, also not
+from the audit log.
 
 A game with the same name as one already in the trash cannot be moved there: restore it or empty
 the trash first. △ is not offered while a check runs in the list, and a game a drive is working
@@ -252,7 +254,8 @@ Undo and redo are refused, with the reason, when:
 - a file is in the way at the old place (*… is already there*),
 - the trash was emptied since (*The trash was emptied: … is deleted*),
 - a drive or a check is using the game right now,
-- the job is still running, or it failed (a failed job is never done again).
+- the job is still running; a job that failed cannot be redone (*The move failed and was put
+  back*), but what it left can be undone.
 
 The emptying itself cannot be undone: its rows are records of what was deleted.
 
@@ -272,9 +275,10 @@ other. If they are the same disc, both rows say *Duplicate*, and either can be m
 Earlier versions wrote `<name>.log` and `<name>.md5`. The app still reads them. When the game
 list reads a folder, it renames the logs it wrote itself (first line `PSX Ripper rip log`), and
 their `.md5`, to the new names, for the image they belong to: the `.bin` when a rip has that name,
-otherwise the single image. It is one job per folder in the audit log (*Files*, *Rename logs*)
-and can be undone there. The list does not rename it again after an undo, but checking, ripping
-or repairing that game later writes its new name. A log another program wrote, a name that is
+otherwise the single image. It is one job per folder in the audit log, listed under the folder
+(*Files* → the folder → *Rename logs*), and can be undone there. The list does not rename it again
+after an undo, but checking, ripping or repairing that game later writes its new name, and so
+does the list once the game is renamed (its log then has the game's new name). A log another program wrote, a name that is
 already taken, and a game a drive is working on are left as they are.
 
 ## Several drives at once

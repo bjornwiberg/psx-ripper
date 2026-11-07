@@ -186,6 +186,9 @@ renumbering the rows that follow), `include/lang.h`, `source/lang.cpp`, `tests/h
 
 ### Task 6: `/games.json`, docs, console check, pull request
 
+> **G10 (2026-11-07):** `/games.json` is dropped from this pull request; it comes with MCP later.
+> Task 6 is the docs, the console check and the pull request.
+
 **Files:** `source/remote.cpp` / `source/main.cpp` (`/games.json`), `docs/user-guide.md`,
 `docs/configuration.md` (keys), `README.md`.
 
