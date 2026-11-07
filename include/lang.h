@@ -451,6 +451,7 @@ enum StrId {
 	STR_AW_NOT_PUT_BACK_BENT,
 	STR_AUDIT_MIGRATE,   // the audit's job that renamed old logs after their image
 	STR_FN_ALSO,         // the rename preview: the set's other files that take the new name
+	STR_GC_CUT,          // the check refuses a set whose file list or names the scan cut
 	STR_COUNT
 };
 

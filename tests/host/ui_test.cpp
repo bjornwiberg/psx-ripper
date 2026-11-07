@@ -1667,6 +1667,127 @@ static void games_file_scenarios()
 	if (bad) g_fail += bad; else printf("ok   game list files (%s): rename + cue, undo/redo, refusals, failed move put back, trash, restore, empty, audit Files\n", sv ? "sv" : "en");
 }
 
+// The rip index (earlier rips by disc ID) follows the game list's moves: a rip trashed or renamed
+// away is not "already ripped", and a name another game took since is never taken for the disc's.
+// The host's vf_list lists nothing, so the index is seeded by hand.
+static void games_index_scenarios()
+{
+	int bad = 0, sv = g_sfx_sv;
+	auto want = [&](bool ok, const char *what) { if (!ok) { printf("FAIL rip index (%s): %s\n", sv ? "sv" : "en", what); bad++; } };
+	system("rm -rf out/gl out/audit && mkdir -p out/gl/dev_hdd0/PSXISO");
+	audit_init("out/audit", &vf_io);
+	audit_set_move_hooks(gm_moved_hook, gm_busy_hook);
+	snprintf(host_root, 256, "out/gl");
+	memset(host_exfat, 0, sizeof(int) * 8);
+	reset_all();
+	const char *H = "out/gl/dev_hdd0/PSXISO", *P = "/dev_hdd0/PSXISO";
+	auto set = [&](const char *name, const char *title, const char *serial) {
+		gs_set(H, name, 3, NULL);
+		char p[400];
+		snprintf(p, sizeof p, "%s/%s.bin.log", H, name);
+		gl_text(p, gs_log(title, serial, NULL).c_str());
+	};
+	auto seed = [&](const char *serial, const char *name) {   // the index as a rip at P left it
+		memset((void *)g_idx, 0, sizeof(g_idx));
+		snprintf(g_idx[0].dir, sizeof g_idx[0].dir, "%s", P);
+		snprintf(g_idx[0].e[0].serial, sizeof g_idx[0].e[0].serial, "%s", serial);
+		snprintf(g_idx[0].e[0].name, sizeof g_idx[0].e[0].name, "%s", name);
+		g_idx[0].n = 1;
+	};
+	auto look = [&](const char *title, const char *serial) {   // a disc in drive 0, its pattern name not on disk
+		disc(0, title, "", serial, 1);
+		OnCard o(0);
+		OUT_DIR = g_cards[0].dest;
+		snprintf(g_serial, sizeof g_serial, "%s", serial);
+		snprintf(g_name, sizeof g_name, "%s", title);
+		prev_rip_check();
+		return std::string(g_cards[0].exist);
+	};
+	set("Alpha old", "Alpha", "SLES_000.01");
+	set("Gamma old", "Gamma", "SLES_000.03");
+	set("Delta", "Delta", "SLES_000.04");
+	g_redump = RD_OFF;
+	g_cfg_primed = false;
+	system("rm -f out/psxrip.cfg");
+	snprintf(g_games_source, sizeof g_games_source, "hdd");
+	snprintf(g_name_pat, sizeof g_name_pat, "%%T [%%D]");
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	g_gl_stale = 1;
+	g_input_src = AU_PAD;
+	// an index entry whose image is gone is skipped
+	seed("SLES_000.09", "Ghost");
+	char out[320];
+	idx_find(P, "SLES_000.09", out, sizeof out);
+	want(!out[0], "an entry without its .bin is not an earlier rip");
+	seed("SLES_000.01", "Alpha old");
+	want(look("Alpha", "SLES_000.01") == std::string(P) + "/Alpha old", "found by disc ID under its old name");
+	GamesView v;
+	gv_open(v);
+	gv_poll(v);
+	want(gv_listed(v) && v.nshown == 3, "three games");
+	// trashed in the list: the disc is not ripped any more
+	gs_find(v, "Alpha");
+	want(gm_move(v, GM_TRASH, NULL) == 0 && vf_exists("/dev_hdd0/PSXISO/.trash/Alpha old.bin"), "Alpha in the trash");
+	gv_poll(v);
+	want(look("Alpha", "SLES_000.01").empty() && !g_cards[0].prev_rip, "a trashed rip: not ripped");
+	// Gamma renamed away from its name, Delta (another disc) renamed to it: ripping Gamma's disc
+	// must not take Delta for its earlier rip (that rip's end would delete Delta)
+	seed("SLES_000.03", "Gamma old");
+	gs_find(v, "Gamma");
+	want(gm_move(v, GM_RENAME, "Gamma new") == 0 && vf_exists("/dev_hdd0/PSXISO/Gamma new.bin"), "Gamma renamed away");
+	gv_poll(v);
+	gs_find(v, "Delta");
+	want(gm_move(v, GM_RENAME, "Gamma old") == 0 && vf_exists("/dev_hdd0/PSXISO/Gamma old.bin"), "Delta renamed to Gamma's old name");
+	gv_poll(v);
+	std::string ex = look("Gamma", "SLES_000.03");
+	want(ex != std::string(P) + "/Gamma old", "Delta is not Gamma's earlier rip");
+	// an audit undo in the Files domain marks the index stale too
+	{
+		seed("SLES_000.04", "Gamma old");
+		AuditView a;
+		audit_view_init(a);
+		a.row = 2;   // Files
+		audit_open(a);
+		char why[200];
+		audit_open(a);   // Delta's rename
+		want(a.level == 2 && a.dom == AU_FILES && a.n > 0 && audit_undo(a, why, sizeof why) == 0 && vf_exists("/dev_hdd0/PSXISO/Delta.bin"),
+		     "Delta's rename undone from the audit screen");
+		want(g_idx[0].stale && g_idx[1].stale, "an undo in Files: the index is read again");
+	}
+	// a set whose base or image name the scan cut is not checked
+	gl_changed(); gl_open("hdd"); gv_poll(v);
+	gs_find(v, "Gamma");
+	{
+		GameDisc &d = g_gl.d[g_gl.g[v.shown[v.row]].first];
+		want(gc_refusal(d) == STR_COUNT, "a whole set can be checked");
+		d.files_cut = 1;
+		want(gc_refusal(d) == STR_GC_CUT, "a set whose file list was cut: refused");
+		d.files_cut = 0;
+		char keep[sizeof d.base];
+		memcpy(keep, d.base, sizeof keep);
+		memset(d.base, 'x', sizeof d.base - 1);
+		d.base[sizeof d.base - 1] = 0;
+		want(gc_refusal(d) == STR_GC_CUT, "a cut base: refused");
+		memcpy(d.base, keep, sizeof keep);
+	}
+	// a drive job's end while the list is open: the list reads its folder again
+	set("Epsilon", "Epsilon", "SLES_000.05");
+	gl_changed();
+	gv_poll(v); gv_poll(v);
+	want(gs_find(v, "Epsilon"), "a new rip shows without reopening the list");
+	gv_close(v);
+	audit_set_move_hooks(NULL, NULL);
+	host_root[0] = 0;
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	snprintf(g_games_source, sizeof g_games_source, "all");
+	snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	memset((void *)g_idx, 0, sizeof(g_idx));
+	system("rm -rf out/audit");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   rip index (%s): follows trash, rename and undo; cut sets not checked; list read again after a change\n", sv ? "sv" : "en");
+}
+
 // The rename screen of a game starts from a pattern that gives the game's current name; a name the
 // patterns cannot give (another tool's) keeps the setting's pattern and shows the name now above the preview.
 static int text_y(const char *s)
@@ -2606,12 +2727,14 @@ int main()
 	games_file_scenarios();
 	games_rename_open_scenarios();
 	games_names_scenarios();
+	games_index_scenarios();
 	host_lang = PS3_LANG_ENGLISH_US; lang_init(); g_sfx_sv = 0;
 	games_scenarios();
 	games_check_scenarios();
 	games_file_scenarios();
 	games_rename_open_scenarios();
 	games_names_scenarios();
+	games_index_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

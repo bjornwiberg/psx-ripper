@@ -3070,8 +3070,14 @@ static void idx_find(const char *dir, const char *serial, char *out, size_t n)
 		}
 		logf("rip index %s: %d image(s)", dir, x->n);
 	}
-	for (int i = 0; i < x->n; i++)
-		if (!strcmp(x->e[i].serial, serial)) { snprintf(out, n, "%s/%s", dir, x->e[i].name); break; }
+	for (int i = 0; i < x->n; i++) {
+		if (strcmp(x->e[i].serial, serial)) continue;
+		char bp[320];
+		snprintf(bp, sizeof(bp), "%s/%s.bin", dir, x->e[i].name);
+		if (!vf_exists(bp)) continue;   // moved or deleted since the index was read
+		snprintf(out, n, "%s/%s", dir, x->e[i].name);
+		break;
+	}
 	sysMutexUnlock(g_idx_mx);
 }
 
@@ -4688,8 +4694,8 @@ static int audit_undo(AuditView &v, char *why, size_t n)
 	else if (r && v.level == 2 && !strcmp(r->kind, "job")) rc = audit_undo_job(r->job, why, n, &rs);
 	else if (r) rc = audit_undo_row(r->id, why, n, &rs);
 	g_files_busy = 0;
-	if (v.dom == AU_FILES) {   // the game list reads its folders again, a card showing a moved rip looks again
-		gl_changed();
+	if (v.dom == AU_FILES) {   // the game list and the rip index read their folders again, a card showing a moved rip looks again
+		idx_stale();
 		for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;
 	}
 	if (rc) logf("audit undo of %s refused: %s", key, why);   // the English text, for the log
@@ -4931,11 +4937,13 @@ static int gc_card_busy(const char *base)
 	return 0;
 }
 // Why a disc cannot be checked from its file, STR_COUNT when it can: a 2048 image (no error data
-// to compare: re-rip), an incomplete set, an image in several .bin files, a set a drive rips into.
+// to compare: re-rip), an incomplete set, a set whose file list or names the scan cut, an image in
+// several .bin files, a set a drive works on.
 static StrId gc_refusal(const GameDisc &d)
 {
 	if (d.fmt == GF_2048) return STR_GC_NO_2048;
 	if (d.st == GS_BROKEN || d.fmt != GF_2352 || !d.image[0]) return STR_GC_NO_BROKEN;
+	if (d.files_cut || strlen(d.base) >= sizeof(d.base) - 1 || strlen(d.image) >= sizeof(d.image) - 1) return STR_GC_CUT;
 	int bins = 0;
 	char p[320];
 	for (int i = 0; lib_file_path(&d, i, p, sizeof(p)); i++) {
@@ -5078,12 +5086,13 @@ static int gm_plan(const Game &g, int what, char (*leaf)[200], char (*from)[320]
 	return n;
 }
 
-// The list read again after a change (the scan of the source shown).
+// The list read again after a change (the scan of the source shown); the rip index too, so a moved
+// rip is not taken for a disc's earlier rip under its old name.
 static void gv_rescan(GamesView &v)
 {
 	char k[8];
 	gv_scan_key(v, k, sizeof(k));
-	gl_changed();
+	idx_stale();
 	gl_open(k);
 }
 
@@ -5477,8 +5486,9 @@ static int gl_migrate()
 }
 
 // Takes a finished scan; returns 1 when the screen changed. The rows are worked out once per
-// result of the source shown. A result of another source (asked for elsewhere, e.g. /games.json)
-// with nothing else on its way: the screen asks for its own again.
+// result of the source shown. Files changed since the scan (a drive job ended) with no scan on its
+// way: the list is read again. A result of another source with nothing else on its way: the screen
+// asks for its own again.
 static void gd_build(const Game &g);
 static int gv_poll(GamesView &v)
 {
@@ -5515,6 +5525,11 @@ static int gv_poll(GamesView &v)
 			gl_open(k);
 			gl_poll();
 		}
+	}
+	if (g_gl_stale && v.mode == GV_LIST && !gl_busy()) {   // a drive job ended while the list is open
+		char k[8];
+		gv_scan_key(v, k, sizeof(k));
+		if (gl_open(k)) took = 1;
 	}
 	if (gv_ready(v)) {
 		if (v.gen == g_gl.gen) return took;

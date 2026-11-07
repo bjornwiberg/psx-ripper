@@ -331,7 +331,7 @@ static const char *en[STR_COUNT] = {
 	"Redoing %s, please wait",
 	"All",
 	"%s is not connected",
-	"More than %d games here: only %d are listed",
+	"More than %d discs here: only %d are listed",
 	"Not enough memory to list the games",
 	"Games",
 	"Games · %s",
@@ -416,7 +416,7 @@ static const char *en[STR_COUNT] = {
 	"A 2048 image cannot be checked: re-rip the disc to verify it",
 	"An incomplete set cannot be checked",
 	"An image in several files cannot be checked yet",
-	"A drive is ripping into this game right now",
+	"A drive is working on this game right now",
 	"Redump is off: turn it on in the settings (online or a local copy) to check games",
 	"Redump could not be asked: check stopped, %d of %d games compared",
 	" · %d without disc ID (not compared)",
@@ -455,6 +455,7 @@ static const char *en[STR_COUNT] = {
 	"%d not back (%s), wrong FILE lines in %s: see the audit log",
 	"Rename logs",
 	"Also renamed: %s",
+	"This game has too many or too long file names to be checked",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -782,7 +783,7 @@ static const char *sv[STR_COUNT] = {
 	"Gör om %s, vänta",
 	"Alla",
 	"%s är inte ansluten",
-	"Fler än %d spel här: bara %d listas",
+	"Fler än %d skivor här: bara %d listas",
 	"Inte tillräckligt med minne för att lista spelen",
 	"Spel",
 	"Spel · %s",
@@ -867,7 +868,7 @@ static const char *sv[STR_COUNT] = {
 	"En 2048-avbildning kan inte kontrolleras: rippa om skivan för att verifiera den",
 	"En ofullständig uppsättning kan inte kontrolleras",
 	"En avbildning i flera filer kan inte kontrolleras än",
-	"En enhet rippar till det här spelet just nu",
+	"En enhet arbetar med det här spelet just nu",
 	"Redump är av: slå på det i inställningarna (online eller lokal kopia) för att kontrollera spel",
 	"Redump gick inte att fråga: kontrollen stoppades, %d av %d spel jämförda",
 	" · %d utan skiv-ID (inte jämförda)",
@@ -906,6 +907,7 @@ static const char *sv[STR_COUNT] = {
 	"%d ej tillbaka (%s), fel FILE-rader i %s: se ändringsloggen",
 	"Byt namn på loggar",
 	"Byter också namn: %s",
+	"Spelet har för många eller för långa filnamn för att kontrolleras",
 };
 
 static const char **table = en;
