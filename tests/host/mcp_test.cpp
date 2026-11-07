@@ -123,7 +123,7 @@ static void ping(int &bad)
 
 static const char *k_tools[] = {"get_state", "get_screenshot", "get_drives", "list_settings", "set_setting",
 	"go_screen", "go_tab", "press_button", "rip", "repair", "check", "cancel", "skip_rereads", "eject", "read_log",
-	"list_games", "get_game", "check_game", "check_games", "cancel_check", "rename_game", "trash_game", "restore_game", "empty_trash"};
+	"list_games", "get_game", "check_game", "check_games", "cancel_check", "rename_game", "trash_game", "restore_game", "empty_trash", "show_games"};
 static const int k_ntools = sizeof(k_tools) / sizeof(k_tools[0]);
 
 static void tools_list(int &bad)
@@ -298,7 +298,7 @@ static void tool_errors(int &bad)
 			: !strcmp(k_tools[i], "rename_game") ? "{\"id\":\"hdd:/a\",\"pattern\":\"%T\"}"
 			: !strcmp(k_tools[i], "empty_trash") ? "{\"source\":\"hdd\",\"confirm\":true}"
 			: (!strncmp(k_tools[i], "get_", 4) || !strcmp(k_tools[i], "list_settings") || !strcmp(k_tools[i], "read_log") || !strcmp(k_tools[i], "list_games") ||
-			   !strcmp(k_tools[i], "check_games") || !strcmp(k_tools[i], "cancel_check")) ? "{}"
+			   !strcmp(k_tools[i], "check_games") || !strcmp(k_tools[i], "cancel_check") || !strcmp(k_tools[i], "show_games")) ? "{}"
 			: "{\"drive\":\"usb0\"}";
 		CHECK(tool(k_tools[i], args) == 200);
 		if (!has("\"isError\":true") || !has("not available")) { printf("  %s\n", k_tools[i]); CHECK(0); }
@@ -676,6 +676,45 @@ static void games(int &bad)
 	CHECK(param_err(tool("rename_game", "{\"id\":\"hdd:/a\"}"), "pattern"));
 	CHECK(param_err(tool("empty_trash", "{\"source\":\"hdd\",\"confirm\":\"yes\"}"), "confirm"));   // (the source is required: given)
 	CHECK(param_err(tool("cancel_check", "{\"id\":\"hdd:/a\"}"), "id"));
+	// show_games: the list's source and filter set in one step (M10). Criteria not given keep their
+	// value (fgiven says which were given); "clear" or {} clears them, as L1 in the panel
+	CHECK(has_desc("show_games", "instead of press_button") && has_desc("list_games", "use show_games"));
+	{
+		call("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}");
+		const char *d = strstr(g_out, "{\"name\":\"show_games\",");
+		const char *end = d ? strstr(d + 1, "{\"name\":") : NULL;
+		std::string t = d ? std::string(d, end ? end - d : strlen(d)) : "";
+		CHECK(t.find("\"source\":{\"type\":\"string\",\"pattern\":\"^(all|hdd|usb[0-7])$\"") != std::string::npos);
+		CHECK(t.find("\"filter\":{\"anyOf\":[{\"type\":\"object\",\"properties\":{\"format\":") != std::string::npos);
+		CHECK(t.find("{\"type\":\"string\",\"enum\":[\"clear\"]}]") != std::string::npos);
+		CHECK(t.find("\"required\"") == std::string::npos && t.find("\"query\"") == std::string::npos);
+	}
+	CHECK(text_ok(tool("show_games", NULL), esc)); CHECK(g_call == "show_games|(null)|(null)||0,0,0,0,0|0|50" && g_q.fgiven == 0 && !g_q.fclear);
+	CHECK(text_ok(tool("show_games", "{\"source\":\"usb1\"}"), esc)); CHECK(g_call == "show_games|(null)|(null)|usb1|0,0,0,0,0|0|50" && g_q.fgiven == 0 && !g_q.fclear);
+	CHECK(text_ok(tool("show_games", "{\"filter\":{\"format\":\"2048\"}}"), esc)); CHECK(g_call == "show_games|(null)|(null)||2,0,0,0,0|0|50" && g_q.fgiven == 1);
+	CHECK(text_ok(tool("show_games", "{\"filter\":{\"redump\":\"no_match\"}}"), esc)); CHECK(g_call == "show_games|(null)|(null)||0,3,0,0,0|0|50" && g_q.fgiven == 2);
+	CHECK(text_ok(tool("show_games", "{\"filter\":{\"errors\":\"without\"}}"), esc)); CHECK(g_call == "show_games|(null)|(null)||0,0,2,0,0|0|50" && g_q.fgiven == 4);
+	CHECK(text_ok(tool("show_games", "{\"filter\":{\"other\":\"duplicates\"}}"), esc)); CHECK(g_call == "show_games|(null)|(null)||0,0,0,2,0|0|50" && g_q.fgiven == 8);
+	CHECK(text_ok(tool("show_games", "{\"filter\":{\"show\":\"trash\"}}"), esc)); CHECK(g_call == "show_games|(null)|(null)||0,0,0,0,1|0|50" && g_q.fgiven == 16);
+	CHECK(text_ok(tool("show_games", "{\"filter\":{\"format\":\"any\",\"show\":\"games\"}}"), esc)); CHECK(g_q.fgiven == 17 && !g_q.fclear);
+	CHECK(text_ok(tool("show_games", "{\"source\":\"all\",\"filter\":{\"other\":\"duplicates\",\"redump\":\"verified\"}}"), esc));
+	CHECK(g_call == "show_games|(null)|(null)|all|0,1,0,2,0|0|50" && g_q.fgiven == 10 && !g_q.fclear);
+	CHECK(text_ok(tool("show_games", "{\"filter\":\"clear\"}"), esc)); CHECK(g_q.fclear && g_q.fgiven == 0);
+	CHECK(text_ok(tool("show_games", "{\"filter\":{}}"), esc)); CHECK(g_q.fclear && g_q.fgiven == 0);
+	// list_games takes no "clear" and its filter never asks to clear
+	CHECK(param_err(tool("list_games", "{\"filter\":\"clear\"}"), "filter"));
+	CHECK(text_ok(tool("list_games", "{\"filter\":{}}"), esc)); CHECK(!g_q.fclear);
+	// refusals list the allowed values; no hook is called
+	g_call = "";
+	CHECK(param_err(tool("show_games", "{\"filter\":\"none\"}"), "filter") && has("clear") && g_call.empty());
+	CHECK(param_err(tool("show_games", "{\"filter\":{\"status\":\"verified\"}}"), "filter") && has("format, redump, errors, other, show"));
+	CHECK(param_err(tool("show_games", "{\"filter\":{\"format\":\"4096\"}}"), "filter") && has("any, 2352, 2048"));
+	CHECK(param_err(tool("show_games", "{\"filter\":{\"show\":\"all\"}}"), "filter") && has("games, trash"));
+	CHECK(param_err(tool("show_games", "{\"filter\":5}"), "filter"));
+	CHECK(param_err(tool("show_games", "{\"source\":\"usb8\"}"), "source") && has("all, hdd or usbN"));
+	CHECK(param_err(tool("show_games", "{\"query\":\"croc\"}"), "query"));   // (the screen cannot filter by name)
+	CHECK(param_err(tool("show_games", "{\"offset\":1}"), "offset"));
+	CHECK(g_call.empty());
 	// a refusal is the app's text
 	g_ret = -1; g_answer = "The game list is checking this rip";
 	CHECK(tool("trash_game", "{\"id\":\"hdd:/a\"}") == 200);

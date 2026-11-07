@@ -296,7 +296,8 @@ static void w_base64(W *w, const unsigned char *d, int n)
 // ---- the tool table ----
 
 enum ArgType { A_DRIVE, A_SCREEN, A_BUTTON, A_KEY, A_VALUE, A_FROM, A_MAX, A_SOURCE, A_FILTER, A_OFFSET, A_LIMIT, A_ID, A_PATTERN, A_CONFIRM,
-               A_SOURCE1 /* one source: not all */, A_EXPECT, A_QUERY };
+               A_SOURCE1 /* one source: not all */, A_EXPECT, A_QUERY,
+               A_FSET /* show_games' filter: the criteria to set, or "clear" */ };
 struct Arg { const char *name; ArgType type; bool required; const char *desc; };
 enum ToolKind { T_STATE, T_SHOT, T_DRIVES, T_LIST, T_SET, T_SCREEN, T_UI, T_LOG, T_GAMES, T_GAME, T_GACT };
 #define NARGS 5   // a tool's arguments at most
@@ -332,11 +333,11 @@ static const Tool k_tools[] = {
 		{"key", A_KEY, true, "The setting's key, as list_settings gives it"},
 		{"value", A_VALUE, true, "The new value, one of the setting's allowed values (any text for free-text settings); numbers and true/false are taken as their text (true = 1)"},
 		{"drive", A_DRIVE, false, "The drive for a per-drive setting; leave out for the standard settings"}}},
-	{"go_screen", T_SCREEN, false, "Opens one of the app's screens, the way the pad goes there, and returns the screen state. To change a setting use set_setting; to rip, check and so on use the action tools; for the game list, list_games, get_game and the game tools (check_game, rename_game, trash_game, ...).", {
+	{"go_screen", T_SCREEN, false, "Opens one of the app's screens, the way the pad goes there, and returns the screen state. To change a setting use set_setting; to rip, check and so on use the action tools; for the game list, list_games, get_game and the game tools (show_games to show it with a source and filter, check_game, rename_game, trash_game, ...).", {
 		{"screen", A_SCREEN, true, "The screen to open"},
 		{"drive", A_DRIVE, false, "The drive, only with drive_settings (and required there)"}}},
 	{"go_tab", T_UI, false, "Shows a drive's tab on the home screen (going there first) and returns the screen state.", {DRIVE_ARG}},
-	{"press_button", T_UI, false, "Fallback: presses one pad button in the app, as the pad would, and returns the screen state. Use it only to answer a dialog (cross = yes/OK, circle = no) or to move around a screen; rip, check, repair, cancel, skip_rereads, eject, set_setting and the game list's tools (check_game, check_games, cancel_check, rename_game, trash_game, restore_game, empty_trash) do their work directly. It never presses into the console's own on-screen keyboard, and circle on the home screen is refused (it would exit the app, and MCP with it).", {
+	{"press_button", T_UI, false, "Fallback: presses one pad button in the app, as the pad would, and returns the screen state. Use it only to answer a dialog (cross = yes/OK, circle = no) or to move around a screen; rip, check, repair, cancel, skip_rereads, eject, set_setting and the game list's tools (check_game, check_games, cancel_check, rename_game, trash_game, restore_game, empty_trash, show_games) do their work directly. It never presses into the console's own on-screen keyboard, and circle on the home screen is refused (it would exit the app, and MCP with it).", {
 		{"button", A_BUTTON, true, "The button"}}},
 	{"rip", T_UI, false, "Starts ripping the disc in the drive (same checks as the pad, on its tab); returns the screen state or why not. Like the pad's cross, it replaces an existing rip at the drive's destination without asking. Use this instead of press_button.", {DRIVE_ARG}},
 	{"repair", T_UI, false, "Re-reads the sectors the drive's rip lists as bad (same checks as the pad, on its tab); returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
@@ -352,7 +353,7 @@ static const Tool k_tools[] = {
 		"id, name, disc ID, format, tracks, status, errors, Redump name, place, marks (duplicate, .sbi missing, in the trash) and the discs of a "
 		"multi-disc game; and a game-list check's last result (to follow a running check, poll get_state instead: list_games may read a USB drive again). "
 		"Page with offset and limit: next_offset is the next page's offset (null: no more); a page too large for one answer is cut there (cut: true). "
-		"Use this instead of press_button on the games screen.", {
+		"It does not change the screen: to show this on the TV, use show_games. Use this instead of press_button on the games screen.", {
 		{"source", A_SOURCE, false, SOURCE_DESC},
 		{"filter", A_FILTER, false, "The filter panel's criteria; all must match (each one left out: any)"},
 		{"query", A_QUERY, false, "Only games whose name has this text, in any case (A-Z; other letters as they are)"},
@@ -383,6 +384,13 @@ static const Tool k_tools[] = {
 		{"source", A_SOURCE1, true, "The source whose trash is emptied: hdd or usbN (the USB drive's port)"},
 		{"confirm", A_CONFIRM, false, "Must be true: emptying the trash is final"},
 		{"expect", A_EXPECT, false, "What list_games showed in that trash: the number of its games, or the id of every disc in it (a game's id, and for a game of several discs each id in its discs list; any order)"}}},
+	{"show_games", T_GACT, false, "Shows the game list on the screen with a source and filter, set in one step as SELECT and the filter panel set them, and "
+		"saved as they save them (the list opens so next time). The criteria left out keep their value; filter \"clear\" (or {}) clears them, as L1 does. "
+		"Returns what the list shows (source, filter, the summary line, how many games the filter shows: \"22 of 156\") and the screen state. "
+		"Refused for a source that is not connected, while the game list checks, and while a dialog is open. To read the games, use list_games. "
+		"Use this instead of press_button.", {
+		{"source", A_SOURCE, false, "The source to show: hdd, usbN (the USB drive's port) or all; left out: the one shown now"},
+		{"filter", A_FSET, false, "The filter panel's criteria to set (each one left out keeps its value), or \"clear\" to clear them"}}},
 };
 static const int k_ntools = sizeof(k_tools) / sizeof(k_tools[0]);
 
@@ -419,8 +427,8 @@ static void w_tools_list(W *w)
 			case A_SOURCE1: w_str(w, "\"type\":\"string\",\"pattern\":\"^(hdd|usb[0-7])$\""); break;
 			case A_EXPECT: w_str(w, "\"type\":[\"integer\",\"array\"],\"minimum\":0,\"items\":{\"type\":\"string\",\"minLength\":1}"); break;
 			case A_QUERY: w_fmt(w, "\"type\":\"string\",\"maxLength\":%d", MCP_MAX_QUERY); break;
-			case A_FILTER:   // (no additionalProperties of its own: the tool's arguments have the one)
-				w_str(w, "\"type\":\"object\",\"properties\":{");
+			case A_FILTER: case A_FSET:   // (no additionalProperties of its own: the tool's arguments have the one)
+				w_str(w, g.type == A_FSET ? "\"anyOf\":[{\"type\":\"object\",\"properties\":{" : "\"type\":\"object\",\"properties\":{");
 				for (size_t f = 0; f < sizeof(k_filter) / sizeof(k_filter[0]); f++) {
 					w_fmt(w, "%s\"%s\":{\"type\":\"string\",", f ? "," : "", k_filter[f].name);
 					w_enum(w, k_filter[f].values);
@@ -428,7 +436,7 @@ static void w_tools_list(W *w)
 					w_esc(w, k_filter[f].desc);
 					w_str(w, "}");
 				}
-				w_str(w, "}");
+				w_str(w, g.type == A_FSET ? "}},{\"type\":\"string\",\"enum\":[\"clear\"]}]" : "}");
 				break;
 			case A_OFFSET: w_str(w, "\"type\":\"integer\",\"minimum\":0"); break;
 			case A_LIMIT: w_fmt(w, "\"type\":\"integer\",\"minimum\":1,\"maximum\":%d", MCP_MAX_GAMES); break;
@@ -515,6 +523,7 @@ static int check_filter(const char *v, const char *e, McpGameQuery *q, Err *er)
 		if (c < 0) return set_err(er, -32602, "filter", "unknown criterion (format, redump, errors, other, show)");
 		if (seen >> c & 1) return set_err(er, -32602, "filter", "%s given twice", k_filter[c].name);
 		seen |= 1u << c;
+		q->fgiven |= 1 << c;
 		int x = -1;
 		if (*fv == '"' && j_decode(fv, e, val, sizeof(val)) >= 0)
 			for (int i = 0; k_filter[c].values[i]; i++) if (!strcmp(val, k_filter[c].values[i])) x = i;
@@ -609,6 +618,15 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 		}
 		if (g.type == A_FILTER) {
 			if (check_filter(v, e, &a->q, er)) return -1;
+			a->q.fgiven = 0;   // (list_games and check_games: a criterion left out is any)
+			continue;
+		}
+		if (g.type == A_FSET) {   // show_games: the criteria to set, or "clear" ({} clears too, as L1)
+			char c[8];
+			if (*v == '"' && j_decode(v, e, c, sizeof(c)) >= 0 && !strcmp(c, "clear")) { a->q.fclear = 1; continue; }
+			if (*v != '{') return set_err(er, -32602, g.name, "must be an object of criteria (format, redump, errors, other, show), or \"clear\" to clear them");
+			if (check_filter(v, e, &a->q, er)) return -1;
+			a->q.fclear = !a->q.fgiven;
 			continue;
 		}
 		if (g.type == A_EXPECT) {
@@ -839,7 +857,8 @@ int mcp_handle(const char *body, int len, char *out, int n)
 		w_esc(&w, g_version);
 		w_str(&w, "},\"instructions\":\"PSX RiPPER on a PS3. get_* tools, list_settings and read_log only read; "
 		          "the actions (rip, check, repair, cancel, skip_rereads, eject) and set_setting do the work directly; list_games and get_game read the game list, "
-		          "and check_game, check_games, cancel_check, rename_game, trash_game, restore_game and empty_trash change it as its screen would; go_* and press_button "
+		          "and check_game, check_games, cancel_check, rename_game, trash_game, restore_game and empty_trash change it as its screen would; show_games shows it "
+		          "on the screen with a source and filter; go_* and press_button "
 		          "move around the screens and answer dialogs. Each tool that changes the screen returns the screen state.\"}");
 	} else if (!strcmp(method, "ping")) {
 		w_str(&w, "{}");

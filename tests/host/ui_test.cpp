@@ -3226,6 +3226,28 @@ static int src_rows(AuditDom dom, const char *what, AuditSrc src)   // job rows 
 	for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, "job") && !strcmp(r[i].what, what) && r[i].src == src) k++;
 	return k;
 }
+// The texts the screen draws now: the UI thread draws its frame again and they are taken from it
+// (trace_drawn is the trace while the game list's MCP scenarios run).
+static pthread_mutex_t g_texts_mx = PTHREAD_MUTEX_INITIALIZER;
+static std::vector<std::string> g_texts;
+static void trace_drawn(int kind, int x, int y, int w, int h, const char *text, int extra)
+{
+	trace(kind, x, y, w, h, text, extra);
+	if (kind != UI_TRACE_TEXT || !text || !*text) return;
+	pthread_mutex_lock(&g_texts_mx);
+	g_texts.push_back(text);
+	pthread_mutex_unlock(&g_texts_mx);
+}
+static std::string frame_texts()
+{
+	on_ui([] { pthread_mutex_lock(&g_texts_mx); g_texts.clear(); pthread_mutex_unlock(&g_texts_mx); g_redraw = 2; });
+	bg_frames(3);
+	std::string all;
+	pthread_mutex_lock(&g_texts_mx);
+	for (auto &t : g_texts) all += t + "\n";
+	pthread_mutex_unlock(&g_texts_mx);
+	return all;
+}
 static void mcp_games_scenarios()
 {
 	int bad = 0;
@@ -3687,6 +3709,107 @@ static void mcp_games_scenarios()
 		     "trash_game from the rename view", O);
 		rc = act("restore_game", APE_T);
 		need(rc == 0, "restore_game", O);
+	}
+	// show_games (M10): the list's source and filter in one step, saved as SELECT and the filter panel
+	// save them (source mcp); criteria not given keep their value, "clear" clears them as L1 does
+	{
+		auto saved = [&](const char *key) { FILE *f = fopen(CFG_PATH, "r"); char b[8192] = ""; if (f) { b[fread(b, 1, sizeof b - 1, f)] = 0; fclose(f); }
+		                                    std::string k = std::string("\n") + key + "="; const char *s = strstr(b, k.c_str());
+		                                    return std::string(s ? s + k.size() : "", s ? strcspn(s + k.size(), "\n") : 0); };
+		auto show = [&](const char *src, int mask, GameFilter f, int trash = 0, int clear = 0) {
+			McpGameQuery q = gq(src);
+			q.fmt = f.fmt; q.redump = f.redump; q.errors = f.errors; q.other = f.other; q.trash = trash;
+			q.fgiven = mask; q.fclear = clear;
+			return act("show_games", NULL, NULL, q);
+		};
+		auto filter_is = [&](int a, int b, int c, int d) { return g_games_filter.fmt == a && g_games_filter.redump == b && g_games_filter.errors == c && g_games_filter.other == d; };
+		void (*keep_trace)(int, int, int, int, int, const char *, int) = ui_trace;
+		ui_trace = trace_drawn;
+		h.ui("go_screen", "home", outb, sizeof outb);
+		bg_frames(2);
+		int s0 = setting_rows("games_source", AU_MCP), f0 = setting_rows("games_filter", AU_MCP);
+		// duplicates on every source, from the home screen (the example in docs/mcp.md)
+		McpGameQuery dq = gq("all"); dq.other = 2;
+		list(dq);
+		int dups = atoi(out.c_str() + out.find("\"matching\":") + 11);
+		int rc = show("all", 8, GameFilter{0, 0, 0, 2});
+		char shown[40];
+		snprintf(shown, sizeof shown, "\"shown\":%d,\"shown_text\":\"%d of 22\"", dups, dups);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"source\":\"all\",\"label\":\"All\",\"trash\":false,") &&
+		     has("\"filter\":{\"format\":\"any\",\"redump\":\"any\",\"errors\":\"any\",\"other\":\"duplicates\",\"show\":\"games\"}") &&
+		     has("\"summary\":{\"text\":\"22 games") && has(shown) && has("\"state\":{\"screen\":\"games\""), "show_games all, duplicates: the list and its summary", O);
+		need(dups >= 3 && !strcmp(g_games_source, "all") && saved("games_source") == "all" && filter_is(0, 0, 0, 2) && saved("games_filter") == "0,0,0,2",
+		     "show_games: the source and filter are saved", O);
+		need(setting_rows("games_source", AU_MCP) == s0 + 1 && setting_rows("games_filter", AU_MCP) == f0 + 1, "show_games: audit rows with source mcp");
+		std::string ft = frame_texts();
+		char of[24];
+		snprintf(of, sizeof of, "%d of 22", dups);
+		need(ft.find("Games · All") != std::string::npos && ft.find("\nDuplicates\n") != std::string::npos && ft.find(of) != std::string::npos &&
+		     ft.find("Croc 2") != std::string::npos, "show_games: the screen shows All with the duplicates", ft.c_str());
+		// each criterion on its own: the others keep their value
+		rc = show("", 2, GameFilter{0, 1, 0, 0});
+		need(rc == 0 && filter_is(0, 1, 0, 2) && saved("games_filter") == "0,1,0,2" && !strcmp(g_games_source, "all"), "show_games redump: the other criteria and the source kept", O);
+		rc = show("", 1, GameFilter{1, 0, 0, 0});
+		need(rc == 0 && filter_is(1, 1, 0, 2) && saved("games_filter") == "1,1,0,2", "show_games format", O);
+		rc = show("", 4, GameFilter{0, 0, 2, 0});
+		need(rc == 0 && filter_is(1, 1, 2, 2) && saved("games_filter") == "1,1,2,2" && has("\"errors\":\"without\""), "show_games errors", O);
+		rc = show("", 8, GameFilter{0, 0, 0, 3});
+		need(rc == 0 && filter_is(1, 1, 2, 3) && has("\"other\":\"sbi_missing\""), "show_games other", O);
+		rc = show("", 0, GameFilter{0, 0, 0, 0}, 0, 1);
+		need(rc == 0 && filter_is(0, 0, 0, 0) && saved("games_filter") == "0,0,0,0" && has("\"shown\":22,\"shown_text\":\"22 of 22\""), "show_games clear: as L1", O);
+		ft = frame_texts();
+		need(ft.find("Alundra") != std::string::npos && ft.find("All games") != std::string::npos, "show_games clear: the screen shows every game", ft.c_str());
+		// the source alone; then show: trash (the view only, as the panel's Show: not saved)
+		int f1 = setting_rows("games_filter", AU_MCP);
+		rc = show("hdd", 0, GameFilter{0, 0, 0, 0});
+		need(rc == 0 && !strcmp(g_games_source, "hdd") && saved("games_source") == "hdd" && !strcmp(g_gl.key, "hdd") && has("\"label\":\"Hard disk\"") &&
+		     setting_rows("games_filter", AU_MCP) == f1, "show_games hdd: the source saved, the filter untouched", O);
+		rc = show("", 16, GameFilter{0, 0, 0, 0}, 1);
+		need(rc == 0 && has("\"trash\":true") && has("\"show\":\"trash\"") && !strcmp(g_gl.key, "t:hdd") && saved("games_filter") == "0,0,0,0", "show_games show trash", O);
+		rc = show("", 16, GameFilter{0, 0, 0, 0}, 0);
+		need(rc == 0 && has("\"trash\":false") && !strcmp(g_gl.key, "hdd"), "show_games show games", O);
+		// the stick: shown and remembered; the source a game tool switched to is saved by show_games too
+		rc = show("usb1", 0, GameFilter{0, 0, 0, 0});
+		need(rc == 0 && !strcmp(g_games_source, "usb1") && saved("games_source") == "usb1" && has("\"label\":\"USB 1 (RIPS)\""), "show_games usb1", O);
+		// refused: a source that is not connected (at once, nothing changed)
+		uint64_t t0 = now_ms();
+		int s1 = setting_rows("games_source", AU_MCP);
+		rc = show("usb5", 1, GameFilter{2, 0, 0, 0});
+		need(rc != 0 && has("not connected") && now_ms() - t0 < 1000 && !strcmp(g_games_source, "usb1") && filter_is(0, 0, 0, 0) &&
+		     setting_rows("games_source", AU_MCP) == s1, "show_games on a source that is not there: refused, nothing changed", O);
+		// refused: the app's dialog is in the way (the pad cannot get to the list without answering it)
+		g_bg_tell = "A test message from tell.";
+		bg_frames(4);
+		t0 = now_ms();
+		rc = show("hdd", 0, GameFilter{0, 0, 0, 0});
+		need(rc != 0 && has("A dialog is open") && now_ms() - t0 < 1000 && !strcmp(g_games_source, "usb1"), "show_games with a dialog open: refused at once", O);
+		h.ui("press_button", "cross", outb, sizeof outb);
+		// refused while the game list checks
+		show("hdd", 0, GameFilter{0, 0, 0, 0});
+		host_thread_gc = 1;
+		g_gc_hold = 1;
+		g_gc_after = gc_hold_hook;
+		rc = act("check_game", ALUNDRA);
+		need(rc == 0 && has("\"started\":true"), "a check on a thread of its own", O);
+		bg_frames(4);
+		t0 = now_ms();
+		rc = show("all", 8, GameFilter{0, 0, 0, 2});
+		need(rc != 0 && has("being checked") && now_ms() - t0 < 1000 && !strcmp(g_games_source, "hdd") && filter_is(0, 0, 0, 0), "show_games while checking: refused", O);
+		act("cancel_check", NULL);
+		g_gc_hold = 0;
+		for (int i = 0; i < 200 && g_gc.running; i++) usleep(5000);
+		bg_frames(4);
+		g_gc_after = NULL;
+		host_thread_gc = 0;
+		// the pad's filter panel as before: R1, right (2352), circle applies and saves it; L1 clears
+		int f2 = setting_rows("games_filter", AU_MCP);
+		h.ui("press_button", "r1", outb, sizeof outb);
+		h.ui("press_button", "right", outb, sizeof outb);
+		h.ui("press_button", "circle", outb, sizeof outb); out = outb;
+		need(filter_is(1, 0, 0, 0) && saved("games_filter") == "1,0,0,0" && setting_rows("games_filter", AU_MCP) == f2 + 1 && has("\"screen\":\"games\""), "the filter panel: applied and saved", O);
+		h.ui("press_button", "l1", outb, sizeof outb);
+		need(filter_is(0, 0, 0, 0) && saved("games_filter") == "0,0,0,0", "L1 clears the filter");
+		ui_trace = keep_trace;
 	}
 	h.ui("go_screen", "home", outb, sizeof outb);
 	bg_stop();

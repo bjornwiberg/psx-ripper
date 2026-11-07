@@ -22,9 +22,12 @@
 // 2 without; other 1 broken, 2 duplicates, 3 .sbi missing), trash = the trash instead of the games.
 // query (list_games): a part of the game's name, any case ("" = any). expect (empty_trash): how
 // many games the agent saw in that trash (-1 = not given); with expect_ids, expect_hash is the sum
-// of mcp_id_hash() over their ids, so the set of ids is compared in any order.
+// of mcp_id_hash() over their ids, so the set of ids is compared in any order. fgiven (show_games):
+// the criteria the agent gave, a bit each (1 format, 2 redump, 4 errors, 8 other, 16 show); the
+// others keep the list's value. fclear (show_games): the filter was "clear" or {}: clear it.
 struct McpGameQuery { char source[8]; int fmt, redump, errors, other, trash; int offset, limit;
-                      char query[MCP_MAX_QUERY + 1]; int expect, expect_ids; uint64_t expect_hash; };
+                      char query[MCP_MAX_QUERY + 1]; int expect, expect_ids; uint64_t expect_hash;
+                      int fgiven, fclear; };
 
 // A game id's hash (64-bit FNV-1a) for empty_trash's expect.
 static inline uint64_t mcp_id_hash(const char *s)
@@ -53,9 +56,9 @@ struct McpHooks {
 	int (*list_games)(const McpGameQuery *q, char *out, int n);
 	int (*get_game)(const char *id, char *out, int n);
 	// tool: check_game, check_games, cancel_check, rename_game, trash_game, restore_game, empty_trash,
-	// carried out by the game list screen as the pad would. id: the game (check_game, rename_game,
+	// show_games, carried out by the game list screen as the pad would. id: the game (check_game, rename_game,
 	// trash_game, restore_game); pattern: rename_game's; q: check_games' and empty_trash's source and
-	// filter, empty_trash's expect. empty_trash is called only when the agent confirmed it (confirm:
+	// filter, empty_trash's expect, show_games' source ("" = keep) and filter (fgiven, fclear). empty_trash is called only when the agent confirmed it (confirm:
 	// true) and named one source (never all).
 	int (*game)(const char *tool, const char *id, const char *pattern, const McpGameQuery *q, char *out, int n);
 };

@@ -3526,8 +3526,8 @@ enum { RQ_FREE, RQ_FILLING, RQ_POSTED, RQ_TAKEN, RQ_DONE, RQ_GONE, RQ_PEEK };
 enum { RK_BUTTON, RK_SCREEN, RK_TAB, RK_ACTION, RK_GAME };
 enum { ACT_RIP, ACT_REPAIR, ACT_CHECK, ACT_CANCEL, ACT_SKIP, ACT_EJECT };
 // The game list's actions (RK_GAME): □ on a game, START, ○ on the check's progress, the rename view's
-// START, △ (to the trash, back), START + yes in the trash.
-enum { GA_CHECK_ONE, GA_CHECK_ALL, GA_CANCEL, GA_RENAME, GA_TRASH, GA_RESTORE, GA_EMPTY };
+// START, △ (to the trash, back), START + yes in the trash; SELECT and the filter panel (show_games).
+enum { GA_CHECK_ONE, GA_CHECK_ALL, GA_CANCEL, GA_RENAME, GA_TRASH, GA_RESTORE, GA_EMPTY, GA_SHOW };
 struct UiReq {
 	int kind;      // RK_*
 	int bits;      // RK_BUTTON: the button (B_*)
@@ -3537,9 +3537,10 @@ struct UiReq {
 	int gact;      // RK_GAME: GA_*
 	char gid[240];     // RK_GAME: the game's id (one game's actions)
 	char gpat[96];     // RK_GAME rename: the pattern
-	char gsrc[8];      // RK_GAME check all ("" = all), empty (always one source): the source
-	GameFilter gf;     // RK_GAME check all: the filter, and whether it asks for the trash
+	char gsrc[8];      // RK_GAME check all ("" = all), empty (always one source), show ("" = the one shown): the source
+	GameFilter gf;     // RK_GAME check all, show: the filter, and whether it asks for the trash
 	int gtrash;
+	int gfgiven, gfclear;    // RK_GAME show: the criteria given (McpGameQuery.fgiven), or clear them all
 	int gexp, gexp_ids;      // RK_GAME empty: the games the agent expects in that trash (-1: not given),
 	uint64_t gexp_hash;      // and with gexp_ids the sum of their ids' mcp_id_hash
 	int seq;       // which request this is (MCP numbers them): the UI takes only the one it looked at
@@ -6380,15 +6381,15 @@ static void games_draw(const GamesView &v)
 // ---- input
 static int gv_filter_active() { return g_games_filter.fmt || g_games_filter.redump || g_games_filter.errors || g_games_filter.other; }
 
-static void gv_set_filter(GamesView &v, const GameFilter &f)
+static void gv_set_filter(GamesView &v, const GameFilter &f, AuditSrc src)
 {
 	if (!memcmp(&f, &g_games_filter, sizeof(f))) return;
 	{
 		CfgLock lock;   // the value and its save together: MCP's set_setting saves on its own thread
 		g_games_filter = f;
-		cfg_save();
+		cfg_save_src(src);
 	}
-	logf("game list filter: %d,%d,%d,%d", f.fmt, f.redump, f.errors, f.other);
+	logf("game list filter: %d,%d,%d,%d%s", f.fmt, f.redump, f.errors, f.other, src == AU_MCP ? " by mcp" : "");
 	gv_refilter(v);
 }
 // The source shown by SELECT, remembered with source src. The caller reads it (gv_switch). (MCP on
@@ -6466,7 +6467,7 @@ static int gv_input(GamesView &v, int p)
 		if (p & B_L1) { GameFilter z = {0, 0, 0, 0}; v.f = z; }
 		if (p & B_CIRCLE) {   // closes and applies
 			v.mode = GV_LIST;
-			gv_set_filter(v, v.f);
+			gv_set_filter(v, v.f, g_input_src);
 			if (v.ftrash != v.trash) { v.trash = v.ftrash; gv_switch(v); }
 		}
 		return 1;
@@ -6487,7 +6488,7 @@ static int gv_input(GamesView &v, int p)
 	}
 	if (p & B_CIRCLE) return 0;
 	if (p & B_R1) { v.mode = GV_FILTER; v.f = g_games_filter; v.ftrash = v.trash; v.frow = 0; return 1; }
-	if ((p & B_L1) && gv_filter_active()) { GameFilter z = {0, 0, 0, 0}; gv_set_filter(v, z); }
+	if ((p & B_L1) && gv_filter_active()) { GameFilter z = {0, 0, 0, 0}; gv_set_filter(v, z, g_input_src); }
 	if (p & B_SELECT) {   // the next source, remembered
 		v.nsrc = gl_sources(v.src, GL_SRCS);
 		int cur = -1;
@@ -8636,7 +8637,7 @@ static int mcp_game(const char *tool, const char *id, const char *pat, const Mcp
 {
 	static const struct { const char *name; int ga; } acts[] = {
 		{"check_game", GA_CHECK_ONE}, {"check_games", GA_CHECK_ALL}, {"cancel_check", GA_CANCEL}, {"rename_game", GA_RENAME},
-		{"trash_game", GA_TRASH}, {"restore_game", GA_RESTORE}, {"empty_trash", GA_EMPTY}};
+		{"trash_game", GA_TRASH}, {"restore_game", GA_RESTORE}, {"empty_trash", GA_EMPTY}, {"show_games", GA_SHOW}};
 	UiReq *r = (UiReq *)calloc(1, sizeof(UiReq));
 	if (!r) { snprintf(out, n, "Out of memory."); return -1; }
 	r->kind = RK_GAME; r->card = -1; r->gact = -1; r->gexp = -1;
@@ -8662,6 +8663,7 @@ static int mcp_game(const char *tool, const char *id, const char *pat, const Mcp
 			r->gf.fmt = q->fmt; r->gf.redump = q->redump; r->gf.errors = q->errors; r->gf.other = q->other;
 			r->gtrash = q->trash;
 			r->gexp = q->expect; r->gexp_ids = q->expect_ids; r->gexp_hash = q->expect_hash;
+			r->gfgiven = q->fgiven; r->gfclear = q->fclear;
 		}
 		rc = ui_call_one(*r, out, n);
 	}
@@ -8671,10 +8673,16 @@ static int mcp_game(const char *tool, const char *id, const char *pat, const Mcp
 
 // ---- on the UI thread: the game list screen takes a game request
 // The scan a request needs: the id's source (All, when the list shows All: it has the game too) and
-// whether the id is in the trash; check_games and empty_trash: their source. 0: none (taken and answered).
+// whether the id is in the trash; check_games and empty_trash: their source; show_games: its source
+// and Show, each left out the one shown. 0: none (taken and answered).
 static int gv_req_scan(const GamesView &v, const UiReq &r, char *key, size_t kn, int *trash)
 {
 	if (r.gact == GA_CANCEL) return 0;
+	if (r.gact == GA_SHOW) {
+		snprintf(key, kn, "%s", r.gsrc[0] ? r.gsrc : v.key);
+		*trash = r.gfgiven & 16 ? r.gtrash : v.trash;
+		return 1;
+	}
 	if (r.gact == GA_CHECK_ALL || r.gact == GA_EMPTY) {
 		snprintf(key, kn, "%s", r.gsrc[0] ? r.gsrc : "all");
 		*trash = r.gact == GA_EMPTY;
@@ -8685,11 +8693,25 @@ static int gv_req_scan(const GamesView &v, const UiReq &r, char *key, size_t kn,
 	*trash = gl_in_trash(strchr(r.gid, ':') + 1);
 	return 1;
 }
+// show_games' filter: the criteria it gives over the list's own, or none ("clear", as L1).
+static GameFilter gv_show_filter(const UiReq &r)
+{
+	GameFilter f = {0, 0, 0, 0};
+	if (r.gfclear) return f;
+	f = g_games_filter;
+	if (r.gfgiven & 1) f.fmt = r.gf.fmt;
+	if (r.gfgiven & 2) f.redump = r.gf.redump;
+	if (r.gfgiven & 4) f.errors = r.gf.errors;
+	if (r.gfgiven & 8) f.other = r.gf.other;
+	return f;
+}
 // A game request waits while the list goes to the source and the games or trash it needs (as SELECT
-// and the filter panel's Show) and while that is read. Only the view switches: SELECT alone remembers
-// a source (games_source), so the list opens on the user's own next time. A source that is not
-// connected cannot be chosen (SELECT offers only the connected ones): refused at once. 1: it waits
-// (not taken yet), or it was refused.
+// and the filter panel's Show) and while that is read. For an action only the view switches: SELECT
+// alone remembers a source (games_source), so the list opens on the user's own next time; show_games
+// is SELECT and the filter panel themselves, so it sets and saves the source and filter as they do
+// (source mcp), at once: when the read takes longer than MCP waits, they stay set. A source that is
+// not connected cannot be chosen (SELECT offers only the connected ones): refused at once, nothing
+// changed. 1: it waits (not taken yet), or it was refused.
 static int gv_mcp_wait(GamesView &v)
 {
 	UiReq r;
@@ -8697,23 +8719,29 @@ static int gv_mcp_wait(GamesView &v)
 	char key[8];
 	int trash = 0;
 	if (!gv_req_scan(v, r, key, sizeof(key), &trash)) return 0;
-	if (strcmp(key, v.key) || trash != v.trash) {
-		if (strcmp(key, v.key)) {
-			v.nsrc = gl_sources(v.src, GL_SRCS);
-			int there = 0;
-			for (int i = 0; i < v.nsrc; i++) there |= !strcmp(v.src[i].key, key);
-			if (!there) {
-				if (ui_req_take(1 << RK_GAME, r.seq)) {
-					char name[64], why[200];
-					gl_key_name(key, v.src, v.nsrc, name, sizeof(name), T_en);
-					snprintf(why, sizeof(why), T_en(STR_GL_GONE), name);
-					snprintf(why + strlen(why), sizeof(why) - strlen(why), "; list_games gives the sources.");
-					ui_req_done(-1, why);
-				}
-				return 1;
+	int show = r.gact == GA_SHOW;
+	if (strcmp(key, v.key) || (show && r.gsrc[0])) {   // (show_games: the source it names must be there, also the one shown)
+		v.nsrc = gl_sources(v.src, GL_SRCS);
+		int there = 0;
+		for (int i = 0; i < v.nsrc; i++) there |= !strcmp(v.src[i].key, key);
+		if (!there) {
+			if (ui_req_take(1 << RK_GAME, r.seq)) {
+				char name[64], why[200];
+				gl_key_name(key, v.src, v.nsrc, name, sizeof(name), T_en);
+				snprintf(why, sizeof(why), T_en(STR_GL_GONE), name);
+				snprintf(why + strlen(why), sizeof(why) - strlen(why), "; list_games gives the sources.");
+				ui_req_done(-1, why);
 			}
-			snprintf(v.key, sizeof(v.key), "%s", key);
+			return 1;
 		}
+	}
+	int sw = strcmp(key, v.key) || trash != v.trash;
+	if (show) {   // as the filter panel's O and SELECT: each saved when it changes
+		gv_set_filter(v, gv_show_filter(r), AU_MCP);
+		if (r.gsrc[0] && strcmp(g_games_source, key)) gv_set_source(v, key, AU_MCP);
+	}
+	if (sw) {
+		snprintf(v.key, sizeof(v.key), "%s", key);
 		v.trash = trash;
 		gv_switch(v);
 		return 1;
@@ -8777,6 +8805,27 @@ static int gv_mcp_do(GamesView &v, const UiReq &r, char *why, size_t wn, char **
 		else if (g_gl.gone) snprintf(why, wn, T_en(STR_GL_GONE), name);
 		else snprintf(why, wn, "The game list is being read: try again in a moment.");
 		return -1;
+	}
+	if (r.gact == GA_SHOW) {   // set on the way (gv_mcp_wait): what the list shows now, as its summary and criteria lines
+		char name[64], sum[300], shown[48], b[1536];
+		int c[GS_VERIFIED + 1];
+		const GameFilter &f = g_games_filter;
+		gl_key_name(v.key, v.src, v.nsrc, name, sizeof(name), T_en);
+		gl_summary(g_gl, T_en, sum, sizeof(sum), c);
+		snprintf(shown, sizeof(shown), T_en(STR_GL_SHOWN), v.nshown, g_gl.ng);
+		Js j = {b, (int)sizeof(b), 0, false};
+		js_put(j, "{\"source\":\"%s\",\"label\":", v.key);
+		js_str(j, name);
+		js_put(j, ",\"trash\":%s,\"filter\":{\"format\":\"%s\",\"redump\":\"%s\",\"errors\":\"%s\",\"other\":\"%s\",\"show\":\"%s\"},\"summary\":{\"text\":",
+		       v.trash ? "true" : "false", MG_F_FORMAT[f.fmt], MG_F_REDUMP[f.redump], MG_F_ERRORS[f.errors], MG_F_OTHER[f.other], v.trash ? "trash" : "games");
+		js_str(j, sum);
+		js_put(j, ",\"games\":%d,\"verified\":%d,\"errors\":%d,\"rerip\":%d,\"broken\":%d},\"shown\":%d,\"shown_text\":",
+		       g_gl.ng, c[GS_VERIFIED], c[GS_ERRORS], c[GS_RERIP], c[GS_BROKEN], v.nshown);
+		js_str(j, shown);
+		js_put(j, "}");
+		logf("game list shown by mcp: %s%s, %s", v.key, v.trash ? " (trash)" : "", shown);
+		*res = strdup(j.over ? "{}" : b);
+		return 0;
 	}
 	if (r.gact == GA_CHECK_ALL) {   // as START, over the rows MCP's filter shows
 		if (r.gtrash) { snprintf(why, wn, "The games in the trash are not checked: restore them first."); return -1; }
