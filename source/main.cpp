@@ -3136,6 +3136,11 @@ struct UiState {
 static UiState g_ui = {SCR_HOME, -1, -1, 0, 0, 0, "", 0, 0, {}, {}};
 static sys_mutex_t g_ui_mx;
 struct UiLock { UiLock() { sysMutexLock(g_ui_mx, 0); } ~UiLock() { sysMutexUnlock(g_ui_mx); } };
+// MCP's answer while the app's own dialog is open: its text and the buttons that answer it.
+static void dlg_open_text(char *out, size_t n, const char *msg, int yesno)
+{
+	snprintf(out, n, "A dialog is open: \"%s\". Answer it with press_button: %s.", msg, yesno ? "cross = yes, circle = no" : "cross = OK");
+}
 static void ui_at(int scr, int row = -1, int card = -1) { UiLock lock; g_ui.scr = scr; g_ui.row = row; g_ui.card = card; }
 static void ui_snapshot(UiState &s) { UiLock lock; s = g_ui; }
 
@@ -3144,7 +3149,9 @@ static void ui_snapshot(UiState &s) { UiLock lock; s = g_ui; }
 // take the pad's buttons, and carry it out the way the pad would. The state after the next frame
 // is the answer.
 #define UI_REQ_MS 5000
-enum { RQ_FREE, RQ_FILLING, RQ_POSTED, RQ_TAKEN, RQ_DONE, RQ_GONE };   // the slot: MCP fills and posts, the UI takes and finishes
+// The slot: MCP fills and posts, the UI takes and finishes. PEEK: the UI reads a posted request; MCP
+// cannot withdraw it meanwhile (only POSTED -> FREE), so the UI never reads one half replaced.
+enum { RQ_FREE, RQ_FILLING, RQ_POSTED, RQ_TAKEN, RQ_DONE, RQ_GONE, RQ_PEEK };
 enum { RK_BUTTON, RK_SCREEN, RK_TAB, RK_ACTION };
 enum { ACT_RIP, ACT_REPAIR, ACT_CHECK, ACT_CANCEL, ACT_SKIP, ACT_EJECT };
 struct UiReq {
@@ -3153,13 +3160,17 @@ struct UiReq {
 	int scr;       // RK_SCREEN: the screen (SCR_*)
 	int card;      // RK_SCREEN drive_settings, RK_TAB, RK_ACTION: the drive's card
 	int act;       // RK_ACTION: ACT_*
+	int seq;       // which request this is (MCP numbers them): the UI takes only the one it looked at
 	int rc;        // the UI's answer: 0 done, else refused with why
 	char why[400];
 };
 static UiReq g_req;
 static volatile int g_req_state = RQ_FREE;
+static int g_req_seq = 0;     // MCP's thread (one call at a time): the last request's number
+static UiReq g_req_seen;      // UI thread: the request ui_req_route last looked at
 static int g_req_flip = 0;    // UI thread: the taken request is done when the next frame is shown
 static int g_req_frame = 0;   // UI thread: a frame was shown since the last pad_pressed (its loop's own call, not an entry's swallow)
+static int g_pad_mcp = 0;     // UI thread: the buttons the last pad_pressed got from MCP alone (no pad pressed them too)
 
 // The UI thread ends the request it took: rc 0 = done (the answer is the state), else refused (why).
 static void ui_req_done(int rc, const char *why)
@@ -3176,11 +3187,25 @@ static void ui_req_frame()
 	if (g_req_flip) { g_req_flip = 0; ui_req_done(0, NULL); }
 	g_req_frame = 1;
 }
-// Takes the posted request when it is one of these kinds (RK_* bits).
-static bool ui_req_take(int kinds)
+// Takes the posted request when it is one of these kinds (RK_* bits) and, with seq >= 0, the request
+// of that number (the one the UI looked at: not a newer one posted after that was withdrawn).
+static bool ui_req_take(int kinds, int seq = -1)
 {
-	if (g_req_state != RQ_POSTED || !((1 << g_req.kind) & kinds)) return false;
-	return __sync_bool_compare_and_swap(&g_req_state, RQ_POSTED, RQ_TAKEN);
+	if (g_req_state != RQ_POSTED || !__sync_bool_compare_and_swap(&g_req_state, RQ_POSTED, RQ_PEEK)) return false;
+	bool ok = ((1 << g_req.kind) & kinds) && (seq < 0 || g_req.seq == seq);
+	__sync_synchronize();
+	g_req_state = ok ? RQ_TAKEN : RQ_POSTED;
+	return ok;
+}
+// A copy of the posted request, read whole (MCP cannot withdraw or replace it meanwhile). It stays
+// posted: what the UI does with it is decided on the copy, and only a take with its seq acts on it.
+static bool ui_req_peek(UiReq &seen)
+{
+	if (g_req_state != RQ_POSTED || !__sync_bool_compare_and_swap(&g_req_state, RQ_POSTED, RQ_PEEK)) return false;
+	seen = g_req;
+	__sync_synchronize();
+	g_req_state = RQ_POSTED;
+	return true;
 }
 // Where a screen opens from (the pad's way): SCR_HOME is the top.
 static int scr_parent(int scr)
@@ -3196,13 +3221,16 @@ enum { RR_NONE = -1, RR_BACK = -2, RR_HERE = -3 };
 // What screen loop `me` (a drive's settings: of card) does with MCP's request this frame: RR_NONE
 // (nothing, or a screen request that ends here: done at the next frame), RR_BACK (leave, as O does),
 // RR_HERE (the home screen: a tab or an action, taken), or the screen to open from here on the way.
+// The request is read once (g_req_seen, also for the caller): a step on the way is a move the pad
+// could make; the request is acted on and answered only once it is taken by its seq.
 static int ui_req_route(int me, int card)
 {
-	if (g_req_state != RQ_POSTED || g_req.kind == RK_BUTTON) return RR_NONE;
-	int t = g_req.kind == RK_SCREEN ? g_req.scr : SCR_HOME;
-	if (t == me && (t != SCR_DRIVE_SETTINGS || g_req.card == card)) {
-		if (!ui_req_take(1 << g_req.kind)) return RR_NONE;
-		if (g_req.kind == RK_SCREEN) { g_req_flip = 1; return RR_NONE; }
+	UiReq &r = g_req_seen;
+	if (!ui_req_peek(r) || r.kind == RK_BUTTON) return RR_NONE;
+	int t = r.kind == RK_SCREEN ? r.scr : SCR_HOME;
+	if (t == me && (t != SCR_DRIVE_SETTINGS || r.card == card)) {
+		if (!ui_req_take(1 << r.kind, r.seq)) return RR_NONE;
+		if (r.kind == RK_SCREEN) { g_req_flip = 1; return RR_NONE; }
 		return RR_HERE;
 	}
 	for (int s = t; s >= 0; s = scr_parent(s)) if (scr_parent(s) == me) return s;
@@ -3269,6 +3297,7 @@ static int pad_pressed()
 	int mcp = 0;   // MCP's press_button: only in a loop's own call after its frame (an entry's swallow would lose it)
 	if (g_req_frame && ui_req_take(1 << RK_BUTTON)) { mcp = g_req.bits; g_req_flip = 1; }
 	g_req_frame = 0;
+	g_pad_mcp = mcp & ~((now & ~last) | remote);
 	int pressed = (now & ~last) | remote | mcp;   // and the web page's pad, and MCP's
 	if (pressed) g_input_src = mcp ? AU_MCP : remote ? AU_REMOTE : AU_PAD;
 	// auto-repeat a single held arrow: first after ~0.4 s, then every ~0.1 s (called once per frame)
@@ -4611,58 +4640,60 @@ static void remote_control_screen()
 // drive can have its own values, SELECT on its card), Redump, the Redump copy, remote control, webhooks.
 // One frame of the settings (START): the rows with their values and the buttons of the focused
 // row. (The UI tests on the host draw it.)
+// The settings' rows, top to bottom (settings_draw, its X handlers and MCP's way to a screen).
+enum { SR_SPEED, SR_RETRIES, SR_CHECK, SR_EJECT, SR_AUTOSTART, SR_FILENAME, SR_REDUMP, SR_RDCOPY, SR_REMOTE, SR_WEBHOOK, SR_AUDIT,
+       SR_AUDIT_MB, SR_ABOUT, SR_COUNT };
 static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, int webhook_on, int rdcount, const char *rdver, time_t rdwhen)
 {
-	const int NROWS = 13;
 	draw_backdrop();
-	char vals[13][96];
-	fn_label(g_name_pat, vals[5], sizeof(vals[5]));
-	fmt_speed(sd.speed, vals[0], sizeof(vals[0]));
-	fmt_int(sd.retries, vals[1], sizeof(vals[1]));
-	fmt_check(sd.check, vals[2], sizeof(vals[2]));
-	fmt_onoff(sd.eject, vals[3], sizeof(vals[3]));
-	fmt_onoff(sd.autostart, vals[4], sizeof(vals[4]));
-	opt_text(OPTS(o_redump), redump, vals[6], sizeof(vals[6]));
+	char vals[SR_COUNT][96];
+	fn_label(g_name_pat, vals[SR_FILENAME], sizeof(vals[0]));
+	fmt_speed(sd.speed, vals[SR_SPEED], sizeof(vals[0]));
+	fmt_int(sd.retries, vals[SR_RETRIES], sizeof(vals[0]));
+	fmt_check(sd.check, vals[SR_CHECK], sizeof(vals[0]));
+	fmt_onoff(sd.eject, vals[SR_EJECT], sizeof(vals[0]));
+	fmt_onoff(sd.autostart, vals[SR_AUTOSTART], sizeof(vals[0]));
+	opt_text(OPTS(o_redump), redump, vals[SR_REDUMP], sizeof(vals[0]));
 	if (rdcount > 0) {
 		// Redump's version (date) and when this copy was downloaded (date and time)
 		char date[16], ver[24], when[32];
 		snprintf(date, sizeof(date), "%.10s", rdver);
 		fmt_rd_version(date, ver, sizeof(ver));
 		fmt_local(rdwhen, when, sizeof(when));
-		snprintf(vals[7], sizeof(vals[7]), T(STR_RD_COPY_VALUE), ver, when);
+		snprintf(vals[SR_RDCOPY], sizeof(vals[0]), T(STR_RD_COPY_VALUE), ver, when);
 	} else {
-		snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_RD_MISSING));
+		snprintf(vals[SR_RDCOPY], sizeof(vals[0]), "%s", T(STR_RD_MISSING));
 	}
 	char ip[20];
 	remote_ip(ip, sizeof(ip));
-	if (remote) snprintf(vals[8], sizeof(vals[8]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
-	else snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
-	if (!webhook_on) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_OFF));
-	else if (!g_webhook[0]) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_WEBHOOK_NOURL));
+	if (remote) snprintf(vals[SR_REMOTE], sizeof(vals[0]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
+	else snprintf(vals[SR_REMOTE], sizeof(vals[0]), "%s", T(STR_OFF));
+	if (!webhook_on) snprintf(vals[SR_WEBHOOK], sizeof(vals[0]), "%s", T(STR_OFF));
+	else if (!g_webhook[0]) snprintf(vals[SR_WEBHOOK], sizeof(vals[0]), "%s", T(STR_WEBHOOK_NOURL));
 	else {
 		char host[96];
 		webhook_host(g_webhook, host, sizeof(host));
 		int ne = 0;
 		for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
-		snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
+		snprintf(vals[SR_WEBHOOK], sizeof(vals[0]), T(STR_WEBHOOK_ON_N), host, ne);
 	}
-	vals[10][0] = 0;   // the audit log: X opens it
-	opt_text(OPTS(o_audit_mb), g_audit_mb, vals[11], sizeof(vals[11]));
-	snprintf(vals[12], sizeof(vals[12]), "v%s", APP_VERSION);
-	const char *labels[13] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
+	vals[SR_AUDIT][0] = 0;   // the audit log: X opens it
+	opt_text(OPTS(o_audit_mb), g_audit_mb, vals[SR_AUDIT_MB], sizeof(vals[0]));
+	snprintf(vals[SR_ABOUT], sizeof(vals[0]), "v%s", APP_VERSION);
+	const char *labels[SR_COUNT] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
 	                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_AUDIT), T(STR_L_AUDIT_MB), T(STR_L_ABOUT)};
-	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 8 | 1u << 10 | 1u << 12);   // the Redump download, remote control, the audit log and About are actions
-	if (row == 8 || row == 10 || row == 12) {   // remote control, the audit log and About: X opens them
+	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, SR_COUNT, row, 1u << SR_RDCOPY | 1u << SR_REMOTE | 1u << SR_AUDIT | 1u << SR_ABOUT);   // the Redump download, remote control, the audit log and About are actions
+	if (row == SR_REMOTE || row == SR_AUDIT || row == SR_ABOUT) {   // remote control, the audit log and About: X opens them
 		const char *b[] = {"updown", "l2r2", "cross", "circle"};
 		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_OPEN), T(STR_HINT_BACK)};
 		hint_bar(b, l, 4);
-	} else if (row == 9 || row == 5) {   // webhooks and the file name: X opens their own view
+	} else if (row == SR_WEBHOOK || row == SR_FILENAME) {   // webhooks and the file name: X opens their own view
 		const char *b[] = {"updown", "l2r2", "leftright", "cross", "triangle", "circle"};
-		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_CHANGE), T(row == 5 ? STR_HINT_EDIT : STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_CHANGE), T(row == SR_FILENAME ? STR_HINT_EDIT : STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 		hint_bar(b, l, 6);
 	} else {
-		const char *b[] = {"updown", "l2r2", row == 7 ? "cross" : "leftright", "triangle", "circle"};
-		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), row == 7 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+		const char *b[] = {"updown", "l2r2", row == SR_RDCOPY ? "cross" : "leftright", "triangle", "circle"};
+		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), row == SR_RDCOPY ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 		hint_bar(b, l, 5);
 	}
 }
@@ -4671,7 +4702,7 @@ static void settings_screen()
 {
 	// the values shown are the settings themselves (no copies): a change over MCP shows at once
 	int row = 0;
-	const int NROWS = 13;   // the last row opens About
+	const int NROWS = SR_COUNT;   // the last row opens About
 	char rdver[64] = "";
 	time_t rdwhen = 0;
 	int rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
@@ -4688,48 +4719,48 @@ static void settings_screen()
 		int p = pad_pressed();
 		switch (ui_req_route(SCR_SETTINGS, -1)) {   // MCP goes elsewhere: back as O, or to a row and in as X
 		case RR_BACK: p = B_CIRCLE; break;
-		case SCR_FILENAME: row = 5; p = B_CROSS; break;
-		case SCR_REMOTE_CONTROL: row = 8; p = B_CROSS; break;
-		case SCR_WEBHOOKS: row = 9; p = B_CROSS; break;
-		case SCR_AUDIT_LOG: row = 10; p = B_CROSS; break;
-		case SCR_ABOUT: row = 12; p = B_CROSS; break;
+		case SCR_FILENAME: row = SR_FILENAME; p = B_CROSS; break;
+		case SCR_REMOTE_CONTROL: row = SR_REMOTE; p = B_CROSS; break;
+		case SCR_WEBHOOKS: row = SR_WEBHOOK; p = B_CROSS; break;
+		case SCR_AUDIT_LOG: row = SR_AUDIT; p = B_CROSS; break;
+		case SCR_ABOUT: row = SR_ABOUT; p = B_CROSS; break;
 		}
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
 		if (p & B_R2) row = row + 9 < NROWS ? row + 9 : NROWS - 1;   // a page down / up (9 rows show)
 		if (p & B_L2) row = row >= 9 ? row - 9 : 0;
-		if ((p & B_CROSS) && row == 5) {
+		if ((p & B_CROSS) && row == SR_FILENAME) {
 			filename_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 12) {
+		if ((p & B_CROSS) && row == SR_ABOUT) {
 			about_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 10) {
+		if ((p & B_CROSS) && row == SR_AUDIT) {
 			audit_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 8) {
+		if ((p & B_CROSS) && row == SR_REMOTE) {
 			remote_control_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 9) {
+		if ((p & B_CROSS) && row == SR_WEBHOOK) {
 			webhook_settings_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 7) {
+		if ((p & B_CROSS) && row == SR_RDCOPY) {
 			redump_download_screen();
 			rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
 			pad_pressed();
@@ -4737,7 +4768,7 @@ static void settings_screen()
 			continue;
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (row == 7 || row == 8 || row == 10 || row == 12) d = 0;
+		if (row == SR_RDCOPY || row == SR_REMOTE || row == SR_AUDIT || row == SR_ABOUT) d = 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) {
 			reset = own_dialog(T(STR_RESET_Q), 1) == 1;
@@ -4757,23 +4788,23 @@ static void settings_screen()
 				remote_apply();
 				g_webhook_on = 0; g_webhook_step = 5;
 				g_audit_mb = 256;
-			} else if (row == 0) {   // right = faster (2x, 4x, 8x, max), no wrap-around
+			} else if (row == SR_SPEED) {   // right = faster (2x, 4x, 8x, max), no wrap-around
 				sd.speed = opt_clamp(OPTS(o_speed), sd.speed, d);
-			} else if (row == 1) {
+			} else if (row == SR_RETRIES) {
 				sd.retries = opt_wrap(OPTS(o_retries), sd.retries, d);
-			} else if (row == 2) {
+			} else if (row == SR_CHECK) {
 				sd.check = opt_wrap(OPTS(o_check), sd.check, d);
-			} else if (row == 3) {
+			} else if (row == SR_EJECT) {
 				sd.eject = opt_wrap(OPTS(o_onoff), sd.eject, d);
-			} else if (row == 4) {
+			} else if (row == SR_AUTOSTART) {
 				sd.autostart = opt_wrap(OPTS(o_onoff), sd.autostart, d);
-			} else if (row == 5) {   // the ready-made patterns, and the own one
+			} else if (row == SR_FILENAME) {   // the ready-made patterns, and the own one
 				fn_step(d);
-			} else if (row == 6) {
+			} else if (row == SR_REDUMP) {
 				g_redump = opt_wrap(OPTS(o_redump), g_redump, d);
-			} else if (row == 9) {
+			} else if (row == SR_WEBHOOK) {
 				g_webhook_on = opt_wrap(OPTS(o_onoff), g_webhook_on, d);
-			} else if (row == 11) {   // right = more; no wrap-around: 256 to 1 MB would drop the kept sectors
+			} else if (row == SR_AUDIT_MB) {   // right = more; no wrap-around: 256 to 1 MB would drop the kept sectors
 				g_audit_mb = opt_clamp(OPTS(o_audit_mb), g_audit_mb, d);
 			}
 			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
@@ -4790,7 +4821,7 @@ static void settings_screen()
 // rip, rip a disc at once. Each is "standard" (Settings) unless set here for this drive. Saved per
 // drive: the PS3's as drive_bd=, a USB drive by its port as drive_usbN=.
 enum { CF_OUTDIR = 1, CF_DRIVE = 2 };   // what a card takes from the config (Card::pend_cfg)
-static void card_take_drive_now(int c);
+static void card_take_cfg(int c, int what, bool busy_too = false);
 static void drive_settings_screen(int c)
 {
 	Card &k = g_cards[c];
@@ -4799,7 +4830,7 @@ static void drive_settings_screen(int c)
 	pad_pressed();
 	g_redraw = 2;
 	while (!exit_requested) {
-		if (k.pend_cfg & CF_DRIVE) { CfgLock lock; card_take_drive_now(c); g_redraw = 2; }   // changed over MCP or by an undo: show it
+		if (k.pend_cfg & CF_DRIVE) { CfgLock lock; card_take_cfg(c, k.pend_cfg & CF_DRIVE, true); g_redraw = 2; }   // changed over MCP or by an undo: show it
 		if (g_redraw > 0) {
 			g_redraw = 0;
 			g_drawn = 2;
@@ -4830,7 +4861,7 @@ static void drive_settings_screen(int c)
 		if (!d && !(p & B_TRIANGLE)) { if (p & B_CIRCLE) return; continue; }
 		int reset = 0;
 		CfgLock lock;
-		card_take_drive_now(c);   // a value MCP saved since the frame: changed on top of it, never overwritten
+		card_take_cfg(c, k.pend_cfg & CF_DRIVE, true);   // a value MCP saved since the frame: changed on top of it, never overwritten
 		if (p & B_TRIANGLE) { card_defaults(k); reset = 1; }   // all back to the standard
 		if (d) {
 			if (row == 0) k.speed = opt_std(OPTS(o_speed), k.speed, d);   // right = faster
@@ -4922,31 +4953,24 @@ static void card_set_outdir(int c, const char *dir)
 	logf("card %d: destination %s", c, dir);
 }
 
-// Card c takes its destination (CF_OUTDIR) and drive settings (CF_DRIVE) from the config. A card
-// with a job keeps them until the job ends, as the screens do (they apply to the next job).
-static void card_take_cfg(int c, int what)
+// Card c takes its destination (CF_OUTDIR) and drive settings (CF_DRIVE; unset: all standard) from
+// the config. Held under the config lock. A card with a job keeps them until the job ends, as the
+// screens do (they apply to the next job); busy_too takes them anyway: the drive's settings screen
+// changes the card's own values on top of what was saved meanwhile (MCP, an undo), also while a job
+// runs (the job took its values when it started).
+static void card_take_cfg(int c, int what, bool busy_too)
 {
 	Card &k = g_cards[c];
-	if (card_busy(c)) { k.pend_cfg |= what; k.recheck = 1; return; }
-	k.pend_cfg &= ~what;
+	if (!what) return;
+	if (!busy_too && card_busy(c)) { __sync_fetch_and_or(&k.pend_cfg, what); k.recheck = 1; return; }
+	__sync_fetch_and_and(&k.pend_cfg, ~what);
 	int port = c ? usbodd_port(c - 1) : 0;
 	if (c && (port < 0 || port > 7)) return;
-	if (what & CF_DRIVE) card_from(k, c ? g_usbcfg[port] : g_bdcfg);
-	if (what & CF_OUTDIR) card_apply_outdir(c, !c ? g_outdir : g_outdir_usb[port][0] ? g_outdir_usb[port] : HDD_DIR);
-}
-
-// The drive's settings screen changes card c's own values: first the ones saved meanwhile (MCP, an
-// undo), also while a job runs (the job took its values when it started). Holds the config lock.
-static void card_take_drive_now(int c)
-{
-	Card &k = g_cards[c];
-	if (!(k.pend_cfg & CF_DRIVE)) return;
-	int port = c ? usbodd_port(c - 1) : 0;
-	if (!c || (port >= 0 && port < 8)) {
+	if (what & CF_DRIVE) {
 		const DriveCfg &d = c ? g_usbcfg[port] : g_bdcfg;
 		if (d.set) card_from(k, d); else card_defaults(k);
 	}
-	__sync_fetch_and_and(&k.pend_cfg, ~CF_DRIVE);
+	if (what & CF_OUTDIR) card_apply_outdir(c, !c ? g_outdir : g_outdir_usb[port][0] ? g_outdir_usb[port] : HDD_DIR);
 }
 // Card c takes what changed in the config while it was busy or since MCP changed it (the UI thread:
 // each frame, and right before a job starts or the drive's settings change).
@@ -5476,11 +5500,13 @@ static int can_cancel(int c, Tr tr, char *why, size_t n)
 {
 	return g_cards[c].job ? CAN_OK : can_say(CAN_NOT, tr, STR_CAN_NO_JOB, why, n);
 }
-static void do_cancel(int c, AuditSrc src)
+// asked: the pad's question was answered yes (by the pad, or by MCP's press_button); else MCP's
+// cancel tool, where the call is the confirmation.
+static void do_cancel(int c, AuditSrc src, int asked)
 {
 	OnCard o(c);
 	g_abort = 1;
-	logf("cancel on card %d (%s)", c, src == AU_MCP ? "mcp: the call is the confirmation" : "confirmed");
+	logf("cancel on card %d: %s", c, !asked ? "mcp, the call is the confirmation" : src == AU_MCP ? "confirmed (mcp)" : "confirmed");
 }
 static int can_skip_rereads(int c, Tr tr, char *why, size_t n)
 {
@@ -5516,7 +5542,7 @@ static int mcp_action(int act, int c, char *why, size_t n)
 	case ACT_RIP: if (!(r = can_rip(c, T_en, why, n))) do_rip(c, AU_MCP); break;
 	case ACT_CHECK: if (!(r = can_check(c, T_en, why, n))) do_check(c, AU_MCP); break;
 	case ACT_REPAIR: if (!(r = can_repair(c, T_en, why, n))) do_repair(c, AU_MCP); break;
-	case ACT_CANCEL: if (!(r = can_cancel(c, T_en, why, n))) do_cancel(c, AU_MCP); break;
+	case ACT_CANCEL: if (!(r = can_cancel(c, T_en, why, n))) do_cancel(c, AU_MCP, 0); break;
 	case ACT_SKIP: if (!(r = can_skip_rereads(c, T_en, why, n))) do_skip_rereads(c, AU_MCP); break;
 	case ACT_EJECT: if (!(r = can_eject(c, T_en, why, n))) do_eject(c, AU_MCP); break;
 	}
@@ -5687,7 +5713,8 @@ static int home_screen()
 		flip_frame();
 		{   // MCP's request: a screen from here, a tab, an action on a drive (its tab is shown)
 			int rr = ui_req_route(SCR_HOME, -1);
-			int rc = rr == SCR_DRIVE_SETTINGS || rr == RR_HERE ? g_req.card : -1, there = 0;
+			const UiReq &q = g_req_seen;   // the request route read (taken when rr is RR_HERE)
+			int rc = rr == SCR_DRIVE_SETTINGS || rr == RR_HERE ? q.card : -1, there = 0;
 			for (int i = 0; i < nc; i++) there |= list[i] == rc;
 			if (rr == SCR_SETTINGS) {   // as START
 				settings_screen();
@@ -5697,7 +5724,7 @@ static int home_screen()
 			}
 			if (rr == SCR_DRIVE_SETTINGS) {   // as SELECT on its tab; not while a job runs there (the pad cannot either)
 				if (!there || g_cards[rc].job) {
-					if (ui_req_take(1 << RK_SCREEN)) ui_req_done(-1, there ? T_en(STR_CAN_SETTINGS_BUSY) : "That drive is not there any more.");
+					if (ui_req_take(1 << RK_SCREEN, q.seq)) ui_req_done(-1, there ? T_en(STR_CAN_SETTINGS_BUSY) : "That drive is not there any more.");
 					continue;
 				}
 				sel = rc;
@@ -5713,8 +5740,8 @@ static int home_screen()
 				else {
 					sel = rc;
 					g_redraw = 2;
-					if (g_req.kind == RK_TAB) g_req_flip = 1;
-					else if (mcp_action(g_req.act, rc, why, sizeof(why))) ui_req_done(-1, why);
+					if (q.kind == RK_TAB) g_req_flip = 1;
+					else if (mcp_action(q.act, rc, why, sizeof(why))) ui_req_done(-1, why);
 					else g_req_flip = 1;
 				}
 				continue;
@@ -5739,7 +5766,7 @@ static int home_screen()
 			if (p & B_CIRCLE) {
 				char m[300];
 				snprintf(m, sizeof(m), T(STR_CANCEL_RIP_Q), f.title);
-				if (own_dialog(m, 1) == 1 && !can_cancel(sel, T, why, sizeof(why))) do_cancel(sel, g_input_src);
+				if (own_dialog(m, 1) == 1 && !can_cancel(sel, T, why, sizeof(why))) do_cancel(sel, g_input_src, 1);
 				pad_pressed();
 				g_redraw = 2;
 				continue;
@@ -5787,7 +5814,14 @@ static int home_screen()
 			for (int i = 0; i < NCARDS; i++) g_cards[i].recheck = 1;   // destinations may have been reset
 			g_redraw = 2;
 		}
-		if ((p & B_CIRCLE) && !jobs) return 0;   // exit only when nothing rips (a ripping tab's O cancels its rip)
+		if ((p & B_CIRCLE) && !jobs) {   // exit only when nothing rips (a ripping tab's O cancels its rip)
+			if (g_pad_mcp & B_CIRCLE) {   // not over MCP: the app, and MCP with it, could not be started again from afar
+				g_req_flip = 0;
+				ui_req_done(-1, T_en(STR_CAN_NO_EXIT));
+				continue;
+			}
+			return 0;
+		}
 	}
 	return 0;
 }
@@ -6196,7 +6230,7 @@ static void ui_busy_text(const char *what, char *out, int n)
 	UiState u;
 	ui_snapshot(u);
 	int scr = u.scr >= 0 && u.scr < (int)(sizeof(SCR_NAMES) / sizeof(SCR_NAMES[0])) ? u.scr : SCR_HOME;
-	snprintf(out, n, "Busy: %s within %d s (the screen: %s%s). A long operation or a system dialog may be in the way: "
+	snprintf(out, n, "Busy: %s within %d s (the screen: %s%s). A long operation or the console's own menu may be in the way (the app's dialogs and the on-screen keyboard are answered at once): "
 	         "look at get_state or get_screenshot and try again.", what, UI_REQ_MS / 1000, u.dlg_open ? "dialog" : SCR_NAMES[scr],
 	         u.osk ? ", the on-screen keyboard is open" : "");
 }
@@ -6210,7 +6244,7 @@ static int ui_call(const UiReq &r, uint64_t end, char *out, int n)
 			return -1;
 		}
 		if (u.dlg_open && r.kind != RK_BUTTON) {
-			snprintf(out, n, "A dialog is open: \"%s\". Answer it with press_button: %s.", u.dlg_text, u.dlg_q ? "cross = yes, circle = no" : "cross = OK");
+			dlg_open_text(out, n, u.dlg_text, u.dlg_q);
 			utf8_fix(out);
 			return -1;
 		}
@@ -6220,6 +6254,7 @@ static int ui_call(const UiReq &r, uint64_t end, char *out, int n)
 		usleep(5000);
 	}
 	g_req = r;
+	g_req.seq = g_req_seq = (g_req_seq + 1) & 0x7FFFFFFF;
 	__sync_synchronize();
 	g_req_state = RQ_POSTED;
 	while (g_req_state != RQ_DONE) {
@@ -6229,6 +6264,7 @@ static int ui_call(const UiReq &r, uint64_t end, char *out, int n)
 			snprintf(out, n, "The app took the request but did not finish it within %d s: get_state shows where it is now.", UI_REQ_MS / 1000);
 			return -1;
 		}
+		usleep(1000);   // the UI is reading it (RQ_PEEK): it is posted again in a moment
 	}
 	__sync_synchronize();
 	int rc;
@@ -6574,7 +6610,7 @@ static int setting_apply(const SettingDef &d, int card, const char *value, const
 			if (!strcmp(t, value)) { ok = 1; v = d.opts[i].v; }
 		}
 		if (!ok) {   // the current value, also one outside the list (from the config file): set back as it is
-			CfgLock lock;
+			CfgLock lock;   // the caller (mcp_set_setting) holds it already; the mutex is recursive, so this only keeps the read safe on its own
 			int cur = setting_int(d, card);
 			char t[16];
 			snprintf(t, sizeof(t), "%d", cur);
@@ -7743,7 +7779,7 @@ static int own_dialog(const char *msg, int yesno)
 		int p = pad_pressed();
 		if (g_req_state == RQ_POSTED) {   // only a button answers it (MCP never goes around a question)
 			char why[600];
-			snprintf(why, sizeof(why), "A dialog is open: \"%s\". Answer it with press_button: %s.", msg, yesno ? "cross = yes, circle = no" : "cross = OK");
+			dlg_open_text(why, sizeof(why), msg, yesno);
 			ui_req_refuse(why);
 		}
 		if (p & B_CROSS) { a = 1; break; }

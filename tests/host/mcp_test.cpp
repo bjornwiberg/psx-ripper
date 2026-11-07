@@ -147,6 +147,14 @@ static void tools_list(int &bad)
 	// the descriptions steer agents to the action tools first; press_button and go_* are the fallback
 	CHECK(has("{\"name\":\"press_button\",\"description\":\"Fallback:"));
 	CHECK(has("only to answer a dialog"));
+	CHECK(has("circle on the home screen is refused"));   // it would exit the app, and MCP with it
+	{   // rip replaces an earlier rip at the drive's destination without asking, as the pad's X does
+		const char *d = strstr(g_out, "{\"name\":\"rip\",\"description\":\"");
+		const char *end = d ? strstr(d, "\",\"inputSchema\"") : NULL;
+		bool says = d && end && std::string(d, end - d).find("replaces an existing rip at the drive's destination without asking") != std::string::npos;
+		if (!says) printf("  rip does not say it replaces an existing rip\n");
+		CHECK(says);
+	}
 	for (const char *a : {"rip", "repair", "check", "cancel", "skip_rereads", "eject"}) {
 		char want[64];
 		snprintf(want, sizeof(want), "{\"name\":\"%s\",\"description\":\"", a);

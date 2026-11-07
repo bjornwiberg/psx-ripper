@@ -1017,7 +1017,8 @@ static void mcp_settings_scenarios()
 // The app's UI runs on a thread of its own here (home_screen, as on the console) and this thread is
 // MCP's: it calls the hooks as the web server does. Each frame runs what the test hands the UI
 // thread (on_ui) and takes the pad presses (g_remote_btn, as the remote view's pad).
-static volatile int g_bg_quit, g_bg_frames, g_bg_job_set;
+static volatile int g_bg_quit, g_bg_frames, g_bg_job_set, g_bg_returns;   // g_bg_returns: home_screen returned (the app would exit)
+static const char *volatile g_bg_tell;   // a message the UI thread shows with tell() in its next frame
 static std::function<void()> g_bg_job;
 static pthread_t g_bg_t;
 static void bg_frame()
@@ -1025,6 +1026,7 @@ static void bg_frame()
 	usleep(1000);
 	g_boxes.clear();
 	if (g_bg_job_set) { g_bg_job(); __sync_synchronize(); g_bg_job_set = 0; }
+	if (g_bg_tell) { const char *m = g_bg_tell; g_bg_tell = NULL; tell(m); }   // its own frames run inside this one
 	if (g_bg_quit) __sync_fetch_and_or(&g_remote_btn, B_CIRCLE);
 	__sync_fetch_and_add(&g_bg_frames, 1);
 }
@@ -1049,7 +1051,7 @@ static void bg_start()
 	color_buffer[0] = color_buffer[1] = fb;
 	g_bg_quit = 0;
 	host_frame = bg_frame;
-	pthread_create(&g_bg_t, NULL, [](void *) -> void * { while (!g_bg_quit) home_screen(); return NULL; }, NULL);
+	pthread_create(&g_bg_t, NULL, [](void *) -> void * { while (!g_bg_quit) { home_screen(); __sync_fetch_and_add(&g_bg_returns, 1); } return NULL; }, NULL);
 	bg_frames(3);
 }
 static void bg_stop()
@@ -1111,6 +1113,34 @@ static void mcp_ui_scenarios()
 		rc = call("go_tab", "internal");
 		need(rc == 0 && has("\"tab\":\"internal\""), "go_tab internal", O);
 	}
+	// press_button circle on the home screen would exit the app (and MCP with it): refused at once;
+	// the remote view's pad still exits as before
+	{
+		int r0 = g_bg_returns;
+		uint64_t t0 = now_ms();
+		int rc = call("press_button", "circle");
+		need(rc != 0 && has("Circle on the home screen exits the app; MCP does not exit it. Use the controller.") && now_ms() - t0 < 1000,
+		     "press_button circle on the home screen is refused at once", O);
+		bg_frames(4);
+		need(g_bg_returns == r0, "press_button circle: home_screen does not return");
+		rc = call("go_tab", "usb0");
+		need(rc == 0 && has("\"screen\":\"home\"") && has("\"tab\":\"usb0\""), "the home screen still takes requests after the refusal", O);
+		pad(B_CIRCLE);
+		need(g_bg_returns == r0 + 1, "the remote view's pad circle on the home screen still exits");
+		rc = call("go_tab", "internal");
+		need(rc == 0 && has("\"tab\":\"internal\""), "home again after the remote pad's exit", O);
+	}
+	// tell() and ask_yesno() are the app's own dialog: MCP answers at once and names its text
+	{
+		g_bg_tell = "A test message from tell.";
+		bg_frames(4);
+		uint64_t t0 = now_ms();
+		int rc = call("go_screen", "settings");
+		need(rc != 0 && has("A dialog is open: \"A test message from tell.\"") && has("cross = OK") && now_ms() - t0 < 1000,
+		     "tell's dialog: go_screen is refused at once with its text", O);
+		rc = call("press_button", "cross");
+		need(rc == 0 && has("\"screen\":\"home\"") && has("\"dialog\":null"), "press_button cross closes tell's dialog", O);
+	}
 	// go_screen: any screen from any screen, the way the pad goes (back, then in)
 	{
 		int rc = call("go_screen", "settings");
@@ -1166,7 +1196,7 @@ static void mcp_ui_scenarios()
 		rc = call("rip", "usb0");
 		need(rc != 0 && job_rows("rip", AU_MCP) == 1, "rip on a ripping drive is refused", O);
 		rc = call("go_screen", "drive_settings:usb0");
-		need(rc != 0 && has("\"screen\"") == false, "a ripping drive's settings do not open", O);
+		need(rc != 0 && has("\"screen\"") == false && has("A job runs on this drive: its settings can be opened when it has ended."), "a ripping drive's settings do not open", O);
 		rc = call("skip_rereads", "usb0");
 		need(rc != 0 && has("not re-reading"), "skip_rereads while not re-reading is refused", O);
 		on_ui([]() { OnCard oc(1); g_phase = 1; });
@@ -1175,11 +1205,20 @@ static void mcp_ui_scenarios()
 		rc = call("cancel", "usb0");
 		need(rc == 0 && has("\"screen\":\"home\"") && cx_of(1, 1) == 1, "cancel: the call is the confirmation (no dialog)", O);
 		need(read_file(LOG_PATH).find("cancel") != std::string::npos, "the cancel is logged");
+		// the pad's cancel question answered over MCP: the log says it was confirmed, by mcp
+		on_ui([]() { OnCard oc(1); g_abort = 0; });
+		call("go_tab", "usb0");
+		rc = call("press_button", "circle");
+		need(rc == 0 && has("\"screen\":\"dialog\"") && has("\"question\":true"), "press_button circle on a ripping tab asks to cancel", O);
+		rc = call("press_button", "cross");
+		need(rc == 0 && has("\"dialog\":null") && cx_of(1, 1) == 1, "press_button cross confirms the cancel", O);
+		need(read_file(LOG_PATH).find("cancel on card 1: confirmed (mcp)") != std::string::npos, "the cancel answered over MCP logs: confirmed (mcp)");
+		need(read_file(LOG_PATH).find("cancel on card 1: mcp, the call is the confirmation") != std::string::npos, "the cancel tool logs: the call is the confirmation");
 		on_ui([]() { g_cards[1].job = 0; OnCard oc(1); g_abort = 0; g_skip = 0; g_phase = 0; });
 		rc = call("cancel", "usb0");
 		need(rc != 0 && has("Nothing runs"), "cancel with nothing running is refused", O);
 		rc = call("check", "usb2");
-		need(rc != 0, "check on an empty drive is refused", O);
+		need(rc != 0 && has("no disc"), "check on an empty drive is refused: no disc", O);
 		on_ui([]() { ripped(0, -1, 0); });
 		rc = call("check", "internal");
 		need(rc == 0 && has("\"tab\":\"internal\"") && job_rows("check", AU_MCP) == 1, "check internal starts a check (source mcp)", O);
@@ -1192,6 +1231,45 @@ static void mcp_ui_scenarios()
 		call("go_tab", "internal");
 		pad(B_CROSS);
 		need(job_rows("rip", AU_REMOTE) == 1, "the pad's X rips through the same check");
+	}
+	// a press posted while a screen opens (between a loop's own pad_pressed and the new screen's entry
+	// swallow) reaches the new screen's loop: the pad's X on a disc while another drive rips opens
+	// "one at a time" (own_dialog swallows the pad on entry); MCP's cross is posted on the way there
+	{
+		static volatile int posted, hooked;
+		static int btn_rc;
+		static std::string btn_out;
+		static pthread_t bt;
+		posted = hooked = 0; btn_rc = -9; btn_out.clear();
+		on_ui([]() { g_cards[0].prev_rip = 0; g_cards[0].exist[0] = 0; g_cards[0].state = DISC_READY; g_cards[1].job = 1; OnCard oc(1); g_state = ST_RIPPING; });
+		g_parallel = 0;
+		call("go_tab", "internal");
+		on_ui([]() {
+			host_io = []() {   // in can_rip (the space check), after home's pad_pressed took X
+				if (hooked) return;
+				hooked = 1;
+				pthread_create(&bt, NULL, [](void *) -> void * {
+					std::vector<char> b(MCP_MAX_RESPONSE);
+					btn_rc = g_mcp_hooks.ui("press_button", "cross", b.data(), (int)b.size());
+					btn_out = b.data();
+					return NULL;
+				}, NULL);
+				uint64_t t0 = now_ms();
+				while (g_req_state != RQ_POSTED && now_ms() - t0 < 2000) usleep(500);
+				posted = g_req_state == RQ_POSTED;
+			};
+			__sync_fetch_and_or(&g_remote_btn, B_CROSS);
+		});
+		bg_frames(4);
+		if (hooked) pthread_join(bt, NULL);
+		host_io = NULL;
+		bg_frames(4);
+		UiState u;
+		ui_snapshot(u);
+		need(hooked && posted, "the press was posted while the dialog opened");
+		need(btn_rc == 0 && btn_out.find("\"dialog\":null") != std::string::npos && !u.dlg_open,
+		     "a press posted while a screen opens reaches the new screen's loop (not its entry swallow)", btn_out.c_str());
+		on_ui([]() { g_cards[1].job = 0; OnCard oc(1); g_state = ST_HOME; });
 	}
 	// set_setting, then rip in the same frame: the rip uses the new value (the card takes it first)
 	{
@@ -1236,6 +1314,21 @@ static void mcp_ui_scenarios()
 		need(cl[0].ok == cl[0].n && cl[1].ok == cl[1].n, "two clients: every answer shows its own tab");
 	}
 	bg_stop();
+	// the slot: a request the UI looked at, withdrawn at the 5 s limit and replaced by another, is not
+	// taken in its place (the sequence number), and a look never leaves the slot changed
+	{
+		UiReq a; memset(&a, 0, sizeof a); a.kind = RK_SCREEN; a.scr = SCR_DRIVE_SETTINGS; a.card = 2; a.seq = 101;
+		g_req = a; g_req_state = RQ_POSTED;
+		UiReq seen;
+		need(ui_req_peek(seen) && seen.seq == 101 && seen.card == 2 && g_req_state == RQ_POSTED, "the UI looks at a posted request");
+		need(__sync_bool_compare_and_swap(&g_req_state, RQ_POSTED, RQ_FREE), "MCP withdraws it");
+		UiReq b = a; b.card = 1; b.seq = 102;
+		g_req = b; g_req_state = RQ_POSTED;
+		need(!ui_req_take(1 << RK_SCREEN, seen.seq) && g_req_state == RQ_POSTED, "another request is not taken for the one looked at");
+		need(ui_req_take(1 << RK_SCREEN, 102) && g_req_state == RQ_TAKEN, "the request looked at is taken");
+		g_req_state = RQ_FREE;
+		need(!ui_req_peek(seen), "nothing posted: nothing to look at");
+	}
 	// nobody takes the request (the UI thread is elsewhere): busy after 5 s, nothing left behind
 	{
 		uint64_t t0 = now_ms();

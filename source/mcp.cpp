@@ -318,9 +318,9 @@ static const Tool k_tools[] = {
 		{"screen", A_SCREEN, true, "The screen to open"},
 		{"drive", A_DRIVE, false, "The drive, only with drive_settings (and required there)"}}},
 	{"go_tab", T_UI, false, "Shows a drive's tab on the home screen (going there first) and returns the screen state.", {DRIVE_ARG}},
-	{"press_button", T_UI, false, "Fallback: presses one pad button in the app, as the pad would, and returns the screen state. Use it only to answer a dialog (cross = yes/OK, circle = no) or to move around a screen; rip, check, repair, cancel, skip_rereads, eject and set_setting do their work directly. It never presses into the console's own on-screen keyboard.", {
+	{"press_button", T_UI, false, "Fallback: presses one pad button in the app, as the pad would, and returns the screen state. Use it only to answer a dialog (cross = yes/OK, circle = no) or to move around a screen; rip, check, repair, cancel, skip_rereads, eject and set_setting do their work directly. It never presses into the console's own on-screen keyboard, and circle on the home screen is refused (it would exit the app, and MCP with it).", {
 		{"button", A_BUTTON, true, "The button"}}},
-	{"rip", T_UI, false, "Starts ripping the disc in the drive (same checks as the pad, on its tab); returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
+	{"rip", T_UI, false, "Starts ripping the disc in the drive (same checks as the pad, on its tab); returns the screen state or why not. Like the pad's cross, it replaces an existing rip at the drive's destination without asking. Use this instead of press_button.", {DRIVE_ARG}},
 	{"repair", T_UI, false, "Re-reads the sectors the drive's rip lists as bad (same checks as the pad, on its tab); returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
 	{"check", T_UI, false, "Checks the drive's rip against Redump (same checks as the pad, on its tab); returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
 	{"cancel", T_UI, false, "Cancels the drive's running job: this call is the confirmation the pad asks for, and it is logged. Returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
