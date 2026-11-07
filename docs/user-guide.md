@@ -416,7 +416,7 @@ be undone.
 
 | Row | What it does |
 |---|---|
-| Remote view | Open `http://<the PS3's address>:8090/` on a computer or phone on the same network. It shows the app's screen and, under it, a pad: its buttons press the console's, so you can switch tabs or start a rip from the sofa |
+| Remote view | Open `http://<the PS3's address>:8090/` on a computer or phone on the same network. It shows the app's screen and, under it, a pad: its buttons press the console's, so you can switch tabs or start a rip from the sofa | Open it by the console's address (as shown on the TV), not by a host name such as `ps3.local`: the buttons only work from a page opened by the address.
 | MCP | An AI agent (an MCP client such as Claude Code) can read and control the app at `http://<the PS3's address>:8090/mcp`. While it is on, *[MCP]* is shown at the left of the title. See [MCP](mcp.md) |
 | status.json | `http://<the PS3's address>:8090/status.json` gives the state of every drive for scripts |
 

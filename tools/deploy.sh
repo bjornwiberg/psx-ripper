@@ -21,8 +21,12 @@ guard() {
 		case "$st" in *'"state":"ripping"'*|*'"busy":true'*) echo "$1"; exit 2;; esac
 		running=1; return;;
 	esac
+	# not running only when webMAN itself says so twice: the screenshot works (in the XMB) and the
+	# running title is not PSXR00001; an error page or any other answer is refused
 	x=$(curl -s --max-time 5 "http://$PS3/xmb.ps3\$screenshot?fast")
-	if [ -n "$x" ] && ! echo "$x" | grep -q "Not in XMB"; then running=0; return; fi
+	c=$(curl -s --max-time 5 "http://$PS3/cpursx.ps3")
+	if echo "$x" | grep -q "webMAN" && ! echo "$x" | grep -qi "error\|Not in XMB" &&
+	   echo "$c" | grep -q "webMAN" && ! echo "$c" | grep -q "PSXR00001"; then running=0; return; fi
 	echo "cannot tell whether the app is busy: turn status.json on (Settings → Remote control → status.json), or quit the app with circle first"
 	exit 2
 }
