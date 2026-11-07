@@ -3510,8 +3510,20 @@ static void mcp_games_scenarios()
 		rc = act("trash_game", lid);
 		need(rc == 0 && has("(Disc 12) (Renamed)\",\"name\":"), "trash_game: the 12 discs' new ids", O);
 		std::string tid = std::string(lid).insert(strlen("hdd:/dev_hdd0/PSXISO/"), ".trash/");
+		// only the game's id (its first disc) is not enough: every disc's id is expected
 		rc = act("empty_trash", NULL, NULL, gq_ids("hdd", {tid.c_str()}));
-		need(rc == 0 && has("\"emptied\":true"), "empty_trash: the 12 discs (the ids expected)", O);
+		need(rc != 0 && has("has 12 discs now, not the 1 expected") && vf_exists("/dev_hdd0/PSXISO/.trash/A Game With A Very Long Title That Goes On And On (Disc 12) (Renamed).bin"),
+		     "empty_trash: one id for a game of 12 discs is refused (a disc added later would go too)", O);
+		std::vector<std::string> dids;
+		for (int i = 1; i <= 12; i++) {
+			char d[260];
+			snprintf(d, sizeof d, "hdd:/dev_hdd0/PSXISO/.trash/A Game With A Very Long Title That Goes On And On (Disc %d) (Renamed)", i);
+			dids.push_back(d);
+		}
+		std::vector<const char *> dp;
+		for (auto &x : dids) dp.push_back(x.c_str());
+		rc = act("empty_trash", NULL, NULL, gq_ids("hdd", dp));
+		need(rc == 0 && has("\"emptied\":true"), "empty_trash: the 12 discs (every disc's id expected)", O);
 	}
 	// empty_trash: never without confirm (the whole MCP path), then final, with source mcp
 	{

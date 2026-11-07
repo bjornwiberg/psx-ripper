@@ -382,7 +382,7 @@ static const Tool k_tools[] = {
 		"Use this instead of press_button.", {
 		{"source", A_SOURCE1, true, "The source whose trash is emptied: hdd or usbN (the USB drive's port)"},
 		{"confirm", A_CONFIRM, false, "Must be true: emptying the trash is final"},
-		{"expect", A_EXPECT, false, "What list_games showed in that trash: the number of its games, or their ids (any order)"}}},
+		{"expect", A_EXPECT, false, "What list_games showed in that trash: the number of its games, or the id of every disc in it (a game's id, and for a game of several discs each id in its discs list; any order)"}}},
 };
 static const int k_ntools = sizeof(k_tools) / sizeof(k_tools[0]);
 

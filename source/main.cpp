@@ -8797,12 +8797,15 @@ static int gv_mcp_do(GamesView &v, const UiReq &r, char *why, size_t wn, char **
 		if (r.gexp >= 0) {   // what the agent saw in this trash (as the pad's question shows the count): anything else there now, nothing goes
 			char name[64], id[260];
 			gl_key_name(v.key, v.src, v.nsrc, name, sizeof(name), T_en);
+			// ids: every disc's id, so a disc trashed later into a listed game also counts as something else
 			uint64_t h = 0;
-			for (int g = 0; g < g_gl.ng; g++) { gl_disc_id(g_gl, g_gl.d[g_gl.g[g].first], id, sizeof(id)); h += mcp_id_hash(id); }
-			if (g_gl.ng != r.gexp || (r.gexp_ids && h != r.gexp_hash)) {
-				if (g_gl.ng != r.gexp)
-					snprintf(why, wn, "Not emptied: the trash of %s has %d game%s now, not the %d expected. Nothing was deleted: list_games (this source, filter show: trash) shows what is there.",
-					         name, g_gl.ng, g_gl.ng == 1 ? "" : "s", r.gexp);
+			for (int g = 0; g < g_gl.ng; g++)
+				for (int i = 0; i < g_gl.g[g].ndiscs; i++) { gl_disc_id(g_gl, g_gl.d[g_gl.g[g].first + i], id, sizeof(id)); h += mcp_id_hash(id); }
+			int have = r.gexp_ids ? g_gl.n : g_gl.ng;
+			if (have != r.gexp || (r.gexp_ids && h != r.gexp_hash)) {
+				if (have != r.gexp)
+					snprintf(why, wn, "Not emptied: the trash of %s has %d %s%s now, not the %d expected. Nothing was deleted: list_games (this source, filter show: trash) shows what is there.",
+					         name, have, r.gexp_ids ? "disc" : "game", have == 1 ? "" : "s", r.gexp);
 				else
 					snprintf(why, wn, "Not emptied: the games in the trash of %s are not the ones expected. Nothing was deleted: list_games (this source, filter show: trash) shows what is there.", name);
 				logf("game list empty %s refused (mcp): not the trash expected", v.key);
