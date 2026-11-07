@@ -2,3 +2,4 @@ ui_test
 out/
 remote_sim
 audit_test
+library_test

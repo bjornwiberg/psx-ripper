@@ -6,6 +6,8 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <time.h>
 #include "ppu-types.h"
 #include "io/pad.h"
 #include "sys/thread.h"
@@ -121,12 +123,24 @@ int usbodd_eject(int) { return 0; }
 int usbodd_scsi(int, const uint8_t *, int, uint8_t *, int, int, int *, int *, char *log, int logn) { if (log) snprintf(log, logn, "host\n"); return -1; }
 
 // files: real files through stdio, so image writes and checks can be tested on the host; the app's
-// paths (/dev_hdd0/...) do not exist here, so the screens see no files, as on an empty console
+// paths (/dev_hdd0/..., exfatN:/...) are looked up under host_root, empty by default, so the screens
+// see no files, as on an empty console
+char host_root[256];
+int host_exfat[8];
+char host_label[8][24];
+static const char *hp(const char *p, char *buf, size_t n)
+{
+	if (!host_root[0]) return p;
+	if (!strncmp(p, "/dev_", 5)) { snprintf(buf, n, "%s%s", host_root, p); return buf; }
+	if (!strncmp(p, "exfat", 5) && p[5] >= '0' && p[5] <= '7' && p[6] == ':') { snprintf(buf, n, "%s/exfat%c%s", host_root, p[5], p + 7); return buf; }
+	return p;
+}
 struct VFile { FILE *f; };
-int vf_exists(const char *path) { struct stat st; return stat(path, &st) == 0; }
+int vf_exists(const char *path) { char b[512]; struct stat st; return stat(hp(path, b, sizeof b), &st) == 0; }
 VFile *vf_open(const char *path, const char *mode)
 {
-	FILE *f = fopen(path, mode);
+	char b[512];
+	FILE *f = fopen(hp(path, b, sizeof b), mode);
 	if (!f) return 0;
 	VFile *v = (VFile *)malloc(sizeof(VFile));
 	v->f = f;
@@ -144,17 +158,68 @@ int vf_printf(VFile *f, const char *fmt, ...)
 	return n;
 }
 int vf_close(VFile *f) { int r = fclose(f->f); free(f); return r; }
-int vf_unlink(const char *path) { return unlink(path); }
-int vf_rename(const char *from, const char *to) { return rename(from, to); }
-int vf_mkdir(const char *) { return 0; }
-int vf_scan(VfVolume *, int) { return 0; }
+int vf_unlink(const char *path) { char b[512]; return unlink(hp(path, b, sizeof b)); }
+int (*host_rename_hook)(const char *from, const char *to);   // nonzero: the rename fails (the tests' blocked or failing renames)
+int vf_rename(const char *from, const char *to) { char a[512], b[512]; if (host_rename_hook && host_rename_hook(from, to)) return -1; return rename(hp(from, a, sizeof a), hp(to, b, sizeof b)); }
+int vf_mkdir(const char *path) { char b[512]; struct stat st; const char *p = hp(path, b, sizeof b); return mkdir(p, 0777) == 0 || (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) ? 0 : -1; }
+int vf_scan(VfVolume *out, int max)
+{
+	int n = 0;
+	for (int port = 0; port < 8; port++)
+		if (host_exfat[port]) {
+			if (n < max) { snprintf(out[n].root, sizeof(out[n].root), "exfat%d:", port); out[n].port = port; out[n].type = VF_EXFAT; out[n].free_mb = 0; }
+			n++;
+		}
+	return n;
+}
 int vf_free_mb(const char *, uint64_t *mb) { *mb = 338 * 1024; return 0; }   // a hard disk with room
 int vf_list(const char *, void (*)(const char *, void *), void *) { return 0; }
+const char *host_listdir_extra;   // a name every listing adds (a file a case-sensitive file system has too)
+int vf_listdir(const char *dir, void (*cb)(const char *, void *), void *ctx)
+{
+	char b[512];
+	DIR *d = opendir(hp(dir, b, sizeof b));
+	if (!d) return -1;
+	int n = 0;
+	struct dirent *de;
+	while ((de = readdir(d))) if (de->d_name[0] != '.') { cb(de->d_name, ctx); n++; }
+	closedir(d);
+	if (host_listdir_extra) { cb(host_listdir_extra, ctx); n++; }
+	return n;
+}
+int vf_size(const char *path, uint64_t *size) { char b[512]; struct stat st; if (stat(hp(path, b, sizeof b), &st)) return -1; *size = (uint64_t)st.st_size; return 0; }
+int vf_mtime(const char *path, time_t *t)
+{
+	if (strncmp(path, "/dev_hdd0", 9)) return -1;   // as on the console: only the hard disk keeps folder dates
+	char b[512];
+	struct stat st;
+	if (stat(hp(path, b, sizeof b), &st)) return -1;
+	*t = st.st_mtime;
+	return 0;
+}
+int vf_drive_present(int port)
+{
+	if (port < 0 || port > 7) return 0;
+	char dev[32], b[512];
+	snprintf(dev, sizeof dev, "/dev_usb%03d", port);
+	struct stat st;
+	return host_exfat[port] || (host_root[0] && stat(hp(dev, b, sizeof b), &st) == 0);
+}
+int vf_label(int port, char *out, size_t n) { if (port < 0 || port > 7) return -1; snprintf(out, n, "%s", host_label[port]); return 0; }
 
 // Redump, the remote view and webhooks: no network on the host
 int rd_local_info(char *ver, size_t n, time_t *when) { snprintf(ver, n, "2026-06-15"); *when = 0; return 1; }
 int rd_local_by_size(uint64_t, int, char (*)[RD_NAME], int) { return -1; }
-int rd_local_verify(const uint8_t (*)[16], int, char *, size_t) { return -1; }
+int host_rd_local;
+unsigned char host_rd_md5[16];
+char host_rd_name[160];
+int rd_local_verify(const uint8_t (*md5)[16], int n, char *name, size_t nn)
+{
+	if (!host_rd_local) return -1;
+	if (n != 1 || memcmp(md5[0], host_rd_md5, 16)) return 0;
+	snprintf(name, nn, "%s", host_rd_name);
+	return 1;
+}
 int rd_online(const char *, RdDisc *, int) { return -1; }
 int rd_download(volatile uint32_t *, volatile uint32_t *, volatile int *, volatile int *) { return -1; }
 #ifdef HOST_REMOTE

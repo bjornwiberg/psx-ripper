@@ -38,6 +38,7 @@
 #include "vfs.h"
 #include "usbodd.h"
 #include "audit.h"
+#include "library.h"
 #include <sys/mutex.h>
 
 #define LOG_PATH   "/dev_hdd0/tmp/psxrip.log"
@@ -62,6 +63,15 @@ static int g_webhook_hdr_on = 0;               // send them (off keeps them stor
 // File name of a rip: %T title (Redump's name without the language list, else the app's title;
 // with "(Disc 1)" for a disc of several), %R region, %D disc ID, %N Redump's whole name. Text in [ ] does not show in webMAN's game list.
 static char g_name_pat[96] = "%T [%D]";
+static char g_games_source[8] = "all";   // the game list's source: hdd, usbN (USB port) or all
+static GameFilter g_games_filter = {0, 0, 0, 0};   // the game list's filter (games_filter=fmt,redump,errors,other)
+// games_filter's value: four numbers (format, Redump, errors, other) in their ranges; 0 when not.
+static int games_filter_parse(const char *v, GameFilter *f)
+{
+	char end;
+	return sscanf(v, "%d,%d,%d,%d%c", &f->fmt, &f->redump, &f->errors, &f->other, &end) == 4 && f->fmt >= 0 && f->fmt <= 2 &&
+	       f->redump >= 0 && f->redump <= 4 && f->errors >= 0 && f->errors <= 2 && f->other >= 0 && f->other <= 3;
+}
 enum { SRC_BD, SRC_USB };
 static char g_outdir_usb[8][64];               // destination per USB drive, by its port ("" = the hard disk)
 // Drive settings: the standard (Settings, START) and a drive's own values (SELECT on its card),
@@ -157,7 +167,29 @@ static size_t au_read(void *f, void *p, size_t n) { return vf_read((VFile *)f, p
 static size_t au_write(void *f, const void *p, size_t n) { return vf_write((VFile *)f, p, n); }
 static int au_seek(void *f, uint64_t pos) { return vf_seek((VFile *)f, pos); }
 static int au_close(void *f) { return vf_close((VFile *)f); }
-static const AuditIo vf_io = {au_open, au_read, au_write, au_seek, au_close};
+// A move's rename never goes over a file: the internal disk's rename() would replace it, so the
+// target is looked at right before. A case-only rename goes through a temp name: on a case-blind
+// file system the target found is the file itself, on another it may be a different one. When the
+// second step fails and so does the way back, the file is at the temp name: AUDIT_ASIDE says so.
+static void logf(const char *fmt, ...);
+static int au_rename(const char *a, const char *b)
+{
+	if (strcmp(a, b) && !strcasecmp(a, b)) {
+		char t[340];
+		snprintf(t, sizeof(t), "%s.case", a);
+		if (vf_exists(t) || vf_rename(a, t)) return -1;
+		if (vf_exists(b) || vf_rename(t, b)) {   // a different file of that name, or the rename failed
+			if (!vf_rename(t, a)) return -1;
+			logf("rename %s: neither done nor put back, the file is at %s", a, t);
+			return AUDIT_ASIDE;
+		}
+		return 0;
+	}
+	if (vf_exists(b)) return -1;
+	return vf_rename(a, b);
+}
+static int au_exists(const char *p) { return vf_exists(p); }
+static const AuditIo vf_io = {au_open, au_read, au_write, au_seek, au_close, au_rename, au_exists};
 
 // Where the last button press came from (set by pad_pressed): the source of the changes made after it.
 static AuditSrc g_input_src = AU_PAD;
@@ -207,6 +239,16 @@ static int cfg_apply_line(const char *line)
 		int v = atoi(line + 13), ok = 0;
 		for (int i = 0; i < 7; i++) if (wh_steps[i] == v) { g_webhook_step = v; ok = 1; }
 		if (!ok) return 0;
+	}
+	else if (!strncmp(line, "games_source=", 13)) {
+		const char *v = line + 13;
+		if (strcmp(v, "hdd") && strcmp(v, "all") && !(!strncmp(v, "usb", 3) && v[3] >= '0' && v[3] <= '7' && !v[4])) return 0;
+		snprintf(g_games_source, sizeof(g_games_source), "%s", v);
+	}
+	else if (!strncmp(line, "games_filter=", 13)) {
+		GameFilter f;
+		if (!games_filter_parse(line + 13, &f)) return 0;
+		g_games_filter = f;
 	}
 	else if (!strncmp(line, "audit_mb=", 9)) {
 		int v = atoi(line + 9), mb = 256;   // anything but a listed size is the default
@@ -309,6 +351,8 @@ static void cfg_text(char *txt, size_t cap)
 	put("webhook_headers_on=%d\n", g_webhook_hdr_on);
 	for (int i = 0; i < WH_HEADERS; i++) put("webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
 	put("audit_mb=%d\n", g_audit_mb);
+	put("games_source=%s\n", g_games_source);
+	put("games_filter=%d,%d,%d,%d\n", g_games_filter.fmt, g_games_filter.redump, g_games_filter.errors, g_games_filter.other);
 }
 
 // At start: the file may have been edited (over FTP) while the app was off. Every setting whose
@@ -2578,24 +2622,291 @@ static void fit_middle(UiFont font, const char *in, char *out, size_t n, int max
 	}
 }
 
-static void next_target(char *outdir, int dir)
+// The destinations a rip can go to, in order: the hard disk, then by USB port a FAT32 drive the PS3
+// mounts (/dev_usbNNN) or an exFAT drive reached through FatFs. cands = their PSXISO folders,
+// ports = the USB port of each (-1 for the hard disk). vols/nv: the exFAT drives from a vf_scan
+// the caller made (NULL: scanned here). Returns how many (at least 1).
+static int dest_candidates(char (*cands)[32], int *ports, const VfVolume *vols = NULL, int nv = 0)
 {
-	char cands[9][32];
 	int nc = 0;
-	snprintf(cands[nc++], 32, "/dev_hdd0/PSXISO");
-	VfVolume vols[8];
-	int nv = vf_scan(vols, 8);
+	snprintf(cands[nc], 32, "/dev_hdd0/PSXISO");
+	ports[nc++] = -1;
+	VfVolume own[8];
+	if (!vols) { nv = vf_scan(own, 8); vols = own; }
 	for (int port = 0; port < 8; port++) {
 		char dev[16];
 		snprintf(dev, sizeof(dev), "/dev_usb%03d", port);
-		struct stat st;
-		if (stat(dev, &st) == 0) { snprintf(cands[nc++], 32, "%s/PSXISO", dev); continue; }
+		if (vf_exists(dev)) { snprintf(cands[nc], 32, "%s/PSXISO", dev); ports[nc++] = port; continue; }
 		for (int i = 0; i < nv && i < 8; i++)
-			if (vols[i].port == port) snprintf(cands[nc++], 32, "%s/PSXISO", vols[i].root);
+			if (vols[i].port == port) { snprintf(cands[nc], 32, "%s/PSXISO", vols[i].root); ports[nc++] = port; }
 	}
+	return nc;
+}
+
+static void next_target(char *outdir, int dir)
+{
+	char cands[9][32];
+	int ports[9];
+	int nc = dest_candidates(cands, ports);
 	int cur = 0;
 	for (int i = 0; i < nc; i++) if (!strcmp(cands[i], outdir)) cur = i;   // not there any more: from the hard disk
 	snprintf(outdir, 64, "%s", cands[(cur + (dir < 0 ? nc - 1 : 1)) % nc]);
+}
+
+// ---------------------------------------------------------------- game list: sources and the background scan
+// The game list shows one source's PSXISO folder or all of them. Building it reads every folder
+// and log, so it runs in a thread of its own at the app's lowest priority (below the rips and the
+// UI); the screen takes the finished result with gl_poll(). The result stays until a source switch,
+// a change (gl_changed: a rip finished, a file action) or, on the hard disk, a newer folder date;
+// FAT32 and exFAT folders do not show changes in their date, so a USB source is read again each
+// time the list is opened. A key "t:<source>" scans the source's trash (<PSXISO>/.trash) instead.
+#define GL_MAX 1000        // discs per source the list takes; a source with more shows the first 1000 and says so
+#define GL_SRCS 10         // the hard disk, 8 USB ports, All
+#define GL_PRIO 2000       // the scan thread's priority: the app's lowest (rips 1000, polling 1500)
+struct GlSource { char key[8], dir[32], name[64]; int port, n; };   // n = its discs in the last scan, -1 unreadable
+struct GlResult {
+	char key[8];               // the source scanned: hdd, usbN, all; t:<that> = its trash
+	GlSource src[GL_SRCS];     // the sources there were at the scan (the last one is All)
+	int nsrc;
+	GameDisc *d; int n;        // the discs of the scanned source(s)
+	Game *g; int ng;           // their rows (lib_group)
+	int more;                  // a source had more than GL_MAX discs
+	int gone;                  // the chosen source is not connected (or went away during the scan)
+	int oom;                   // not enough memory for the list (not the same as gone)
+	time_t t0;                 // when the scan started
+	uint32_t gen;              // change counter: +1 with every result gl_poll takes
+};
+static GlResult g_gl;                  // the list's result; the UI thread owns it (gl_poll swaps it)
+static sys_mutex_t g_gl_mx;            // the hand-over between the UI and the scan thread
+static char g_gl_req[8];               // a scan asked for and not started yet, "" = none
+static int g_gl_running;               // the scan thread runs
+static GlResult *g_gl_next;            // a finished scan gl_poll has not taken yet
+static volatile int g_gl_stale = 1;    // files changed since the last scan started
+static GlResult g_gl_oom = {};         // handed over when not even a result could be allocated
+static size_t g_gl_alloc_max = (size_t)-1;   // the largest block the scan asks for (the tests lower it)
+
+// The sources: the same candidates as next_target, named "Hard disk" / "USB n (LABEL)", then "All".
+// vols/nv as for dest_candidates.
+static int gl_sources(GlSource *out, int max, const VfVolume *vols = NULL, int nv = 0)
+{
+	char cands[9][32];
+	int ports[9];
+	int nc = dest_candidates(cands, ports, vols, nv), n = 0;
+	for (int i = 0; i < nc && n < max - 1; i++, n++) {
+		GlSource &s = out[n];
+		memset(&s, 0, sizeof(s));
+		snprintf(s.dir, sizeof(s.dir), "%s", cands[i]);
+		s.port = ports[i];
+		s.n = 0;
+		if (ports[i] < 0) { snprintf(s.key, sizeof(s.key), "hdd"); snprintf(s.name, sizeof(s.name), "%s", T(STR_DEST_HDD)); continue; }
+		snprintf(s.key, sizeof(s.key), "usb%d", ports[i]);
+		char usb[24], label[48] = "";
+		snprintf(usb, sizeof(usb), T(STR_SRC_USB_PORT), ports[i]);
+		if (vf_label(ports[i], label, sizeof(label)) || !label[0]) snprintf(s.name, sizeof(s.name), "%s", usb);
+		else snprintf(s.name, sizeof(s.name), "%s (%s)", usb, label);
+	}
+	if (n < max) {
+		GlSource &s = out[n++];
+		memset(&s, 0, sizeof(s));
+		snprintf(s.key, sizeof(s.key), "all");
+		snprintf(s.name, sizeof(s.name), "%s", T(STR_GL_ALL));
+		s.port = -1;
+	}
+	return n;
+}
+
+// The source a disc is in (its folder starts with the source's), NULL when none.
+static const GlSource *gl_place(const GlResult *r, const GameDisc *d)
+{
+	for (int i = 0; i < r->nsrc; i++) {
+		size_t l = strlen(r->src[i].dir);
+		if (l && !strncmp(d->base, r->src[i].dir, l) && d->base[l] == '/') return &r->src[i];
+	}
+	return NULL;
+}
+
+static int gl_io_read(const char *p, char *buf, int max)
+{
+	VFile *f = vf_open(p, "rb");
+	if (!f) return -1;
+	int n = (int)vf_read(f, buf, max);
+	vf_close(f);
+	return n;
+}
+static int gl_io_exists(const char *p) { return vf_exists(p); }
+static int gl_io_lc(const char *id) { return is_libcrypt_disc(id); }
+static LibIo gl_libio() { LibIo io = {vf_listdir, vf_size, gl_io_read, gl_io_exists, gl_io_lc, SBI_DIR}; return io; }
+// The app's own log or .md5 (what = "log", "md5") of an image to read: <base><type>.<what>, else the
+// old <base>.<what> when it is this image's (lib_own_find). 1 when there is one; out = its path.
+static int own_find(const char *base, const char *image, const char *what, char *out, int n) { return lib_own_find(base, image, what, gl_io_exists, out, n); }
+static void own_adopt(const char *base, const char *image);
+
+// The source's drive is still connected (the hard disk always is). Asks the system, no mount.
+static int gl_drive_there(const GlSource &s) { return s.port < 0 || vf_drive_present(s.port); }
+
+// The folder a scan reads: the source's PSXISO, or its trash.
+static void gl_dir(const GlSource &s, int trash, char *out, size_t n) { snprintf(out, n, "%s%s", s.dir, trash ? "/.trash" : ""); }
+
+static void *gl_malloc(size_t n) { return n > g_gl_alloc_max ? NULL : malloc(n); }
+static void *gl_realloc(void *p, size_t n) { return n > g_gl_alloc_max ? NULL : realloc(p, n); }
+
+static void gl_free(GlResult *r)
+{
+	if (!r || r == &g_gl_oom) return;
+	free(r->d); free(r->g);
+	free(r);
+}
+
+// Scans source `key` (or all of them) into a new result. Each source's folder is read into a
+// buffer for GL_MAX + 1 discs (about 3 MB), kept only as large as what was found.
+static GlResult *gl_build(const char *key, const LibIo *io)
+{
+	GlResult *r = (GlResult *)calloc(1, sizeof(GlResult));
+	if (!r) return NULL;
+	snprintf(r->key, sizeof(r->key), "%s", key);
+	r->t0 = time(NULL);
+	VfVolume vols[8];
+	int nv = vf_scan(vols, 8);   // once per scan: it takes the FatFs lock across all ports
+	r->nsrc = gl_sources(r->src, GL_SRCS, vols, nv);
+	GameDisc *tmp = (GameDisc *)gl_malloc((GL_MAX + 1) * sizeof(GameDisc));
+	if (!tmp) r->oom = 1;
+	int found = 0, trash = !strncmp(key, "t:", 2);
+	const char *src = trash ? key + 2 : key;
+	for (int i = 0; tmp && i < r->nsrc; i++) {
+		GlSource &s = r->src[i];
+		if (!s.dir[0] || (strcmp(src, "all") && strcmp(src, s.key))) continue;
+		found = 1;
+		char dir[48];
+		gl_dir(s, trash, dir, sizeof(dir));
+		int n = lib_scan(dir, io, tmp, GL_MAX + 1);
+		// a drive pulled during the scan: its files could not be read, which would look like
+		// broken sets. Gone (one source), or left out (All). No PSXISO (or .trash) folder: empty.
+		if (!gl_drive_there(s)) {
+			s.n = -1;
+			if (strcmp(src, "all")) r->gone = 1;
+			continue;
+		}
+		if (n < 0) { s.n = -1; continue; }
+		if (n > GL_MAX) { r->more = 1; n = GL_MAX; }
+		s.n = n;
+		GameDisc *d = n ? (GameDisc *)gl_realloc(r->d, (size_t)(r->n + n) * sizeof(GameDisc)) : r->d;
+		if (n && !d) { s.n = -1; r->oom = 1; continue; }   // (an empty folder is not out of memory)
+		memcpy(d + r->n, tmp, (size_t)n * sizeof(GameDisc));
+		r->d = d;
+		r->n += n;
+	}
+	free(tmp);
+	if (!found && !r->oom) r->gone = 1;   // the chosen drive is not connected
+	if (r->gone) { free(r->d); r->d = NULL; r->n = 0; }
+	lib_mark_dups(r->d, r->n);
+	r->g = r->n ? (Game *)gl_malloc((size_t)r->n * sizeof(Game)) : NULL;
+	if (r->n && !r->g) r->oom = 1;
+	r->ng = r->g ? lib_group(r->d, r->n, r->g, r->n) : 0;
+	if (r->oom) { free(r->d); free(r->g); r->d = NULL; r->g = NULL; r->n = r->ng = 0; }
+	logf("game list %s: %d disc(s), %d row(s)%s%s%s", key, r->n, r->ng, r->more ? ", more than the limit" : "", r->gone ? ", gone" : "",
+	     r->oom ? ", OUT OF MEMORY" : "");
+	return r;
+}
+
+// The scan thread: scans what was asked until nothing is (a request during a scan is done next).
+// arg != NULL: a thread of its own (it exits); NULL: run in place.
+static void gl_thread(void *arg)
+{
+	for (;;) {
+		char key[8];
+		sysMutexLock(g_gl_mx, 0);
+		if (!g_gl_req[0]) { g_gl_running = 0; sysMutexUnlock(g_gl_mx); break; }
+		snprintf(key, sizeof(key), "%s", g_gl_req);
+		g_gl_req[0] = 0;
+		sysMutexUnlock(g_gl_mx);
+		LibIo io = gl_libio();
+		GlResult *r = gl_build(key, &io);
+		if (!r) { logf("game list %s: OUT OF MEMORY", key); r = &g_gl_oom; snprintf(g_gl_oom.key, sizeof(g_gl_oom.key), "%s", key); }
+		sysMutexLock(g_gl_mx, 0);
+		GlResult *old = g_gl_next;
+		g_gl_next = r;
+		sysMutexUnlock(g_gl_mx);
+		gl_free(old);
+	}
+	if (arg) sysThreadExit(0);
+}
+
+// Asks for a scan of `key`; the thread starts when it is not running (where no thread can be
+// started, the scan runs here and now).
+static void gl_request(const char *key)
+{
+	g_gl_stale = 0;   // a change from here on needs another scan
+	sysMutexLock(g_gl_mx, 0);
+	snprintf(g_gl_req, sizeof(g_gl_req), "%s", key);
+	int start = !g_gl_running;
+	if (start) g_gl_running = 1;
+	sysMutexUnlock(g_gl_mx);
+	if (!start) return;
+	sys_ppu_thread_t t;
+	if (sysThreadCreate(&t, gl_thread, (void *)1, GL_PRIO, 0x10000, 0, (char *)"psxgames")) gl_thread(NULL);
+}
+
+// Files in the sources changed (a rip finished, a game was moved): the next open scans again.
+static void gl_changed() { g_gl_stale = 1; }
+
+// A scan asked for or running, or a result not taken yet: the screen says "Reading ...".
+static int gl_busy()
+{
+	sysMutexLock(g_gl_mx, 0);
+	int b = g_gl_running || g_gl_req[0] || g_gl_next;
+	sysMutexUnlock(g_gl_mx);
+	return b;
+}
+
+// Takes a finished scan into g_gl (called by the UI). Returns 1 when it did.
+static int gl_poll()
+{
+	sysMutexLock(g_gl_mx, 0);
+	GlResult *r = g_gl_next;
+	g_gl_next = NULL;
+	sysMutexUnlock(g_gl_mx);
+	if (!r) return 0;
+	uint32_t gen = g_gl.gen;
+	free(g_gl.d); free(g_gl.g);
+	g_gl = *r;
+	g_gl.gen = gen + 1;
+	if (r == &g_gl_oom) { g_gl.oom = 1; g_gl.t0 = time(NULL); } else free(r);
+	return 1;
+}
+
+// The list is opened (or its source switched) to `key`: scans unless the result in hand is of that
+// source and still current. Returns 1 when a scan was asked for.
+static int gl_open(const char *key)
+{
+	int fresh = g_gl.gen && !g_gl_stale && !strcmp(g_gl.key, key) && !g_gl.gone && !g_gl.oom;
+	int trash = !strncmp(key, "t:", 2);
+	const char *src = trash ? key + 2 : key;
+	for (int i = 0; fresh && i < g_gl.nsrc; i++) {
+		const GlSource &s = g_gl.src[i];
+		if (!s.dir[0] || (strcmp(src, "all") && strcmp(src, s.key))) continue;
+		char dir[48];
+		gl_dir(s, trash, dir, sizeof(dir));
+		time_t m;
+		if (vf_mtime(dir, &m) || m >= g_gl.t0) fresh = 0;   // a USB folder, or changed since (or in the same second as) the scan
+	}
+	if (fresh) return 0;
+	gl_request(key);
+	return 1;
+}
+
+// The list screen closed: the list's memory goes (a scan not taken yet with it); the next open
+// scans again. A scan still running hands its result over, and the next open or close frees it.
+static void gl_close()
+{
+	sysMutexLock(g_gl_mx, 0);
+	GlResult *r = g_gl_next;
+	g_gl_next = NULL;
+	sysMutexUnlock(g_gl_mx);
+	gl_free(r);
+	free(g_gl.d); free(g_gl.g);
+	uint32_t gen = g_gl.gen;
+	memset(&g_gl, 0, sizeof(g_gl));
+	g_gl.gen = gen;
 }
 
 // ---------------------------------------------------------------- disc identification for the home screen
@@ -2623,20 +2934,27 @@ static void region_of(const char *rdname, const char *serial, char *out, size_t 
 	else if (serial[2] == 'P' || (serial[0] == 'S' && serial[1] == 'I')) snprintf(out, n, "Japan");   // SLPS, SCPS, SLPM, SIPS
 }
 
-// The file name for a pattern; illegal characters replaced, empty brackets and double spaces gone.
-static void name_from(const char *pat, const char *rdname, const char *title, const char *serial, char *out, size_t n)
+// The values a pattern's %T and %R stand for: the title up to the first bracket (Redump's name or
+// the app's) with its disc ("Croc 2", "Metal Gear Solid (Disc 1)"), and the region.
+static void name_values(const char *rdname, const char *title, const char *serial, char *t, size_t tn, char *r, size_t rn)
 {
-	char t[160], r[64], b[300], dk[32] = "";
+	char dk[32] = "";
 	// a disc of several: "(Disc 1)" in Redump's name, else in the app's own title list (GameDB-PSX)
 	const char *dp = rdname && rdname[0] ? strstr(rdname, "(Disc ") : NULL;
 	if (!dp) dp = strstr(title, "(Disc ");
 	if (dp) { const char *e = strchr(dp, ')'); if (e) snprintf(dk, sizeof(dk), "%.*s", (int)(e - dp - 1), dp + 1); }
-	// the title: up to the first bracket (Redump's name or the app's), then its disc
 	const char *src = rdname && rdname[0] ? rdname : title;
 	const char *q = strstr(src, " (");
-	snprintf(t, sizeof(t), "%.*s", q ? (int)(q - src) : (int)strlen(src), src);
-	if (dk[0]) snprintf(t + strlen(t), sizeof(t) - strlen(t), " (%s)", dk);
-	region_of(rdname, serial, r, sizeof(r));
+	snprintf(t, tn, "%.*s", q ? (int)(q - src) : (int)strlen(src), src);
+	if (dk[0]) snprintf(t + strlen(t), tn - strlen(t), " (%s)", dk);
+	region_of(rdname, serial, r, rn);
+}
+
+// The file name for a pattern; illegal characters replaced, empty brackets and double spaces gone.
+static void name_from(const char *pat, const char *rdname, const char *title, const char *serial, char *out, size_t n)
+{
+	char t[160], r[64], b[300];
+	name_values(rdname, title, serial, t, sizeof(t), r, sizeof(r));
 	size_t o = 0;
 	for (const char *p = pat; *p && o < sizeof(b) - 1; p++) {
 		const char *ins = NULL;
@@ -2731,8 +3049,10 @@ static void idx_add(const char *name, void *ctx)
 	if (l < 5 || strcasecmp(name + l - 4, ".bin") || x->n >= IDX_MAX) return;
 	char base[200], path[320], serial[16] = "";
 	snprintf(base, sizeof(base), "%.*s", (int)(l - 4), name);
-	snprintf(path, sizeof(path), "%s/%s.log", x->dir, base);
-	VFile *f = vf_open(path, "rb");
+	snprintf(path, sizeof(path), "%s/%s", x->dir, base);
+	char lp[340];
+	own_find(path, ".bin", "log", lp, sizeof(lp));
+	VFile *f = vf_open(lp, "rb");
 	if (f) {
 		char b[1024];
 		int k = (int)vf_read(f, b, sizeof(b) - 1);
@@ -2750,7 +3070,7 @@ static void idx_add(const char *name, void *ctx)
 	snprintf(x->e[x->n].name, sizeof(x->e[0].name), "%s", base);
 	x->n++;
 }
-static void idx_stale() { for (int i = 0; i < 2; i++) g_idx[i].stale = 1; }
+static void idx_stale() { for (int i = 0; i < 2; i++) g_idx[i].stale = 1; gl_changed(); }
 // Base path (dir/name) of an earlier rip of serial in dir, "" when there is none.
 static void idx_find(const char *dir, const char *serial, char *out, size_t n)
 {
@@ -2771,8 +3091,14 @@ static void idx_find(const char *dir, const char *serial, char *out, size_t n)
 		}
 		logf("rip index %s: %d image(s)", dir, x->n);
 	}
-	for (int i = 0; i < x->n; i++)
-		if (!strcmp(x->e[i].serial, serial)) { snprintf(out, n, "%s/%s", dir, x->e[i].name); break; }
+	for (int i = 0; i < x->n; i++) {
+		if (strcmp(x->e[i].serial, serial)) continue;
+		char bp[320];
+		snprintf(bp, sizeof(bp), "%s/%s.bin", dir, x->e[i].name);
+		if (!vf_exists(bp)) continue;   // moved or deleted since the index was read
+		snprintf(out, n, "%s/%s", dir, x->e[i].name);
+		break;
+	}
 	sysMutexUnlock(g_idx_mx);
 }
 
@@ -2793,11 +3119,10 @@ static uint32_t pregap_junk_in(VFile *bin, const char *log)
 
 static int riplog_open_count()
 {
-	char path[320];
-	snprintf(path, sizeof(path), "%s.log", g_base);
-	snprintf(path + strlen(path) - 4, 8, ".bin");
+	char path[340];
+	snprintf(path, sizeof(path), "%s.bin", g_base);
 	if (!vf_exists(path)) return 0;
-	snprintf(path, sizeof(path), "%s.log", g_base);
+	own_find(g_base, ".bin", "log", path, sizeof(path));
 	VFile *f = vf_open(path, "rb");
 	if (!f) return 0;
 	char (&buf)[65536] = CX.log_buf;
@@ -2882,6 +3207,38 @@ static void lookup_start()
 	sysThreadCreate(&t, lookup_thread, (void *)(long)cur_card(), 1000, 0x10000, 0, (char *)"psxlookup");
 }
 
+// 1 when one of Redump's discs has exactly these track MD5s (its name into name), else 0.
+static int rd_match(const RdDisc *discs, int nd, const uint8_t (*md5)[16], int nt, char *name, size_t n)
+{
+	for (int i = 0; i < nd; i++) {
+		int ok = discs[i].n == nt;
+		for (int t = 0; t < nt && ok; t++) ok = !memcmp(discs[i].md5[t], md5[t], 16);
+		if (ok) { snprintf(name, n, "%s", discs[i].name); return 1; }
+	}
+	return 0;
+}
+
+// Compares track MD5s with Redump as set (the local copy, or online by the disc ID), outside any
+// card (the game list's checks). 1 verified (name filled in), 0 no match, -1 could not check
+// (Redump off, no ID for an online lookup, no network), -2 the ID is unknown to Redump.
+static int rd_compare(const uint8_t (*md5)[16], int nt, const char *serial, char *name, size_t n)
+{
+	static RdDisc discs[4];   // (used under rd_lock only)
+	int r = -1;
+	name[0] = 0;
+	rd_lock();
+	if (g_redump == RD_LOCAL) r = rd_local_verify(md5, nt, name, n);
+	else if (g_redump == RD_ONLINE && serial && serial[0]) {
+		int nd = rd_online(serial, discs, 4);
+		r = nd < 0 ? -1 : nd == 0 ? -2 : rd_match(discs, nd, md5, nt, name, n);
+	}
+	rd_unlock();
+	if (r < -2 || r > 1) r = -1;
+	if (r != 1) name[0] = 0;
+	logf("redump compare (%s) %s -> %d %s", g_redump == RD_LOCAL ? "local" : g_redump == RD_ONLINE ? "online" : "off", serial ? serial : "", r, name);
+	return r;
+}
+
 // Compares the track MD5s of the finished rip with Redump. Fills `out` with the result line.
 static void redump_verify(char *out, size_t n)
 {
@@ -2899,15 +3256,7 @@ static void redump_verify(char *out, size_t n)
 		}
 		if (g_rd_ndiscs < 0) r = -1;
 		else if (g_rd_ndiscs == 0) r = -2;
-		else {
-			r = 0;
-			for (int i = 0; i < g_rd_ndiscs && r == 0; i++) {
-				const RdDisc *d = &g_rd_discs[i];
-				int ok = d->n == g_ntracks;
-				for (int t = 0; t < g_ntracks && ok; t++) ok = !memcmp(d->md5[t], g_track_md5bin[t], 16);
-				if (ok) { r = 1; snprintf(name, sizeof(name), "%s", d->name); }
-			}
-		}
+		else r = rd_match(g_rd_discs, g_rd_ndiscs, g_track_md5bin, g_ntracks, name, sizeof(name));
 	}
 	rd_unlock();
 	if (r == 1) snprintf(out, n, T(STR_RD_VERIFIED), name);
@@ -2950,8 +3299,8 @@ static void prev_rip_check()
 	k.rd_done[0] = 0;
 	k.rd_state = -1;
 	if (g_prev_rip) {
-		char lp[320];
-		snprintf(lp, sizeof(lp), "%s.log", g_base);
+		char lp[340];
+		own_find(g_base, ".bin", "log", lp, sizeof(lp));
 		VFile *lf = vf_open(lp, "rb");
 		if (lf) {
 			char b[2048];
@@ -3628,8 +3977,6 @@ static void fn_step(int d)
 	snprintf(g_name_pat, sizeof(g_name_pat), "%s", nx < 4 ? FN_PRESETS[nx] : g_name_own);
 }
 
-// The file name view: the pattern as parts, a preview for the discs in the drives (file name and
-// how webMAN lists it), parts to add with X, square removes the last one, triangle types freely.
 // A section heading in a view: body size, light blue, a thin line under it. Returns the height.
 static int section_head(int L, int R, int y, const char *text)
 {
@@ -3639,163 +3986,312 @@ static int section_head(int L, int R, int y, const char *text)
 	return lb + lb / 3;
 }
 
-static void filename_screen()
+// The file name view's state: the pattern, the part picked, the cursor; game = the game list's game
+// being renamed (its preview shows that game; START renames it), NULL = the setting.
+static const char *FN_PARTS[] = {"%T", "%R", "%D", "%N", " ", "(", ")", "[", "]", "-"};
+static const StrId FN_PLBL[] = {STR_FN_B_TITLE, STR_FN_B_REGION, STR_FN_B_ID, STR_FN_B_NAME, STR_FN_B_SPACE};
+#define FN_NP 10   // parts to add
+#define FN_NL 5    // the first FN_NL have a name
+struct FnView { char pat[96]; int sel, cur; uint64_t blink0; const Game *game; int foreign; };   // foreign: no pattern gives the game's name now
+// the pattern as parts ("%T" or one character): offsets where each starts; returns the count
+static int fn_part_starts(const char *pat, int *st)
 {
-	char pat[96];
-	snprintf(pat, sizeof(pat), "%s", g_name_pat);
-	static const char *parts[] = {"%T", "%R", "%D", "%N", " ", "(", ")", "[", "]", "-"};
-	static const StrId plbl[] = {STR_FN_B_TITLE, STR_FN_B_REGION, STR_FN_B_ID, STR_FN_B_NAME, STR_FN_B_SPACE};
-	const int NP = 10, NL = 5;   // the first NL parts have a name
-	int sel = 0;
-	// the pattern as parts ("%T" or one character) and a cursor between them: L1/R1 move it, X puts
-	// a part in at the cursor, square removes the part before it
-	auto part_starts = [&](int *st) {   // offsets where each part starts; returns the count
-		int n = 0;
-		for (int i = 0; pat[i]; i++) { st[n++] = i; if (pat[i] == '%' && pat[i + 1]) i++; }
-		st[n] = (int)strlen(pat);
-		return n;
-	};
-	int cur;
-	{ int st[100]; cur = part_starts(st); }   // at the end
-	uint64_t blink0 = now_ms();
+	int n = 0;
+	for (int i = 0; pat[i]; i++) { st[n++] = i; if (pat[i] == '%' && pat[i + 1]) i++; }
+	st[n] = (int)strlen(pat);
+	return n;
+}
+static const char *fn_leaf(const char *base) { const char *sl = strrchr(base, '/'); return sl ? sl + 1 : base; }
+static void fn_game_name(const char *pat, const GameDisc &d, char *out, size_t n);
+// Whether a pattern gives every disc of the game its name now.
+static int fn_gives(const char *pat, const Game &g)
+{
+	for (int i = 0; i < g.ndiscs; i++) {
+		const GameDisc &d = g_gl.d[g.first + i];
+		char fn[200];
+		fn_game_name(pat, d, fn, sizeof(fn));
+		if (strcmp(fn, fn_leaf(d.base))) return 0;
+	}
+	return 1;
+}
+// The pattern that gives the game's name now: the setting's or a ready-made one when it does, else
+// one read from the first disc's name, its values (as sanitize writes them in a name) replaced
+// greedily (longest first) by %T, %N (Redump's name), %D, %R, the rest kept as characters; on a tie
+// %T wins over %N. It must give every disc its name. 0: none does.
+static int fn_pattern_of(const Game &g, char *pat, size_t n)
+{
+	if (fn_gives(g_name_pat, g)) { snprintf(pat, n, "%s", g_name_pat); return 1; }
+	for (int i = 0; i < 4; i++) if (fn_gives(FN_PRESETS[i], g)) { snprintf(pat, n, "%s", FN_PRESETS[i]); return 1; }
+	const GameDisc &d = g_gl.d[g.first];
+	char t[256], nm[256], r[256];   // sanitize works in up to 256 bytes
+	name_values(d.rdname, d.title, d.id, t, 160, r, 64);
+	snprintf(nm, sizeof(nm), "%s", d.rdname[0] ? d.rdname : d.title);
+	sanitize(t); sanitize(nm); sanitize(r);   // "Gekido: Urban Fighters" is "Gekido - Urban Fighters" in the name
+	struct { const char *tok, *val; } c[4] = {{"%T", t}, {"%N", nm}, {"%D", d.id}, {"%R", r}};
+	const char *name = fn_leaf(d.base);
+	char out[96];
+	size_t o = 0;
+	int vars = 0;
+	for (const char *p = name; *p; ) {
+		int best = -1;
+		size_t bl = 0;
+		for (int k = 0; k < 4; k++) {
+			size_t l = strlen(c[k].val);
+			if (l > bl && !strncmp(p, c[k].val, l)) { best = k; bl = l; }
+		}
+		const char *add = best >= 0 ? c[best].tok : *p == '%' ? "%%" : NULL;
+		size_t al = add ? 2 : 1;
+		if (o + al >= sizeof(out)) return 0;   // too long for a pattern
+		if (add) { memcpy(out + o, add, 2); p += best >= 0 ? bl : 1; vars += best >= 0; }
+		else out[o] = *p++;
+		o += al;
+	}
+	out[o] = 0;
+	if (!vars || !fn_gives(out, g)) return 0;   // no value of the game in it, or not every disc's name
+	snprintf(pat, n, "%s", out);
+	return 1;
+}
+// The view opened: the setting's pattern; a game's: the pattern that gives its name now (else the
+// setting's, and its name now is shown above the preview).
+static void fn_open(FnView &f, const Game *g)
+{
+	memset(&f, 0, sizeof(f));
+	snprintf(f.pat, sizeof(f.pat), "%s", g_name_pat);
+	if (g && !fn_pattern_of(*g, f.pat, sizeof(f.pat))) f.foreign = 1;
+	int st[100];
+	f.cur = fn_part_starts(f.pat, st);   // at the end
+	f.blink0 = now_ms();
+	f.game = g;
+}
+// A file name on one line: whole if it fits; else smaller, and if even that is too long cut in the
+// middle, so the start and the end (disc ID, .bin) always show.
+static void fn_name_line(int L, int R, int y, const char *fb)
+{
+	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL), room = R - L - ui_w() / 5;
+	if (ui_text_width(UI_BODY, fb) <= room) { ui_text(UI_BODY, L, y, 0xFFFFFF, fb); return; }
+	char mid[240];
+	snprintf(mid, sizeof(mid), "%s", fb);
+	int n = (int)strlen(fb), keep = n / 2;
+	while (ui_text_width(UI_SMALL, mid) > room && keep > 4) {
+		keep--;
+		int head = keep / 2 + keep % 2, tail = keep / 2;
+		while (head > 0 && ((unsigned char)fb[head] & 0xC0) == 0x80) head--;   // whole UTF-8 characters
+		int ts = n - tail;
+		while (ts < n && ((unsigned char)fb[ts] & 0xC0) == 0x80) ts++;
+		snprintf(mid, sizeof(mid), "%.*s…%s", head, fb, fb + ts);
+	}
+	ui_text(UI_SMALL, L, y + (lb - ls) / 2, 0xFFFFFF, mid);
+}
+// A disc's new name by a pattern (from its log's title, Redump name and disc ID), its image's
+// extension on the preview.
+static int gm_owned(const char *name, const char *leaf);
+static void fn_game_name(const char *pat, const GameDisc &d, char *out, size_t n) { name_from(pat, d.rdname, d.title, d.id, out, n); }
+
+static void fn_draw(const FnView &f)
+{
+	draw_backdrop();
+	int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL), L = ui_w() / 6, R = ui_w() * 5 / 6;
+	char sub[200];
+	if (f.game) snprintf(sub, sizeof(sub), T(STR_FN_RENAME_TITLE), f.game->name);
+	else snprintf(sub, sizeof(sub), "%s", T(STR_L_FILENAME));
+	ui_text_fit(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + lb / 2, 0xA8B0C8, sub, R - L, UI_CENTER);
+	int y = ui_h() / 10 + ui_line(UI_TITLE) + lb * 3 / 2;
+	// the pattern: variables as blue chips, other characters as they are (a space as a dot)
+	y += section_head(L, R, y, T(STR_FN_PATTERN));
+	int x = L, pad = ui_w() / 120, cx = L, pi = 0;
+	bool on = ((now_ms() - f.blink0) / 500) % 2 == 0;   // the cursor blinks
+	for (const char *q = f.pat; *q; q++, pi++) {
+		if (pi == f.cur) cx = x;
+		if (*q == '%' && q[1]) {
+			q++;
+			int k = *q == 'T' ? 0 : *q == 'R' ? 1 : *q == 'D' ? 2 : *q == 'N' ? 3 : -1;
+			const char *w = k >= 0 ? T(FN_PLBL[k]) : "%";
+			int tw = ui_text_width(UI_BODY, w);
+			ui_rect(x, y - lb / 8, tw + pad * 2, lb + lb / 4, 0xFF3D6FD9);
+			ui_text(UI_BODY, x + pad, y, 0xFFFFFF, w);
+			x += tw + pad * 3;
+		} else {
+			char c[2] = {*q == ' ' ? (char)0 : *q, 0};
+			const char *w = *q == ' ' ? "·" : c;
+			x += ui_text(UI_BODY, x, y, 0xC8D0E0, w) + pad;
+		}
+	}
+	if (f.cur >= pi) cx = x;   // at the end
+	if (on) ui_rect(cx - 3, y - lb / 8, 3, lb + lb / 4, 0xFFFFFFFF);   // where the next part goes
+	y += lb + ls;
+	// parts to add
+	y += section_head(L, R, y, T(STR_FN_ADD));
+	x = L;
+	for (int i = 0; i < FN_NP; i++) {
+		const char *w = i < FN_NL ? T(FN_PLBL[i]) : FN_PARTS[i];
+		int tw = ui_text_width(UI_SMALL, w);
+		ui_rect(x, y - ls / 8, tw + pad * 3, ls + ls / 4, i == f.sel ? 0xFF3D6FD9 : 0xFF404668);
+		ui_text(UI_SMALL, x + pad * 3 / 2, y, i == f.sel ? 0xFFFFFF : 0xC8D0E0, w);
+		x += tw + pad * 4;
+	}
+	y += ls * 2;
+	ui_text_fit(UI_SMALL, L, y, 0x8FA8D8, T(STR_FN_NOTE), R - L);
+	y += ls + ls / 2;
+	if (f.game && f.foreign) {   // no pattern gives its name: the name now, above what the pattern makes
+		char now[260];
+		snprintf(now, sizeof(now), T(STR_FN_NOW), fn_leaf(g_gl.d[f.game->first].base));
+		ui_text_fit(UI_BODY, L, y, 0xFFFFFF, now, R - L);
+		y += lb + ls / 2;
+	}
+	y += section_head(L, R, y, T(STR_FN_PREVIEW));
+	int step = lb + ls * 2 + ls / 3;
+	if (f.game) {   // the game: each disc's new name, its name now, and its other files that follow
+		const Game &g = *f.game;
+		step += ls;
+		for (int i = 0; i < g.ndiscs; i++) {
+			if (i && y + step > hint_y() - ls * 2) {   // no room for the rest
+				char more[64];
+				snprintf(more, sizeof(more), T(STR_FN_MORE), g.ndiscs - i);
+				ui_text(UI_SMALL, L, y, 0x8FA8D8, more);
+				break;
+			}
+			const GameDisc &d = g_gl.d[g.first + i];
+			char fn[200], fb[220], now[260];
+			fn_game_name(f.pat, d, fn, sizeof(fn));
+			const char *dot = d.image[0] ? strrchr(d.image, '.') : NULL;
+			snprintf(fb, sizeof(fb), "%s%s", fn, dot && !strchr(dot, '/') ? dot : ".bin");
+			fn_name_line(L, R, y, fb);
+			const char *sl = strrchr(d.base, '/');
+			int nrow = !(f.foreign && g.ndiscs == 1);   // a single disc's name now is already above the preview
+			if (nrow) {
+				snprintf(now, sizeof(now), T(STR_FN_NOW), sl ? sl + 1 : d.base);
+				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, now, R - L - ui_w() / 60);
+			}
+			// the set's other files named after it (cue, log, .md5, cover, ...): by their ending
+			const char *old = sl ? sl + 1 : d.base, *il = d.image[0] ? strrchr(d.image, '/') : NULL;
+			char ends[200] = "";
+			size_t off = 0;
+			for (int k = 0; k < d.nfiles; k++, off += strlen(d.files + off) + 1) {
+				const char *nm = d.files + off;
+				if (!gm_owned(nm, old) || (il && !strcmp(nm, il + 1))) continue;
+				size_t el = strlen(ends);
+				snprintf(ends + el, sizeof(ends) - el, "%s%s", el ? " · " : "", nm + strlen(old));
+			}
+			if (ends[0]) {
+				snprintf(now, sizeof(now), T(STR_FN_ALSO), ends);
+				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb + (nrow ? ls : 0), 0x8FA8D8, now, R - L - ui_w() / 60);
+			}
+			y += step;
+		}
+	} else {   // each disc in a drive, else an example
+		int list[NCARDS], nc = card_list(list), shown = 0;
+		for (int i = 0; i <= nc; i++) {
+			const char *rn, *tt, *sr, *dn = "";
+			char drv[96];
+			if (i < nc) {
+				Card &k = g_cards[list[i]];
+				if (k.state != DISC_READY) continue;
+				rn = k.rd_name; tt = k.title; sr = k.serial;
+				source_name(list[i] ? list[i] - 1 : -1, drv, sizeof(drv));
+				dn = drv;
+			} else {
+				if (shown) break;
+				rn = "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)"; tt = "Croc 2"; sr = "SLES_020.88";
+			}
+			char fn[200], fb[220], ln[200], lv[260];
+			name_from(f.pat, rn, tt, sr, fn, sizeof(fn));
+			snprintf(fb, sizeof(fb), "%s.bin", fn);
+			listed_name(fn, ln, sizeof(ln));
+			snprintf(lv, sizeof(lv), T(STR_FN_LISTED), ln);
+			fn_name_line(L, R, y, fb);
+			int cw = dn[0] ? drive_column(list[i], R, y, sr) + ui_w() / 60 : 0;   // like on the cards, ID without size
+			ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, lv, R - L - ui_w() / 60 - cw);
+			y += step;
+			shown++;
+		}
+	}
+	// renaming a game: START renames; a row too wide leaves out the cursor's hint first
+	const char *b[7], *l[7];
+	int m = 0;
+	b[m] = "l1r1"; l[m++] = T(STR_HINT_CURSOR);
+	b[m] = "leftright"; l[m++] = T(STR_HINT_PICK_PART);
+	b[m] = "cross"; l[m++] = T(STR_HINT_ADD);
+	b[m] = "square"; l[m++] = T(STR_HINT_DEL_LAST);
+	b[m] = "triangle"; l[m++] = T(STR_HINT_TYPE);
+	if (f.game) { b[m] = "start"; l[m++] = T(STR_HINT_RENAME); }
+	b[m] = "circle"; l[m++] = T(STR_HINT_BACK);
+	int sum = 0;
+	for (int i = 0; i < m; i++) sum += ui_hint_width(b[i], l[i]);
+	if (sum + (m - 1) * (ui_w() / 60) > ui_w() * 94 / 100) { for (int i = 1; i < m; i++) { b[i - 1] = b[i]; l[i - 1] = l[i]; } m--; }
+	hint_bar(b, l, m);
+}
+
+// One press: 0 stays, 1 back (O), 2 rename (START, a game only).
+static int fn_input(FnView &f, int p)
+{
+	if (p) f.blink0 = now_ms();   // the cursor shows at once after a key
+	int st[100], np = fn_part_starts(f.pat, st);
+	if (f.cur > np) f.cur = np;
+	if (p & B_RIGHT) f.sel = (f.sel + 1) % FN_NP;
+	if (p & B_LEFT) f.sel = (f.sel + FN_NP - 1) % FN_NP;
+	if ((p & B_R1) && f.cur < np) f.cur++;
+	if ((p & B_L1) && f.cur > 0) f.cur--;
+	if ((p & B_CROSS) && strlen(f.pat) + 3 < sizeof(f.pat)) {   // in at the cursor
+		int at = st[f.cur];
+		char rest[96];
+		snprintf(rest, sizeof(rest), "%s", f.pat + at);
+		snprintf(f.pat + at, sizeof(f.pat) - at, "%s%s", FN_PARTS[f.sel], rest);
+		f.cur++;
+	}
+	if ((p & B_SQUARE) && f.cur > 0) {   // the part before the cursor
+		int a0 = st[f.cur - 1], a1 = st[f.cur];
+		memmove(f.pat + a0, f.pat + a1, strlen(f.pat + a1) + 1);
+		f.cur--;
+	}
+	if (p & B_TRIANGLE) {
+		char e[96];
+		snprintf(e, sizeof(e), "%s", f.pat);
+		if (osk_input(T(STR_FN_OSK_Q), e, sizeof(e))) { snprintf(f.pat, sizeof(f.pat), "%s", e); int s2[100]; f.cur = fn_part_starts(f.pat, s2); }
+		pad_pressed();
+	}
+	if ((p & B_START) && f.game) return 2;
+	if (p & B_CIRCLE) return 1;
+	return 0;
+}
+
+// The file name view: the pattern as parts, a preview for the discs in the drives (file name and
+// how webMAN lists it), parts to add with X, square removes the last one, triangle types freely.
+// With a game (the game list's Rename): the preview is that game, START renames it by the pattern
+// (into pat_out, returns 1); the setting is not changed then. O goes back (0).
+static int filename_screen(const Game *game = NULL, char *pat_out = NULL)
+{
+	FnView f;
+	fn_open(f, game);
 	pad_pressed();
 	g_redraw = 2;
 	while (!exit_requested) {
 		if (g_redraw > 0) {
 			g_redraw = 0;
 			g_drawn = 2;
-			draw_backdrop();
-			int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL), L = ui_w() / 6, R = ui_w() * 5 / 6;
-			ui_text(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + lb / 2, 0xA8B0C8, T(STR_L_FILENAME), UI_CENTER);
-			int y = ui_h() / 10 + ui_line(UI_TITLE) + lb * 3 / 2;
-			// the pattern: variables as blue chips, other characters as they are (a space as a dot)
-			y += section_head(L, R, y, T(STR_FN_PATTERN));
-			int x = L, pad = ui_w() / 120, cx = L, pi = 0;
-			bool on = ((now_ms() - blink0) / 500) % 2 == 0;   // the cursor blinks
-			for (const char *q = pat; *q; q++, pi++) {
-				if (pi == cur) cx = x;
-				if (*q == '%' && q[1]) {
-					q++;
-					int k = *q == 'T' ? 0 : *q == 'R' ? 1 : *q == 'D' ? 2 : *q == 'N' ? 3 : -1;
-					const char *w = k >= 0 ? T(plbl[k]) : "%";
-					int tw = ui_text_width(UI_BODY, w);
-					ui_rect(x, y - lb / 8, tw + pad * 2, lb + lb / 4, 0xFF3D6FD9);
-					ui_text(UI_BODY, x + pad, y, 0xFFFFFF, w);
-					x += tw + pad * 3;
-				} else {
-					char c[2] = {*q == ' ' ? (char)0 : *q, 0};
-					const char *w = *q == ' ' ? "·" : c;
-					x += ui_text(UI_BODY, x, y, 0xC8D0E0, w) + pad;
-				}
-			}
-			if (cur >= pi) cx = x;   // at the end
-			if (on) ui_rect(cx - 3, y - lb / 8, 3, lb + lb / 4, 0xFFFFFFFF);   // where the next part goes
-			y += lb + ls;
-			// parts to add
-			y += section_head(L, R, y, T(STR_FN_ADD));
-			x = L;
-			for (int i = 0; i < NP; i++) {
-				const char *w = i < NL ? T(plbl[i]) : parts[i];
-				int tw = ui_text_width(UI_SMALL, w);
-				ui_rect(x, y - ls / 8, tw + pad * 3, ls + ls / 4, i == sel ? 0xFF3D6FD9 : 0xFF404668);
-				ui_text(UI_SMALL, x + pad * 3 / 2, y, i == sel ? 0xFFFFFF : 0xC8D0E0, w);
-				x += tw + pad * 4;
-			}
-			y += ls * 2;
-			ui_text_fit(UI_SMALL, L, y, 0x8FA8D8, T(STR_FN_NOTE), R - L);
-			y += ls + ls / 2;
-			// preview: each disc in a drive, else an example
-			y += section_head(L, R, y, T(STR_FN_PREVIEW));
-			int list[NCARDS], nc = card_list(list), shown = 0;
-			for (int i = 0; i <= nc; i++) {
-				const char *rn, *tt, *sr, *dn = "";
-				char drv[96];
-				if (i < nc) {
-					Card &k = g_cards[list[i]];
-					if (k.state != DISC_READY) continue;
-					rn = k.rd_name; tt = k.title; sr = k.serial;
-					source_name(list[i] ? list[i] - 1 : -1, drv, sizeof(drv));
-					dn = drv;
-				} else {
-					if (shown) break;
-					rn = "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)"; tt = "Croc 2"; sr = "SLES_020.88";
-				}
-				char fn[200], fb[220], ln[200], lv[260];
-				name_from(pat, rn, tt, sr, fn, sizeof(fn));
-				snprintf(fb, sizeof(fb), "%s.bin", fn);
-				listed_name(fn, ln, sizeof(ln));
-				snprintf(lv, sizeof(lv), T(STR_FN_LISTED), ln);
-				// the whole name if it fits; else smaller, and if even that is too long cut in the middle,
-				// so the start and the end (disc ID, .bin) always show
-				{
-					int room = R - L - ui_w() / 5;
-					if (ui_text_width(UI_BODY, fb) <= room) ui_text(UI_BODY, L, y, 0xFFFFFF, fb);
-					else {
-						char mid[240];
-						snprintf(mid, sizeof(mid), "%s", fb);
-						int n = (int)strlen(fb), keep = n / 2;
-						while (ui_text_width(UI_SMALL, mid) > room && keep > 4) {
-							keep--;
-							int head = keep / 2 + keep % 2, tail = keep / 2;
-							while (head > 0 && ((unsigned char)fb[head] & 0xC0) == 0x80) head--;   // whole UTF-8 characters
-							int ts = n - tail;
-							while (ts < n && ((unsigned char)fb[ts] & 0xC0) == 0x80) ts++;
-							snprintf(mid, sizeof(mid), "%.*s…%s", head, fb, fb + ts);
-						}
-						ui_text(UI_SMALL, L, y + (lb - ls) / 2, 0xFFFFFF, mid);
-					}
-				}
-				int cw = dn[0] ? drive_column(list[i], R, y, sr) + ui_w() / 60 : 0;   // like on the cards, ID without size
-				ui_text_fit(UI_SMALL, L + ui_w() / 60, y + lb, 0x8FA8D8, lv, R - L - ui_w() / 60 - cw);
-				y += lb + ls * 2 + ls / 3;
-				shown++;
-			}
-			const char *b[] = {"l1r1", "leftright", "cross", "square", "triangle", "circle"};
-			const char *l[] = {T(STR_HINT_CURSOR), T(STR_HINT_PICK_PART), T(STR_HINT_ADD), T(STR_HINT_DEL_LAST), T(STR_HINT_TYPE), T(STR_HINT_BACK)};
-			hint_bar(b, l, 6);
+			fn_draw(f);
 		}
 		flip_frame();
 		{ static uint64_t last = 0; if (now_ms() - last >= 250) { last = now_ms(); g_redraw = 2; } }   // the blinking cursor
 		int p = pad_pressed();
-		if (p) { g_redraw = 2; blink0 = now_ms(); }   // the cursor shows at once after a key
-		int st[100], np = part_starts(st);
-		if (cur > np) cur = np;
-		if (p & B_RIGHT) sel = (sel + 1) % NP;
-		if (p & B_LEFT) sel = (sel + NP - 1) % NP;
-		if ((p & B_R1) && cur < np) cur++;
-		if ((p & B_L1) && cur > 0) cur--;
-		if ((p & B_CROSS) && strlen(pat) + 3 < sizeof(pat)) {   // in at the cursor
-			int at = st[cur];
-			char rest[96];
-			snprintf(rest, sizeof(rest), "%s", pat + at);
-			snprintf(pat + at, sizeof(pat) - at, "%s%s", parts[sel], rest);
-			cur++;
-		}
-		if ((p & B_SQUARE) && cur > 0) {   // the part before the cursor
-			int a0 = st[cur - 1], a1 = st[cur];
-			memmove(pat + a0, pat + a1, strlen(pat + a1) + 1);
-			cur--;
-		}
-		if (p & B_TRIANGLE) {
-			char e[96];
-			snprintf(e, sizeof(e), "%s", pat);
-			if (osk_input(T(STR_FN_OSK_Q), e, sizeof(e))) { snprintf(pat, sizeof(pat), "%s", e); int s2[100]; cur = part_starts(s2); }
-			pad_pressed();
-		}
-		if (p & B_CIRCLE) {   // back; a changed pattern is saved only when the question says yes
-			const char *np = pat[0] ? pat : FN_PRESETS[0];   // an empty pattern is the first ready-made one
-			if (!strcmp(np, g_name_pat)) return;
-			int a = own_dialog(T(STR_FN_SAVE_Q), 1);
-			pad_pressed();
-			g_redraw = 2;
-			if (a != 1) return;   // no: the pattern stays as it was
-			snprintf(g_name_pat, sizeof(g_name_pat), "%s", np);
-			cfg_save();
-			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // the cards show the new names
-			logf("file name pattern: %s", g_name_pat);
-			return;
-		}
+		if (p) g_redraw = 2;
+		int a = fn_input(f, p);
+		if (a == 2) { snprintf(pat_out, 96, "%s", f.pat[0] ? f.pat : FN_PRESETS[0]); return 1; }
+		if (a != 1) continue;
+		if (game) return 0;   // back: the game keeps its name
+		// back; a changed pattern is saved only when the question says yes
+		const char *np = f.pat[0] ? f.pat : FN_PRESETS[0];   // an empty pattern is the first ready-made one
+		if (!strcmp(np, g_name_pat)) return 0;
+		int ans = own_dialog(T(STR_FN_SAVE_Q), 1);
+		pad_pressed();
+		g_redraw = 2;
+		if (ans != 1) return 0;   // no: the pattern stays as it was
+		snprintf(g_name_pat, sizeof(g_name_pat), "%s", np);
+		cfg_save();
+		for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // the cards show the new names
+		logf("file name pattern: %s", g_name_pat);
+		return 0;
 	}
+	return 0;
 }
 
 // A list of settings rows with the focused one highlighted (the settings screens share it).
@@ -3893,13 +4389,18 @@ struct AuditView {
 static char av_keys[AV_MAX][96], av_names[AV_MAX][96];
 static uint32_t av_last[AV_MAX];
 static AuditRow av_rows[AV_MAX];
-static const AuditDom av_doms[] = {AU_RIPS, AU_SETTINGS};
+static const AuditDom av_doms[] = {AU_RIPS, AU_SETTINGS, AU_FILES};
+static volatile int g_files_busy;   // a game's files are being moved or deleted (an action, an undo): busy, no deploy now
+static void audit_label(const struct AuditView &v, int i, char *out, size_t n);
+#define AV_NDOMS 3
+// Level 1 of rips and files lists discs (a file action's disc: its set's ID; the trash's emptying: .trash).
+static int av_discs(const AuditView &v) { return v.level == 1 && (v.dom == AU_RIPS || v.dom == AU_FILES); }
 
 static int av_count(const AuditView &v) { return v.level == 3 ? v.base + v.n : v.n; }
 
 static const AuditRow *audit_focused(const AuditView &v)
 {
-	if (v.level == 0 || (v.level == 1 && v.dom == AU_RIPS)) return NULL;
+	if (v.level == 0 || av_discs(v)) return NULL;
 	int i = v.level == 3 ? v.row - v.base : v.row;
 	return i >= 0 && i < v.n ? &av_rows[i] : NULL;
 }
@@ -3942,9 +4443,9 @@ static void av_load(AuditView &v)
 {
 	if (v.level == 0) {
 		AuditRow one;
-		v.n = 2;
-		v.empty = audit_discs(NULL, NULL, NULL, NULL, 1) == 0 && audit_events(AU_SETTINGS, NULL, &one, 1) == 0;
-	} else if (v.level == 1 && v.dom == AU_RIPS) v.n = audit_discs(av_keys, av_names, NULL, av_last, AV_MAX);
+		v.n = AV_NDOMS;
+		v.empty = audit_discs(NULL, NULL, NULL, NULL, 1) == 0 && audit_events(AU_SETTINGS, NULL, &one, 1) == 0 && audit_events(AU_FILES, NULL, &one, 1) == 0;
+	} else if (av_discs(v)) v.n = audit_discs(av_keys, av_names, NULL, av_last, AV_MAX, v.dom);
 	else if (v.level < 3) v.n = audit_events(v.dom, v.level == 2 ? v.disc : NULL, av_rows, AV_MAX);
 	else { av_page(v, v.first); return; }
 	if (v.row >= v.n) v.row = v.n ? v.n - 1 : 0;
@@ -3978,7 +4479,7 @@ static void audit_nav(AuditView &v, int p)
 static int av_can_open(const AuditView &v)
 {
 	if (v.level == 0) return !v.empty;
-	if (v.level == 1) return v.dom == AU_RIPS && v.n > 0;
+	if (v.level == 1) return av_discs(v) && v.n > 0;
 	const AuditRow *r = audit_focused(v);
 	return v.level == 2 && r && !strcmp(r->kind, "job");
 }
@@ -3990,7 +4491,7 @@ static void audit_open(AuditView &v)
 	if (v.level == 0) v.dom = av_doms[v.row];
 	else if (v.level == 1) {
 		snprintf(v.disc, sizeof(v.disc), "%s", av_keys[v.row]);
-		snprintf(v.disc_name, sizeof(v.disc_name), "%s", av_names[v.row]);
+		audit_label(v, v.row, v.disc_name, sizeof(v.disc_name));
 	} else v.ev = *audit_focused(v);
 	v.back[v.level++] = v.row;
 	v.row = v.first = v.base = v.n = v.more = 0;
@@ -4014,7 +4515,7 @@ static int audit_back(AuditView &v)
 // Triangle is offered on: a disc (all its kept changes), a job (its sectors) and a row that can be undone.
 static int audit_can_undo(const AuditView &v)
 {
-	if (v.level == 1 && v.dom == AU_RIPS) return v.n > 0 && v.undo_ok == 1;
+	if (av_discs(v)) return v.dom == AU_RIPS && v.n > 0 && v.undo_ok == 1;   // a disc's files: by their jobs
 	const AuditRow *r = audit_focused(v);
 	if (!r) return 0;
 	if (v.level == 2 && !strcmp(r->kind, "job")) return v.undo_ok == 1;
@@ -4023,7 +4524,7 @@ static int audit_can_undo(const AuditView &v)
 // The undo would apply undone changes again (a disc or job all undone, or an undo row): △ says Redo.
 static int audit_is_redo(const AuditView &v)
 {
-	if (v.level == 1 && v.dom == AU_RIPS) return v.undo_redo;
+	if (av_discs(v)) return v.undo_redo;
 	const AuditRow *r = audit_focused(v);
 	if (!r) return 0;
 	if (v.level == 2 && !strcmp(r->kind, "job")) return v.undo_redo;
@@ -4033,7 +4534,7 @@ static int audit_is_redo(const AuditView &v)
 static void av_focus_key(const AuditView &v, char *out, size_t n)
 {
 	const AuditRow *r = audit_focused(v);
-	if (v.level == 1 && v.dom == AU_RIPS && v.row < v.n) snprintf(out, n, "%s", av_keys[v.row]);
+	if (av_discs(v) && v.row < v.n) snprintf(out, n, "%s", av_keys[v.row]);
 	else if (r) snprintf(out, n, "%u", (unsigned)r->id);
 	else out[0] = 0;
 }
@@ -4051,12 +4552,15 @@ static const char *av_src(AuditSrc s)
 }
 
 // A config key as the settings name it, and a value as they show it.
+static void gl_key_name(const char *key, const GlSource *src, int nsrc, char *out, size_t n);
+static void gl_criteria_text(const GameFilter &f, char *out, size_t n);
 static const char *av_key_label(const char *key)
 {
 	static const struct { const char *key; StrId s; } names[] = {
 		{"speed", STR_L_SPEED}, {"retries", STR_L_RETRIES}, {"check", STR_L_CHECK}, {"eject", STR_L_EJECT},
 		{"autostart", STR_L_AUTOSTART}, {"name_pattern", STR_L_FILENAME}, {"redump", STR_L_REDUMP}, {"remote", STR_L_REMOTE},
-		{"webhook_on", STR_L_WEBHOOK}, {"webhook", STR_WH_ADDRESS}, {"outdir", STR_L_TARGET}, {"audit_mb", STR_L_AUDIT_MB}};
+		{"webhook_on", STR_L_WEBHOOK}, {"webhook", STR_WH_ADDRESS}, {"outdir", STR_L_TARGET}, {"audit_mb", STR_L_AUDIT_MB},
+		{"games_source", STR_GL_AU_SOURCE}, {"games_filter", STR_GL_AU_FILTER}};
 	for (auto &k : names) if (!strcmp(key, k.key)) return T(k.s);
 	if (!strncmp(key, "webhook_header", 14)) return T(STR_WH_HEADERS);
 	return key;
@@ -4064,6 +4568,7 @@ static const char *av_key_label(const char *key)
 static void av_setting_val(const char *key, const char *val, char *out, size_t n)
 {
 	int v = atoi(val);
+	GameFilter f;
 	if (!val[0]) out[0] = 0;
 	else if (!strcmp(key, "speed") && v >= 0 && v <= 3) fmt_speed(v, out, n);
 	else if (!strcmp(key, "check") && v >= CHECK_OFF && v <= CHECK_BITPERFECT) fmt_check(v, out, n);
@@ -4072,6 +4577,8 @@ static void av_setting_val(const char *key, const char *val, char *out, size_t n
 	else if (!strcmp(key, "redump")) snprintf(out, n, "%s", v == RD_ONLINE ? T(STR_RD_ONLINE) : v == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
 	else if (!strcmp(key, "audit_mb")) snprintf(out, n, T(STR_AUDIT_MB_VAL), v);
 	else if (!strcmp(key, "name_pattern")) fn_label(val, out, n);
+	else if (!strcmp(key, "games_source")) gl_key_name(val, NULL, 0, out, n);
+	else if (!strcmp(key, "games_filter") && games_filter_parse(val, &f)) gl_criteria_text(f, out, n);
 	else snprintf(out, n, "%s", val);
 }
 
@@ -4096,6 +4603,18 @@ static void av_reason(const AuditReason &rs, char *out, size_t n)
 	case AW_NO_ROW: case AW_NO_DISC: snprintf(out, n, "%s", T(STR_AW_NOT_FOUND)); break;
 	case AW_REPLACED: snprintf(out, n, "%s", T(STR_AW_REPLACED)); break;
 	case AW_STOPPED: snprintf(out, n, "%s", T(STR_AW_STOPPED)); break;
+	case AW_MOVE_TAKEN: snprintf(out, n, T(STR_AW_MOVE_TAKEN), rs.file); break;
+	case AW_MOVE_GONE: snprintf(out, n, T(STR_AW_MOVE_GONE), rs.file); break;
+	case AW_TRASH_EMPTIED: snprintf(out, n, T(STR_AW_TRASH_EMPTIED), rs.file); break;
+	case AW_FILE_BUSY: snprintf(out, n, T(STR_AW_FILE_BUSY), rs.file); break;
+	case AW_CANNOT_MOVE: snprintf(out, n, T(STR_AW_CANNOT_MOVE), rs.file); break;
+	case AW_TOO_LONG: snprintf(out, n, T(STR_AW_TOO_LONG), rs.file); break;
+	case AW_MOVE_FAILED: snprintf(out, n, "%s", T(STR_AW_MOVE_FAILED)); break;
+	case AW_NOT_PUT_BACK:   // and a cue back without its own FILE lines: named too
+		if (rs.what[0]) snprintf(out, n, T(STR_AW_NOT_PUT_BACK_BENT), (int)rs.lba, rs.file, rs.what);
+		else snprintf(out, n, T(STR_AW_NOT_PUT_BACK), (int)rs.lba, rs.file);
+		break;
+	case AW_NOT_RESTORED: snprintf(out, n, T(STR_AW_NOT_RESTORED), rs.file); break;
 	default: snprintf(out, n, "%s", T(STR_AUDIT_NO_UNDO)); break;
 	}
 }
@@ -4115,8 +4634,16 @@ static AuditReason av_row_reason(const AuditRow &r)
 // What a row did, in words.
 static void av_row_label(const AuditRow &r, char *out, size_t n)
 {
-	if (!strcmp(r.kind, "job"))
-		snprintf(out, n, "%s", T(!strcmp(r.what, "repair") ? STR_HINT_REPAIR : !strcmp(r.what, "check") ? STR_HINT_CHECK : STR_HINT_RIP));
+	if (!strcmp(r.kind, "job")) {
+		static const struct { const char *what; StrId s; } jobs[] = {
+			{"repair", STR_HINT_REPAIR}, {"check", STR_HINT_CHECK}, {"rename", STR_HINT_RENAME}, {"trash", STR_HINT_TRASH},
+			{"restore", STR_HINT_RESTORE}, {"empty", STR_HINT_EMPTY_TRASH}, {"migrate", STR_AUDIT_MIGRATE}};
+		StrId s = STR_HINT_RIP;
+		for (auto &j : jobs) if (!strcmp(r.what, j.what)) s = j.s;
+		snprintf(out, n, "%s", T(s));
+	}
+	else if (!strcmp(r.kind, "move")) { const char *a = strrchr(r.before, '/'); snprintf(out, n, "%s", a ? a + 1 : r.before); }   // the file (where to: the footer)
+	else if (!strcmp(r.kind, "delete")) { const char *a = strrchr(r.before, '/'); snprintf(out, n, T(STR_AUDIT_DELETED), a ? a + 1 : r.before); }
 	else if (!strcmp(r.kind, "sector")) snprintf(out, n, T(STR_AUDIT_SECTOR), (unsigned)r.lba);
 	else if (!strcmp(r.kind, "setting")) {
 		if (r.norev) snprintf(out, n, "%s", av_key_label(r.what));   // a secret: only set / cleared was logged
@@ -4142,12 +4669,14 @@ static void av_row_label(const AuditRow &r, char *out, size_t n)
 	}
 }
 
+static StrId av_dom_name(AuditDom d) { return d == AU_RIPS ? STR_AUDIT_DOM_RIPS : d == AU_FILES ? STR_AUDIT_DOM_FILES : STR_AUDIT_DOM_SETTINGS; }
+
 // Entry i of the level: its label, and the value at the right (when, and where it came from).
 static void audit_label(const AuditView &v, int i, char *out, size_t n)
 {
 	out[0] = 0;
-	if (v.level == 0) snprintf(out, n, "%s", T(av_doms[i] == AU_RIPS ? STR_AUDIT_DOM_RIPS : STR_AUDIT_DOM_SETTINGS));
-	else if (v.level == 1 && v.dom == AU_RIPS) { if (i < v.n) snprintf(out, n, "%s", av_names[i]); }
+	if (v.level == 0) snprintf(out, n, "%s", T(av_dom_name(av_doms[i])));
+	else if (av_discs(v)) { if (i < v.n) snprintf(out, n, "%s", !strcmp(av_keys[i], ".trash") ? T(STR_GL_V_TRASH) : av_names[i]); }
 	else {
 		int k = v.level == 3 ? i - v.base : i;
 		if (k >= 0 && k < v.n) av_row_label(av_rows[k], out, n);
@@ -4157,7 +4686,7 @@ static void av_value(const AuditView &v, int i, char *out, size_t n)
 {
 	out[0] = 0;
 	if (v.level == 0) return;
-	if (v.level == 1 && v.dom == AU_RIPS) { fmt_local(av_last[i], out, n); return; }
+	if (av_discs(v)) { fmt_local(av_last[i], out, n); return; }
 	int k = v.level == 3 ? i - v.base : i;
 	if (k < 0 || k >= v.n) return;
 	char when[32];
@@ -4181,9 +4710,15 @@ static int audit_undo(AuditView &v, char *why, size_t n)
 	int rc = -1;
 	AuditReason rs;
 	memset(&rs, 0, sizeof(rs));
+	g_files_busy = v.dom == AU_FILES;   // moves back: no deploy in the middle
 	if (v.level == 1 && v.dom == AU_RIPS) rc = audit_undo_disc_since(key, 0, why, n, &rs);
 	else if (r && v.level == 2 && !strcmp(r->kind, "job")) rc = audit_undo_job(r->job, why, n, &rs);
 	else if (r) rc = audit_undo_row(r->id, why, n, &rs);
+	g_files_busy = 0;
+	if (v.dom == AU_FILES) {   // the game list and the rip index read their folders again, a card showing a moved rip looks again
+		idx_stale();
+		for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;
+	}
 	if (rc) logf("audit undo of %s refused: %s", key, why);   // the English text, for the log
 	snprintf(v.why_key, sizeof(v.why_key), "%s", rc ? key : "");
 	v.why = rs;
@@ -4204,7 +4739,7 @@ static void audit_draw(const AuditView &v)
 	int ls = ui_line(UI_SMALL);
 	char sub[240], lb[160];
 	if (v.level == 0) snprintf(sub, sizeof(sub), "%s", T(STR_L_AUDIT));
-	else if (v.level == 1) snprintf(sub, sizeof(sub), "%s · %s", T(STR_L_AUDIT), T(v.dom == AU_RIPS ? STR_AUDIT_DOM_RIPS : STR_AUDIT_DOM_SETTINGS));
+	else if (v.level == 1) snprintf(sub, sizeof(sub), "%s · %s", T(STR_L_AUDIT), T(av_dom_name(v.dom)));
 	else if (v.level == 2) snprintf(sub, sizeof(sub), "%s", v.disc_name);
 	else { av_row_label(v.ev, lb, sizeof(lb)); snprintf(sub, sizeof(sub), "%s · %s", lb, v.disc_name); }
 	int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, lh = ui_line(UI_BODY) * 17 / 10;
@@ -4244,6 +4779,8 @@ static void audit_draw(const AuditView &v)
 		av_reason(v.no_undo, det, sizeof(det));   // a disc or a job: the core's answer
 	else if (r && (!r->undone || r->redo) && !r->reversible) av_reason(av_row_reason(*r), det, sizeof(det));   // an undone row: why no redo
 	else if (r && (!strcmp(r->kind, "sector") || (!strcmp(r->kind, "undo") && r->file[0]))) { const char *s = strrchr(r->file, '/'); snprintf(det, sizeof(det), "%s", s ? s + 1 : r->file); }
+	else if (r && !strcmp(r->kind, "move")) snprintf(det, sizeof(det), "→ %s", r->after);   // where it went
+	else if (r && !strcmp(r->kind, "delete")) snprintf(det, sizeof(det), "%s", r->before);
 	if (det[0]) footer_note(det);
 	const char *b[5], *l[5];
 	int m = 0;
@@ -4339,62 +4876,1318 @@ static void audit_screen()
 	}
 }
 
-// Settings (START): the standard for the drives (speed, re-reads, check, eject, rip at once; a
-// drive can have its own values, SELECT on its card), Redump, the Redump copy, remote view, webhooks.
+// ---------------------------------------------------------------- the game list (Settings → Games)
+// One source's games (or All, or a source's trash), in rows with their status and format. The
+// list comes from the background scan (gl_open on open and on a source switch only); the rows a
+// filter shows are worked out when a result is taken or the filter changes, never per frame.
+// ↑↓ select, L2/R2 jump by first letter, X the detail view, R1 the filter panel (its last row
+// switches between the games and the trash), L1 clears the filter, SELECT the next source.
+// □ checks the focused game against Redump from its file(s), START every unchecked game shown (one
+// background job with its progress screen, O cancels); both only while Redump is on. The trash
+// △ moves the focused game to the source's trash (<PSXISO>/.trash; in the trash: back), START in the
+// trash empties it after a question, X in the detail view renames the game through the file name
+// view; each is an audit job in the Files domain, undoable from the audit screen (emptying not).
+#define GD_LINES 200     // lines of a detail view
+
+// The check job (□ / START): the discs it checks are its own copy (the list may be read again meanwhile).
+struct GcItem { char base[200], image[220], id[16], title[128]; uint64_t size; int cue; /* the set has its own .cue */ };
+static struct {
+	volatile int running, abort;
+	GcItem *items; int n;            // the discs to check; the screen frees them when the job ended
+	volatile int i;                  // the one being checked
+	volatile uint32_t done, total;   // its progress in sectors
+	volatile int checked, failed;    // so far: compared with Redump; could not be read or written
+	volatile int nocmp;              // hashed or not, not compared: no disc ID for the online lookup
+	volatile int unreach;            // Redump could not be asked (network, no local copy): the job stopped
+} g_gc;
+// The base of the disc the check job works on now ("" when none): a rip or a card's check refuses it.
+static const char *gc_current()
+{
+	if (!g_gc.running || !g_gc.items || g_gc.i < 0 || g_gc.i >= g_gc.n) return "";
+	return g_gc.items[g_gc.i].base;
+}
+static int gc_on(const char *a, const char *b) { const char *c = gc_current(); return c[0] && ((a && !strcmp(a, c)) || (b && !strcmp(b, c))); }
+static void (*g_gc_after)(int i);    // called after each disc (the tests cancel through it)
+static void gc_start(GcItem *items, int n, AuditSrc src);
+
+enum { GV_LIST, GV_DETAIL, GV_FILTER, GV_CONFIRM };
+struct GamesView {
+	char key[8];          // the source shown: hdd, usbN, all
+	int trash;            // its trash (<PSXISO>/.trash) instead of its games
+	GlSource src[GL_SRCS];   // the sources SELECT goes through (read on open and on SELECT)
+	int nsrc;
+	uint32_t gen;         // the result the rows were worked out from
+	int *shown, nshown;   // the rows the filter shows (indices into g_gl.g)
+	int nomem;            // no memory for them
+	int row, first;       // the focused row and the first one on the screen (positions in shown)
+	int mode;             // GV_LIST, GV_DETAIL, GV_FILTER
+	GameFilter f;         // the filter panel's values (applied when it closes)
+	int ftrash, frow;     // the panel's "Show" value and its focused row
+	int dfirst;           // the detail view's first line on the screen
+	char fbase[200];      // the focused game's first disc (base): it stays focused when the list is read again
+	char fimage[220];     // and its image (two sets of one base: an .iso and a rip), "" = any
+	int checking;         // a check job of this screen runs: its progress screen shows
+	int back_detail;      // it was started from the detail view: back there when the list is read again
+	uint32_t gc_sig;      // the progress last drawn
+	char note[200];       // a check's or a move's result or why it was refused, until the next button
+	char ask[300];        // GV_CONFIRM: the question (emptying the trash), X yes, O no
+	int want_rename;      // X in the detail view: the screen opens the file name view for the game
+};
+struct GdLine { char k[48], v[200]; uint32_t col; int head; };
+static GdLine gd_lines[GD_LINES];   // the detail view, read from the set's files when it opens
+static int gd_n;
+
+// The list's layout: the subtitle, the summary, the criteria line, then the rows down to the note
+// above the hint bar (as many as fit).
+static int gv_ysub() { return ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2; }
+static int gv_ysum() { return gv_ysub() + ui_line(UI_BODY) * 6 / 5; }
+static int gv_ycrit() { return gv_ysum() + ui_line(UI_SMALL) * 3 / 2; }
+static int gv_lh() { return ui_line(UI_BODY) * 17 / 10; }
+static int gv_top() { return gv_ycrit() + ui_line(UI_SMALL) * 2 + gv_lh() / 4; }
+static int gv_vis() { int n = (hint_y() - ui_line(UI_SMALL) * 2 - gv_top()) / gv_lh(); return n > 1 ? n : 1; }
+
+
+static int gv_listed(const GamesView &v);
+// 1 when a drive's job (a rip, a repair, a card's check) works on the set with this base.
+static int gc_card_busy(const char *base)
+{
+	for (int c = 0; c < NCARDS; c++) {
+		const Card &k = g_cards[c];
+		if (k.job && (!strcmp(k.base, base) || !strcmp(k.exist, base))) return 1;
+	}
+	return 0;
+}
+// Why a disc cannot be checked from its file, STR_COUNT when it can: a 2048 image (no error data
+// to compare: re-rip), an incomplete set, a set whose file list or names the scan cut, an image in
+// several .bin files, a set a drive works on.
+static StrId gc_refusal(const GameDisc &d)
+{
+	if (d.fmt == GF_2048) return STR_GC_NO_2048;
+	if (d.st == GS_BROKEN || d.fmt != GF_2352 || !d.image[0]) return STR_GC_NO_BROKEN;
+	if (d.files_cut || strlen(d.base) >= sizeof(d.base) - 1 || strlen(d.image) >= sizeof(d.image) - 1) return STR_GC_CUT;
+	int bins = 0;
+	char p[320];
+	for (int i = 0; lib_file_path(&d, i, p, sizeof(p)); i++) {
+		size_t l = strlen(p);
+		if (l > 4 && !strcasecmp(p + l - 4, ".bin")) bins++;
+	}
+	if (bins > 1) return STR_GC_NO_MULTI;
+	if (gc_card_busy(d.base)) return STR_GC_BUSY;
+	return STR_COUNT;
+}
+static void gc_item(const GameDisc &d, GcItem &it)
+{
+	snprintf(it.base, sizeof(it.base), "%s", d.base);
+	snprintf(it.image, sizeof(it.image), "%s", d.image);
+	snprintf(it.id, sizeof(it.id), "%s", d.id);
+	snprintf(it.title, sizeof(it.title), "%s", d.title);
+	it.size = d.size;
+	it.cue = 0;
+	char p[320];
+	for (int i = 0; lib_file_path(&d, i, p, sizeof(p)); i++) {
+		size_t l = strlen(p);
+		if (l > 4 && !strcasecmp(p + l - 4, ".cue")) it.cue = 1;
+	}
+}
+static int gv_listed(const GamesView &v);
+static void gv_scan_key(const GamesView &v, char *out, size_t n);
+static int gv_can_empty(const GamesView &v);
+
+// ---- file actions: rename, the trash, restore, empty (each one audit job in the Files domain)
+// A game's sets are moved by the audit (audit_move): every file or none, logged per file, undoable
+// from the audit screen. The list is read again after each.
+enum { GM_RENAME, GM_TRASH, GM_RESTORE };
+#define GM_FILES 64   // files one action moves (all discs of a game)
+#define GM_CUE_MAX 32766   // the largest .cue a rename rewrites (cue_rename_files reads it whole)
+static const char *const GM_VERBS[] = {"rename", "trash", "restore"};
+
+// A set's file named after its base (folder + leaf, or the leaf alone): "<leaf>.<ext>" or
+// "<leaf> (Track N).<ext>". A rename takes these (and the cue's FILE lines naming them) along.
+static int gm_owned(const char *name, const char *leaf)
+{
+	size_t l = strlen(leaf);
+	return l && !strncmp(name, leaf, l) && (name[l] == '.' || !strncmp(name + l, " (Track ", 8));
+}
+// The same, the case of the name not counted (a cue's FILE line may name the file in another case:
+// FAT32 and exFAT find it all the same).
+static int gm_owned_ci(const char *name, const char *leaf)
+{
+	size_t l = strlen(leaf);
+	return l && !strncasecmp(name, leaf, l) && (name[l] == '.' || !strncasecmp(name + l, " (Track ", 8));
+}
+// One UTF-8 letter of s (advanced past it) in lower case: ASCII, Latin-1, Latin Extended-A, Greek
+// and Cyrillic, the letters exFAT's upcase table folds that game names use. Other code points as
+// they are; a stray byte as itself.
+static uint32_t utf8_lower(const unsigned char *&s)
+{
+	uint32_t c = *s++;
+	if (c >= 0xc0 && c < 0xf8) {
+		int k = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : 1;
+		uint32_t v = c & (0x3f >> k);
+		for (int i = 0; i < k; i++) {
+			if ((*s & 0xc0) != 0x80) return c;   // cut short: the lead byte alone
+			v = v << 6 | (*s++ & 0x3f);
+		}
+		c = v;
+	}
+	if (c >= 'A' && c <= 'Z') return c + 32;
+	if (c >= 0xc0 && c <= 0xde && c != 0xd7) return c + 0x20;
+	if (c == 0x178) return 0xff;
+	if (c >= 0x100 && c <= 0x17f) {   // pairs: upper even (0x139-0x148, 0x179-0x17e: upper odd)
+		bool odd_up = (c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17e);
+		if (c != 0x130 && c != 0x131 && c != 0x138 && c != 0x149 && c != 0x17f && ((c & 1) != 0) == odd_up) return c + 1;
+		return c;
+	}
+	if (c >= 0x391 && c <= 0x3ab && c != 0x3a2) return c + 0x20;
+	if (c >= 0x410 && c <= 0x42f) return c + 0x20;
+	if (c >= 0x400 && c <= 0x40f) return c + 0x50;
+	return c;
+}
+// Two names that differ only in the case of letters outside ASCII (a rename the audit's case-only
+// path, ASCII alone, does not take).
+static int case_only_utf8(const char *a, const char *b)
+{
+	if (!strcmp(a, b) || !strcasecmp(a, b)) return 0;
+	const unsigned char *p = (const unsigned char *)a, *q = (const unsigned char *)b;
+	while (*p && *q) if (utf8_lower(p) != utf8_lower(q)) return 0;
+	return !*p && !*q;
+}
+// A folder lists an entry of exactly this name (bytes, case and all): 1, 0 when not, -1 when it
+// cannot be read.
+struct DirFind { const char *name; int found; };
+static void dir_find_cb(const char *n, void *c) { DirFind *f = (DirFind *)c; if (!strcmp(n, f->name)) f->found = 1; }
+static int dir_lists(const char *dir, const char *name)
+{
+	DirFind f = {name, 0};
+	return vf_listdir(dir, dir_find_cb, &f) < 0 ? -1 : f.found;
+}
+// The disc key the audit groups a set's jobs by: its disc ID (its title without one) and its size,
+// as its checks have it.
+static void gm_key(const GameDisc &d, char *out, size_t n) { snprintf(out, n, "%s:%u", d.id[0] ? d.id : d.title, (unsigned)(d.size / RAW_SIZE)); }
+
+// Why a game's files cannot be moved now, STR_COUNT when they can: a set whose file list or names
+// were cut by the scan (the move would miss files), a drive's job on it, the check job running.
+static StrId gm_refusal(const Game &g)
+{
+	if (g_gc.running) return STR_GC_CARD_BUSY;
+	for (int i = g.first; i < g.first + g.ndiscs; i++) {
+		const GameDisc &d = g_gl.d[i];
+		if (d.files_cut || !d.nfiles || strlen(d.base) >= sizeof(d.base) - 1 || strlen(d.image) >= sizeof(d.image) - 1) return STR_GM_CUT;
+		if (gc_card_busy(d.base)) return STR_GC_BUSY;
+	}
+	return STR_COUNT;
+}
+
+// The moves of one action: every file of the game's discs (a rename: those named after the set),
+// from and to as full paths; leaf[i] = disc i's new name. Returns how many, -1 when they do not fit
+// (or a set in the trash is not in a .trash folder).
+static int gm_plan(const Game &g, int what, char (*leaf)[200], char (*from)[320], char (*to)[320], int max)
+{
+	int n = 0;
+	for (int i = g.first; i < g.first + g.ndiscs; i++) {
+		const GameDisc &d = g_gl.d[i];
+		const char *sl = strrchr(d.base, '/');
+		if (!sl) return -1;
+		int dl = (int)(sl - d.base);
+		const char *old = sl + 1;
+		if (what == GM_RESTORE && (dl < 7 || strncmp(d.base + dl - 7, "/.trash", 7))) return -1;
+		if (what == GM_RENAME && !strcmp(leaf[i - g.first], old)) continue;   // this disc has the new name already
+		char p[320];
+		for (int k = 0; lib_file_path(&d, k, p, sizeof(p)); k++) {
+			const char *fn = p + dl + 1;   // its name in the folder
+			if (what == GM_RENAME && !gm_owned(fn, old)) continue;   // named otherwise: it keeps its name
+			if (n >= max) return -1;
+			snprintf(from[n], 320, "%s", p);
+			if (what == GM_TRASH) snprintf(to[n], 320, "%.*s/.trash/%s", dl, d.base, fn);
+			else if (what == GM_RESTORE) snprintf(to[n], 320, "%.*s/%s", dl - 7, d.base, fn);
+			else snprintf(to[n], 320, "%.*s/%s%s", dl, d.base, leaf[i - g.first], fn + strlen(old));
+			n++;
+		}
+	}
+	return n;
+}
+
+// The list read again after a change (the scan of the source shown); the rip index too, so a moved
+// rip is not taken for a disc's earlier rip under its old name.
+static void gv_rescan(GamesView &v)
+{
+	char k[8];
+	gv_scan_key(v, k, sizeof(k));
+	idx_stale();
+	gl_open(k);
+}
+
+// Moves the focused game: renamed by pattern pat, to the trash or back from it, as one audit job.
+// v.note says what was done or why not; the list is read again (a renamed game stays focused).
+// Returns 0 when moved.
+static int gm_move(GamesView &v, int what, const char *pat)
+{
+	if (!gv_listed(v) || v.row >= v.nshown) return -1;
+	const Game &g = g_gl.g[v.shown[v.row]];
+	char name[128];
+	snprintf(name, sizeof(name), "%s", g.name);
+	StrId why_not = gm_refusal(g);
+	char (*leaf)[200] = (char (*)[200])calloc((size_t)g.ndiscs, 200);
+	static char from[GM_FILES][320], to[GM_FILES][320];   // (the UI thread only)
+	int n = leaf ? 0 : -1;
+	if (!leaf) snprintf(v.note, sizeof(v.note), "%s", T(STR_GL_OOM));
+	else if (why_not != STR_COUNT) { snprintf(v.note, sizeof(v.note), "%s", T(why_not)); n = -1; }
+	else if (what == GM_RENAME) {
+		int same = 1;
+		for (int i = 0; i < g.ndiscs && n >= 0; i++) {
+			const GameDisc &d = g_gl.d[g.first + i];
+			const char *sl = strrchr(d.base, '/');
+			fn_game_name(pat, d, leaf[i], 200);
+			if (!sl || !strcmp(leaf[i], sl + 1)) continue;
+			same = 0;
+			// a set of that name there already (any of its files): refused, nothing mixed into it
+			static const char *const ext[] = {".bin", ".cue", ".log", ".md5", ".jpg", ".sbi", ".iso", ".img", ".bin.part", ".bin.log",
+			                                  ".bin.md5", ".iso.log", ".iso.md5", ".img.log", ".img.md5"};
+			for (const char *e : ext) {
+				char q[340];
+				snprintf(q, sizeof(q), "%.*s/%s%s", (int)(sl - d.base), d.base, leaf[i], e);
+				char own[340];
+				snprintf(own, sizeof(own), "%s%s", d.base, e);
+				if (!strcasecmp(leaf[i], sl + 1) && vf_exists(own)) continue;   // a case-only rename: the file found may be its own
+				// (a different file of that name: the move refuses it)
+				if (!vf_exists(q)) continue;
+				// only the case of a letter outside ASCII differs and the file found is the set's own (the
+				// folder lists no entry of the new name: the file system folds that case), so the move
+				// cannot rename it; a file listed by the new name is a different one: already there
+				char nm[220];
+				snprintf(nm, sizeof(nm), "%s%s", leaf[i], e);
+				char dir[340];
+				snprintf(dir, sizeof(dir), "%.*s", (int)(sl - d.base), d.base);
+				if (case_only_utf8(leaf[i], sl + 1) && vf_exists(own) && dir_lists(dir, nm) == 0) snprintf(v.note, sizeof(v.note), "%s", T(STR_GM_CASE_ONLY));
+				else snprintf(v.note, sizeof(v.note), T(STR_GM_EXISTS), leaf[i]);
+				n = -1;
+				break;
+			}
+		}
+		if (n >= 0 && same) { snprintf(v.note, sizeof(v.note), "%s", T(STR_GM_SAME)); n = -1; }
+	}
+	if (n >= 0 && (n = gm_plan(g, what, leaf, from, to, GM_FILES)) < 0) snprintf(v.note, sizeof(v.note), "%s", T(STR_GM_CUT));
+	for (int i = 0; what == GM_RENAME && i < n; i++) {   // a cue the rename cannot rewrite: refused before anything moves
+		size_t l = strlen(from[i]);
+		uint64_t sz;
+		if (l > 4 && !strcasecmp(from[i] + l - 4, ".cue") && !vf_size(from[i], &sz) && sz > GM_CUE_MAX) {
+			const char *b = strrchr(from[i], '/');
+			snprintf(v.note, sizeof(v.note), T(STR_GM_CUE_BIG), b ? b + 1 : from[i]);
+			n = -1;
+		}
+	}
+	const char *fp[GM_FILES], *tp[GM_FILES];
+	for (int i = 0; i < n; i++) { fp[i] = from[i]; tp[i] = to[i]; }
+	AuditReason rs;
+	char why[200];
+	if (n > 0 && audit_move_check(fp, tp, n, why, sizeof(why), &rs)) {   // before the trash folder is made
+		char rt[200];
+		av_reason(rs, rt, sizeof(rt));
+		snprintf(v.note, sizeof(v.note), T(STR_GM_NOT_MOVED), rt);
+		n = -1;
+	}
+	if (n < 0) {
+		logf("game list %s %s refused: %s", GM_VERBS[what], name, v.note);
+		free(leaf);
+		return -1;
+	}
+	char key[160], dir[320], newbase[400] = "";
+	gm_key(g_gl.d[g.first], key, sizeof(key));
+	for (int i = g.first; i < g.first + g.ndiscs; i++) {
+		const GameDisc &d = g_gl.d[i];
+		const char *sl = strrchr(d.base, '/');
+		snprintf(dir, sizeof(dir), "%.*s", (int)(sl - d.base), d.base);
+		if (what == GM_TRASH) { size_t l = strlen(dir); snprintf(dir + l, sizeof(dir) - l, "/.trash"); vf_mkdir(dir); }   // made on first use
+		if (i == g.first && what == GM_RENAME) snprintf(newbase, sizeof(newbase), "%s/%s", dir, leaf[0]);
+	}
+	g_files_busy = 1;
+	int rc = audit_move(g_input_src, key, name, GM_VERBS[what], fp, tp, n, why, sizeof(why), &rs);
+	g_files_busy = 0;
+	if (rc) {
+		logf("game list %s %s failed: %s", GM_VERBS[what], name, why);
+		char rt[200];
+		av_reason(rs, rt, sizeof(rt));
+		snprintf(v.note, sizeof(v.note), T(STR_GM_NOT_MOVED), rt);
+	} else {
+		logf("game list %s: %s (%d files)", GM_VERBS[what], name, n);
+		snprintf(v.note, sizeof(v.note), T(what == GM_RENAME ? STR_GM_RENAMED : what == GM_TRASH ? STR_GM_TRASHED : STR_GM_RESTORED),
+		         what == GM_RENAME ? leaf[0] : name);
+		for (int c = 0; c < NCARDS; c++)   // a drive's card showing one of these rips looks again
+			for (int i = g.first; i < g.first + g.ndiscs; i++)
+				if (!strcmp(g_cards[c].exist, g_gl.d[i].base) || !strcmp(g_cards[c].base, g_gl.d[i].base)) g_cards[c].recheck = 1;
+		if (newbase[0]) { snprintf(v.fbase, sizeof(v.fbase), "%s", newbase); v.fimage[0] = 0; }   // the renamed game stays focused
+	}
+	free(leaf);
+	v.mode = GV_LIST;
+	gv_rescan(v);
+	return rc;
+}
+
+// The trash shown: its games, and the bytes of their files (what emptying deletes).
+static int gm_trash_size(uint64_t *bytes)
+{
+	*bytes = 0;
+	char p[320];
+	for (int i = 0; i < g_gl.n; i++)
+		for (int k = 0; lib_file_path(&g_gl.d[i], k, p, sizeof(p)); k++) { uint64_t sz; if (!vf_size(p, &sz)) *bytes += sz; }
+	return g_gl.ng;
+}
+// START in the trash: the question, with how many games and MB.
+static void gm_empty_ask(GamesView &v)
+{
+	uint64_t b;
+	int n = gm_trash_size(&b);
+	char mb[32];
+	snprintf(mb, sizeof(mb), "%llu MB", (unsigned long long)((b + (1u << 20) - 1) >> 20));
+	if (n == 1) snprintf(v.ask, sizeof(v.ask), T(STR_GM_EMPTY_Q1), mb);
+	else snprintf(v.ask, sizeof(v.ask), T(STR_GM_EMPTY_Q), n, mb);
+	v.mode = GV_CONFIRM;
+}
+// A file right in the trash of a source the shown trash scan covers: <PSXISO>/.trash/<name>.
+static int gm_in_trash(const char *p)
+{
+	if (strncmp(g_gl.key, "t:", 2)) return 0;
+	const char *k = g_gl.key + 2;
+	for (int i = 0; i < g_gl.nsrc; i++) {
+		const GlSource &s = g_gl.src[i];
+		if (!s.dir[0] || !strcmp(s.key, "all") || (strcmp(k, "all") && strcmp(k, s.key))) continue;
+		char pre[64];
+		int l = snprintf(pre, sizeof(pre), "%s/.trash/", s.dir);
+		if (l > 0 && l < (int)sizeof(pre) && !strncmp(p, pre, (size_t)l) && p[l] && !strchr(p + l, '/')) return 1;
+	}
+	return 0;
+}
+// Yes: every file of the games in the trash shown is deleted, one audit job `empty` with a delete
+// row per file (a record: it cannot be undone). Only files in a .trash folder.
+static void gm_empty(GamesView &v)
+{
+	v.mode = GV_LIST;
+	if (!gv_can_empty(v)) return;
+	uint32_t job = audit_job_begin(g_input_src, ".trash", "", "empty", AU_FILES);
+	int del = 0, failed = 0;
+	char p[320];
+	g_files_busy = 1;
+	for (int i = 0; i < g_gl.n; i++) {
+		const GameDisc &d = g_gl.d[i];
+		for (int k = 0; lib_file_path(&d, k, p, sizeof(p)); k++) {
+			if (!gm_in_trash(p)) { failed++; continue; }   // never outside the trash
+			if (vf_unlink(p) == 0) { audit_note(job, AU_FILES, NULL, "delete", d.title, p, ""); del++; }
+			else { failed++; logf("empty the trash: %s could not be deleted", p); }
+		}
+	}
+	g_files_busy = 0;
+	audit_job_end(job, failed ? "failed" : "finished");
+	logf("empty the trash: %d file(s) deleted, %d failed", del, failed);
+	snprintf(v.note, sizeof(v.note), T(STR_GM_EMPTIED), del);
+	size_t l = strlen(v.note);
+	if (failed) snprintf(v.note + l, sizeof(v.note) - l, T(STR_GM_EMPTY_FAILED), failed);
+	gv_rescan(v);
+}
+
+// The discs START checks: of the games shown, those without a Redump result that can be checked.
+// Into items (up to max; NULL: only counted). Returns how many.
+static int gv_unchecked(const GamesView &v, GcItem *items, int max)
+{
+	int n = 0;
+	for (int r = 0; r < v.nshown; r++) {
+		const Game &g = g_gl.g[v.shown[r]];
+		for (int i = g.first; i < g.first + g.ndiscs; i++) {
+			const GameDisc &d = g_gl.d[i];
+			if (d.rd != -1 || gc_refusal(d) != STR_COUNT) continue;
+			if (items && n < max) gc_item(d, items[n]);
+			n++;
+		}
+	}
+	return n;
+}
+// Each returns whether its action is offered.
+static int gv_can_check(const GamesView &v) { return g_redump != RD_OFF && !v.trash && gv_listed(v) && v.nshown > 0; }       // □
+static int gv_can_check_all(const GamesView &v) { return gv_can_check(v) && gv_unchecked(v, NULL, 0) > 0; }                 // START
+static int gv_can_trash(const GamesView &v) { return gv_listed(v) && v.nshown > 0 && !g_gc.running; }   // △ to the trash (in the trash: restore)
+static int gv_can_rename(const GamesView &v) { return !v.trash && gv_can_trash(v); }                     // X in the detail view
+static int gv_can_empty(const GamesView &v) { return v.trash && gv_listed(v) && g_gl.n > 0 && !g_gc.running; }   // START in the trash
+
+// (keys are hdd, all, usbN: "t:" and five characters fit the scan's 8)
+static void gv_scan_key(const GamesView &v, char *out, size_t n) { snprintf(out, n, "%s%.5s", v.trash ? "t:" : "", v.key); }
+
+// The result in hand is the one of the source shown, and no other scan is on its way.
+static int gv_ready(const GamesView &v)
+{
+	char k[8];
+	gv_scan_key(v, k, sizeof(k));
+	return g_gl.gen && !gl_busy() && !strcmp(g_gl.key, k);
+}
+static int gv_listed(const GamesView &v) { return gv_ready(v) && !g_gl.oom && !g_gl.gone && !v.nomem; }
+
+// A source's name by its key: from the sources read (with the stick's label), else from the key
+// itself (a source that is gone, or that the result could not list).
+static void gl_key_name(const char *key, const GlSource *src, int nsrc, char *out, size_t n)
+{
+	for (int i = 0; src && i < nsrc; i++) if (!strcmp(src[i].key, key)) { snprintf(out, n, "%s", src[i].name); return; }
+	if (!strcmp(key, "hdd")) snprintf(out, n, "%s", T(STR_DEST_HDD));
+	else if (!strcmp(key, "all")) snprintf(out, n, "%s", T(STR_GL_ALL));
+	else if (!strncmp(key, "usb", 3)) snprintf(out, n, T(STR_SRC_USB_PORT), atoi(key + 3));
+	else snprintf(out, n, "%s", key);
+}
+
+// A disc's place: its source's name (only from a result that has its sources).
+static void gv_place(const GameDisc &d, char *out, size_t n)
+{
+	const GlSource *s = g_gl.oom ? NULL : gl_place(&g_gl, &d);
+	snprintf(out, n, "%s", s ? s->name : "");
+}
+
+static void gv_fix(GamesView &v)
+{
+	if (v.row >= v.nshown) v.row = v.nshown ? v.nshown - 1 : 0;
+	if (v.row < 0) v.row = 0;
+	if (v.row < v.first) v.first = v.row;
+	int vis = gv_vis();
+	if (v.row >= v.first + vis) v.first = v.row - vis + 1;
+	if (v.first > v.nshown - vis) v.first = v.nshown > vis ? v.nshown - vis : 0;
+	if (v.shown && v.row < v.nshown && v.gen == g_gl.gen && g_gl.g) {
+		const GameDisc &d = g_gl.d[g_gl.g[v.shown[v.row]].first];
+		snprintf(v.fbase, sizeof(v.fbase), "%s", d.base);
+		snprintf(v.fimage, sizeof(v.fimage), "%s", d.image);
+	}
+}
+
+// The row (position in shown) whose game has a disc with this base (and this image, when one is
+// given and a row has it: two sets of one base), -1 when none shows.
+static int gv_row_of(const GamesView &v, const char *base, const char *image = "")
+{
+	if (!base[0]) return -1;
+	for (int pass = image && image[0] ? 0 : 1; pass < 3; pass++)   // base and image, its first disc, any of its discs
+		for (int r = 0; r < v.nshown; r++) {
+			const Game &g = g_gl.g[v.shown[r]];
+			for (int i = g.first; i < g.first + (pass == 2 ? g.ndiscs : 1); i++)
+				if (!strcmp(g_gl.d[i].base, base) && (pass || !strcmp(g_gl.d[i].image, image))) return r;
+		}
+	return -1;
+}
+
+// The rows the filter shows, from the result in hand; the focused game stays focused when it
+// still shows (found by its first disc's file, also in a result read again).
+static void gv_refilter(GamesView &v)
+{
+	char keep[sizeof(v.fbase)], keepi[sizeof(v.fimage)];
+	snprintf(keep, sizeof(keep), "%s", v.fbase);
+	snprintf(keepi, sizeof(keepi), "%s", v.fimage);
+	int old = v.row;
+	free(v.shown);
+	v.shown = NULL;
+	v.nshown = v.nomem = 0;
+	v.gen = g_gl.gen;
+	if (gv_ready(v) && !g_gl.oom && !g_gl.gone && g_gl.ng > 0) {
+		v.shown = (int *)malloc((size_t)g_gl.ng * sizeof(int));
+		if (!v.shown) v.nomem = 1;
+		else v.nshown = lib_filter(g_gl.g, g_gl.ng, g_gl.d, &g_games_filter, v.shown);
+	}
+	int r = gv_row_of(v, keep, keepi);
+	v.row = r >= 0 ? r : old;
+	gv_fix(v);
+}
+
+// Reads the source shown (or its trash): a switch, or the screen opened.
+static void gv_switch(GamesView &v)
+{
+	char k[8];
+	gv_scan_key(v, k, sizeof(k));
+	v.row = v.first = v.gen = 0;   // (gen 0: no result is worked out yet)
+	v.fbase[0] = v.fimage[0] = 0;
+	free(v.shown);
+	v.shown = NULL;
+	v.nshown = 0;
+	gl_open(k);
+	if (gv_ready(v)) gv_refilter(v);   // the result in hand is current
+}
+
+static void gv_open(GamesView &v)
+{
+	memset(&v, 0, sizeof(v));
+	snprintf(v.key, sizeof(v.key), "%s", g_games_source);
+	v.nsrc = gl_sources(v.src, GL_SRCS);
+	gv_switch(v);
+}
+
+// ---- the app's old log names (<base>.log / .md5) renamed after their image (<base>.bin.log, ...)
+// The list takes a scan of games (not the trash) with sets whose log is an old one the app wrote
+// (GameDisc.old_log): each folder's renames are one audit job `migrate` in the Files domain, a move
+// row per file, so the audit screen can undo them. Never a set a drive or the check job works on,
+// never onto a name that is taken (lib_own_migration), never a file whose earlier rename was undone.
+#define MIG_FAILED 4
+static char g_mig_failed[MIG_FAILED][48];   // folders whose renames failed this session: not tried again
+static int g_mig_nfailed;
+// The files of folder dir whose migrate rows were undone (each path ending in a 0), n of them.
+static char *mig_undone(const char *dir, int *n)
+{
+	*n = 0;
+	AuditRow *e = (AuditRow *)malloc(32 * sizeof(AuditRow)), *rr = (AuditRow *)malloc(16 * sizeof(AuditRow));
+	char *out = NULL;
+	size_t used = 0;
+	int ne = e && rr ? audit_events(AU_FILES, dir, e, 32) : 0;
+	for (int i = 0; i < ne; i++) {
+		if (strcmp(e[i].kind, "job") || strcmp(e[i].what, "migrate")) continue;
+		for (int first = 0, got; (got = audit_rows(e[i].job, rr, first, 16)) > 0; first += got)
+			for (int k = 0; k < got; k++) {
+				if (strcmp(rr[k].kind, "move") || !rr[k].undone) continue;
+				size_t l = strlen(rr[k].before) + 1;
+				char *b = (char *)realloc(out, used + l);
+				if (!b) continue;
+				out = b;
+				memcpy(out + used, rr[k].before, l);
+				used += l;
+				(*n)++;
+			}
+	}
+	free(e); free(rr);
+	return out;
+}
+static int mig_listed(const char *list, int n, const char *path)
+{
+	for (int i = 0; i < n; i++, list += strlen(list) + 1) if (!strcmp(list, path)) return 1;
+	return 0;
+}
+// Returns 1 when files were renamed (the list is then read again).
+static int gl_migrate()
+{
+	if (!g_gl.n || !g_gl.d || !strncmp(g_gl.key, "t:", 2) || g_gc.running || g_files_busy) return 0;
+	int want = 0;
+	for (int i = 0; i < g_gl.n && !want; i++) want = g_gl.d[i].old_log;
+	if (!want) return 0;
+	char (*from)[320] = (char (*)[320])malloc((size_t)g_gl.n * 2 * 320), (*to)[320] = (char (*)[320])malloc((size_t)g_gl.n * 2 * 320);
+	const char **fp = (const char **)malloc((size_t)g_gl.n * 2 * sizeof(char *)), **tp = (const char **)malloc((size_t)g_gl.n * 2 * sizeof(char *));
+	char *done = (char *)calloc((size_t)g_gl.n, 1);
+	int moved = 0;
+	LibIo io = gl_libio();
+	for (int i = 0; from && to && fp && tp && done && i < g_gl.n; i++) {
+		if (done[i] || !g_gl.d[i].old_log) continue;
+		const char *sl = strrchr(g_gl.d[i].base, '/');
+		if (!sl) continue;
+		char dir[200];
+		snprintf(dir, sizeof(dir), "%.*s", (int)(sl - g_gl.d[i].base), g_gl.d[i].base);
+		int failed = 0;
+		for (int f = 0; f < g_mig_nfailed; f++) if (!strcmp(g_mig_failed[f], dir)) failed = 1;
+		int nu = 0, n = 0;
+		char *undone = failed ? NULL : mig_undone(dir, &nu);
+		for (int j = i; j < g_gl.n; j++) {
+			const GameDisc &d = g_gl.d[j];
+			const char *dl = strrchr(d.base, '/');
+			if (done[j] || !d.old_log || !dl || dl - d.base != sl - g_gl.d[i].base || strncmp(d.base, dir, (size_t)(dl - d.base))) continue;
+			done[j] = 1;
+			if (failed) continue;
+			if (gc_card_busy(d.base)) { logf("log names: %s is busy, left for later", d.base); continue; }
+			char f2[2][320], t2[2][320];
+			int k = lib_own_migration(d.base, d.image, &io, f2, t2), keep = k;
+			for (int m = 0; m < k; m++) if (mig_listed(undone, nu, f2[m])) keep = 0;   // the user put it back
+			const char *a[2] = {f2[0], f2[1]}, *b[2] = {t2[0], t2[1]};
+			if (keep && audit_move_check(a, b, k, NULL, 0)) { logf("log names: %s cannot be renamed now", d.base); keep = 0; }
+			for (int m = 0; keep && m < k; m++, n++) {
+				memcpy(from[n], f2[m], 320); memcpy(to[n], t2[m], 320);
+				fp[n] = from[n]; tp[n] = to[n];
+			}
+		}
+		free(undone);
+		if (!n) continue;
+		char why[200];
+		AuditReason rs;
+		g_files_busy = 1;
+		int rc = audit_move(AU_APP, dir, dir, "migrate", fp, tp, n, why, sizeof(why), &rs);
+		g_files_busy = 0;
+		if (rc) {
+			logf("log names in %s: not renamed (%s)", dir, why);
+			if (g_mig_nfailed < MIG_FAILED) snprintf(g_mig_failed[g_mig_nfailed++], sizeof(g_mig_failed[0]), "%s", dir);
+		} else {
+			logf("log names in %s: %d file(s) renamed after their image", dir, n);
+			moved += n;
+		}
+	}
+	free(from); free(to); free(fp); free(tp); free(done);
+	return moved > 0;
+}
+
+// Takes a finished scan; returns 1 when the screen changed. The rows are worked out once per
+// result of the source shown. Files changed since the scan (a drive job ended) with no scan on its
+// way: the list is read again. A result of another source with nothing else on its way: the screen
+// asks for its own again.
+static void gd_build(const Game &g);
+static int gv_poll(GamesView &v)
+{
+	int took = 0;
+	if (v.checking) {   // the check job: its progress, then its result and the list read again
+		if (g_gc.running) {
+			uint32_t sig = (uint32_t)g_gc.i * 1000003u + g_gc.done / 2048 + (g_gc.abort ? 1u << 31 : 0);
+			if (sig == v.gc_sig) return 0;
+			v.gc_sig = sig;
+			return 1;
+		}
+		v.checking = 0;
+		int n = g_gc.n, ok = g_gc.checked, failed = g_gc.failed, nocmp = g_gc.nocmp;
+		snprintf(v.note, sizeof(v.note), T(g_gc.unreach ? STR_GC_UNREACHABLE : g_gc.abort ? STR_GC_CANCELLED : STR_GC_DONE), ok, n);
+		size_t l = strlen(v.note);
+		if (nocmp) snprintf(v.note + l, sizeof(v.note) - l, T(STR_GC_NOCMP_N), nocmp);
+		l = strlen(v.note);
+		if (failed) snprintf(v.note + l, sizeof(v.note) - l, T(STR_GC_FAILED_N), failed);
+		free(g_gc.items);
+		g_gc.items = NULL;
+		g_gc.n = 0;
+		char k[8];
+		gv_scan_key(v, k, sizeof(k));
+		gl_changed();
+		gl_open(k);
+		took = 1;
+	}
+	if (gl_poll()) {
+		took = 1;
+		if (gl_migrate()) {   // old log names renamed after their image: the list is read again
+			char k[8];
+			gv_scan_key(v, k, sizeof(k));
+			gl_changed();
+			gl_open(k);
+			gl_poll();
+		}
+	}
+	if (g_gl_stale && v.mode == GV_LIST && !gl_busy()) {   // a drive job ended while the list is open
+		char k[8];
+		gv_scan_key(v, k, sizeof(k));
+		if (gl_open(k)) took = 1;
+	}
+	if (gv_ready(v)) {
+		if (v.gen == g_gl.gen) return took;
+		if (v.mode == GV_DETAIL) v.mode = GV_LIST;   // the detail view was read from the old result
+		gv_refilter(v);
+		if (v.back_detail) {   // a check from the detail view: back in it, read again
+			v.back_detail = 0;
+			if (v.nshown && gv_row_of(v, v.fbase, v.fimage) == v.row) { gd_build(g_gl.g[v.shown[v.row]]); v.dfirst = 0; v.mode = GV_DETAIL; }
+		}
+		return 1;
+	}
+	char k[8];
+	gv_scan_key(v, k, sizeof(k));
+	if (g_gl.gen && strcmp(g_gl.key, k) && !gl_busy()) gl_open(k);
+	return took;
+}
+
+static void gv_close(GamesView &v)
+{
+	if (v.checking) {   // the app closes during a check: it stops, then its discs go
+		g_gc.abort = 1;
+		while (g_gc.running) usleep(10000);
+		free(g_gc.items);
+		g_gc.items = NULL;
+		v.checking = 0;
+	}
+	free(v.shown);
+	v.shown = NULL;
+	v.nshown = 0;
+	gl_close();
+}
+
+// ---- words for statuses, formats and the filter
+static StrId gl_status_str(GameStatus st)
+{
+	switch (st) {
+	case GS_BROKEN: return STR_GL_ST_BROKEN;
+	case GS_RERIP: return STR_GL_ST_RERIP;
+	case GS_ERRORS: return STR_GL_ST_ERRN;
+	case GS_NOMATCH: return STR_GL_ST_NOMATCH;
+	case GS_VERIFIED: return STR_GL_ST_VERIFIED;
+	default: return STR_GL_ST_UNCHECKED;
+	}
+}
+static uint32_t gl_status_col(GameStatus st)
+{
+	return st == GS_VERIFIED ? 0x7CE0A0 : st == GS_UNCHECKED ? 0xA8B0C8 : st == GS_BROKEN ? 0xFF8C8C : 0xF0C060;
+}
+// A status in words; errors with their count (errors = the sectors still wrong).
+static void gl_status_text(GameStatus st, int errors, char *out, size_t n)
+{
+	if (st == GS_ERRORS && errors == 1) snprintf(out, n, "%s", T(STR_GL_ST_ERR1));
+	else if (st == GS_ERRORS) snprintf(out, n, T(STR_GL_ST_ERRN), errors);
+	else snprintf(out, n, "%s", T(gl_status_str(st)));
+}
+
+static const StrId gl_f_fmt[] = {STR_GL_F_ANY, STR_COUNT, STR_COUNT};   // 2352 / 2048 are numbers
+static const StrId gl_f_rd[] = {STR_GL_F_ANY, STR_GL_ST_VERIFIED, STR_GL_ST_UNCHECKED, STR_GL_ST_NOMATCH, STR_GL_RD_NOTVERIFIED};
+static const StrId gl_f_err[] = {STR_GL_F_ANY, STR_GL_ERR_WITH, STR_GL_ERR_WITHOUT};
+static const StrId gl_f_oth[] = {STR_GL_F_ANY, STR_GL_O_BROKEN, STR_GL_O_DUPS, STR_GL_O_SBI};
+static const char *gl_f_word(int crit, int val)
+{
+	if (crit == 0) return val == 1 ? "2352" : val == 2 ? "2048" : T(gl_f_fmt[0]);
+	return T(crit == 1 ? gl_f_rd[val] : crit == 2 ? gl_f_err[val] : gl_f_oth[val]);
+}
+// The criteria set, "2048 · Not checked", or "All games" when none is.
+static void gl_criteria_text(const GameFilter &f, char *out, size_t n)
+{
+	int v[4] = {f.fmt, f.redump, f.errors, f.other};
+	out[0] = 0;
+	for (int c = 0; c < 4; c++) {
+		if (!v[c]) continue;
+		size_t l = strlen(out);
+		snprintf(out + l, n - l, "%s%s", l ? " · " : "", gl_f_word(c, v[c]));
+	}
+	if (!out[0]) snprintf(out, n, "%s", T(STR_GL_ALL_GAMES));
+}
+
+// A row's value: its status, format and discs or tracks, and its marks (duplicate, no .sbi).
+static void gv_row_value(const Game &g, char *out, size_t n)
+{
+	int errors = 0, dup = 0, nosbi = 0;
+	const GameDisc &d0 = g_gl.d[g.first];
+	for (int i = g.first; i < g.first + g.ndiscs; i++) {
+		errors += g_gl.d[i].errors;
+		dup |= g_gl.d[i].dup >= 0;
+		nosbi |= g_gl.d[i].libcrypt == -1;
+	}
+	char st[64];
+	gl_status_text(g.st, errors, st, sizeof(st));
+	snprintf(out, n, "%s", st);
+	size_t l = strlen(out);
+	if (d0.fmt != GF_UNKNOWN && g.st != GS_RERIP) { snprintf(out + l, n - l, " · %s", d0.fmt == GF_2048 ? "2048" : "2352"); l = strlen(out); }
+	if (g.ndiscs > 1) { snprintf(out + l, n - l, " · "); l = strlen(out); snprintf(out + l, n - l, T(STR_GL_DISCS), g.ndiscs); }
+	else if (d0.tracks > 1) { snprintf(out + l, n - l, " · "); l = strlen(out); snprintf(out + l, n - l, T(STR_GL_TRACKS), d0.tracks); }
+	l = strlen(out);
+	if (dup) { snprintf(out + l, n - l, " · %s", T(STR_GL_DUP)); l = strlen(out); }
+	if (nosbi) snprintf(out + l, n - l, " · %s", T(STR_GL_SBI_SHORT));
+}
+
+// The summary of the whole list (not only the rows shown): games, verified, with errors, re-rip, broken.
+static void gv_summary(char *out, size_t n)
+{
+	int c[GS_VERIFIED + 1] = {0};
+	for (int i = 0; i < g_gl.ng; i++) if (g_gl.g[i].st >= GS_BROKEN && g_gl.g[i].st <= GS_VERIFIED) c[g_gl.g[i].st]++;
+	if (g_gl.ng == 1) snprintf(out, n, "%s", T(STR_GL_SUM_GAME1));
+	else snprintf(out, n, T(STR_GL_SUM_GAMES), g_gl.ng);
+	struct { int k; StrId one, many; } parts[] = {
+		{c[GS_VERIFIED], STR_GL_SUM_VERIFIED1, STR_GL_SUM_VERIFIED}, {c[GS_ERRORS], STR_GL_SUM_ERRORS, STR_GL_SUM_ERRORS},
+		{c[GS_RERIP], STR_GL_SUM_RERIP, STR_GL_SUM_RERIP}, {c[GS_BROKEN], STR_GL_SUM_BROKEN1, STR_GL_SUM_BROKEN}};
+	for (auto &p : parts) {
+		if (!p.k) continue;
+		size_t l = strlen(out);
+		snprintf(out + l, n - l, " · ");
+		l = strlen(out);
+		if (p.k == 1 && p.one != p.many) snprintf(out + l, n - l, "%s", T(p.one));
+		else snprintf(out + l, n - l, T(p.many), p.k);
+	}
+}
+
+// ---- the detail view
+static void gd_add(int head, uint32_t col, const char *k, const char *fmt, ...)
+{
+	if (gd_n >= GD_LINES) return;
+	GdLine &l = gd_lines[gd_n++];
+	snprintf(l.k, sizeof(l.k), "%s", k ? k : "");
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(l.v, sizeof(l.v), fmt, ap);
+	va_end(ap);
+	l.col = col;
+	l.head = head;
+}
+
+// UTC date and time (a rip log's "2026-10-02 18:41 UTC") as a time stamp, without timegm().
+static time_t gl_utc(int y, int mo, int d, int h, int mi)
+{
+	y -= mo <= 2;
+	long era = (y >= 0 ? y : y - 399) / 400, yoe = y - era * 400;
+	long doy = (153 * (mo + (mo > 2 ? -3 : 9)) + 2) / 5 + d - 1, doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+	return (time_t)((era * 146097 + doe - 719468) * 86400L + h * 3600L + mi * 60L);
+}
+
+// A small text file of the set (<base><ext>) into buf; 0 when there is none.
+static int gd_read(const GameDisc &d, const char *ext, char *buf, int max)
+{
+	char p[260];
+	snprintf(p, sizeof(p), "%s%s", d.base, ext);
+	int n = gl_io_read(p, buf, max - 1);
+	buf[n > 0 ? n : 0] = 0;
+	return n > 0;
+}
+
+static void gd_disc(const GameDisc &d, int num, int of)
+{
+	const uint32_t W = 0xFFFFFF, G = 0xC8D0E0;
+	const char *leaf = strrchr(d.base, '/');
+	leaf = leaf ? leaf + 1 : d.base;
+	char t[200];
+	if (of > 1) { snprintf(t, sizeof(t), T(STR_GL_D_DISC), num); gd_add(1, W, t, "%s", leaf); }
+	gl_status_text(d.st, d.errors, t, sizeof(t));
+	gd_add(0, gl_status_col(d.st), T(STR_GL_D_STATUS), "%s", t);
+	if (d.fmt == GF_2048) gd_add(0, G, T(STR_GL_D_FORMAT), "%s", T(STR_GL_D_DATA_ONLY));
+	else if (d.fmt == GF_2352) {
+		if (d.tracks > 1) { snprintf(t, sizeof(t), T(STR_GL_TRACKS), d.tracks); gd_add(0, G, T(STR_GL_D_FORMAT), "2352 · %s", t); }
+		else gd_add(0, G, T(STR_GL_D_FORMAT), "2352");
+	}
+	if (d.id[0]) gd_add(0, G, T(STR_GL_D_ID), "%s", d.id);
+	if (d.rdname[0]) gd_add(0, G, T(STR_GL_D_RDNAME), "%s", d.rdname);
+	int y, mo, dd, h, mi;
+	if (d.date[0] && sscanf(d.date, "%d-%d-%d %d:%d", &y, &mo, &dd, &h, &mi) == 5) { fmt_local(gl_utc(y, mo, dd, h, mi), t, sizeof(t)); gd_add(0, G, T(STR_GL_D_RIPPED), "%s", t); }
+	if (d.drive[0]) gd_add(0, G, T(STR_GL_D_DRIVE), "%s", d.drive);
+	if (d.size) gd_add(0, G, T(STR_GL_D_SIZE), "%llu MB", (unsigned long long)((d.size + (1 << 19)) >> 20));
+	char place[64];
+	gv_place(d, place, sizeof(place));
+	snprintf(t, sizeof(t), "%.*s", (int)(leaf - d.base > 1 ? leaf - d.base - 1 : 0), d.base);
+	gd_add(0, G, T(STR_GL_D_PLACE), "%s%s%s", place, place[0] ? " · " : "", t);
+	gd_add(0, G, T(STR_GL_D_COVER), "%s", T(d.has_cover ? STR_HINT_YES : STR_HINT_NO));
+	time_t lt;
+	char lp[260];
+	snprintf(lp, sizeof(lp), "%s%s", d.base, d.log_sfx);
+	if (d.rd != -1 && d.has_log && !vf_mtime(lp, &lt)) { fmt_local(lt, t, sizeof(t)); gd_add(0, G, T(STR_GL_D_CHECKED), "%s", t); }
+	else gd_add(0, G, T(STR_GL_D_CHECKED), "%s", T(STR_GL_D_NEVER));
+	if (d.libcrypt) gd_add(0, d.libcrypt < 0 ? 0xF0C060 : G, "LibCrypt", "%s", T(d.libcrypt < 0 ? STR_GL_SBI_SHORT : STR_GL_SBI_THERE));
+	if (d.dup >= 0 && d.dup < g_gl.n) {
+		const GameDisc &o = g_gl.d[d.dup];
+		const char *ol = strrchr(o.base, '/');
+		char op[64];
+		gv_place(o, op, sizeof(op));
+		gd_add(0, 0xF0C060, T(STR_GL_D_DUP_OF), "%s%s%s", ol ? ol + 1 : o.base, op[0] ? " · " : "", op);
+	}
+	// the log: the tracks and their MD5s, the sectors still wrong (the first few)
+	char *buf = (char *)malloc(65536);
+	int tracks = 0;
+	if (buf && d.has_log && gd_read(d, d.log_sfx, buf, 65536)) {
+		char secs[120] = "";
+		int listed = 0;
+		for (char *l = buf; *l; ) {
+			char *e = strchr(l, '\n');
+			if (e) *e = 0;
+			unsigned tn, lba;
+			char md5[40];
+			if (sscanf(l, "track=%u start=%*u md5=%39s", &tn, md5) == 2) { snprintf(t, sizeof(t), T(STR_GL_D_TRACK), tn); gd_add(0, G, t, "%s", md5); tracks++; }
+			else if ((sscanf(l, "unreadable=%u", &lba) == 1 || sscanf(l, "bad=%u", &lba) == 1 || (sscanf(l, "uncertain=%u", &lba) == 1 && strstr(l, "unconfirmed"))) && listed < 5) {
+				size_t sl = strlen(secs);
+				snprintf(secs + sl, sizeof(secs) - sl, "%s%u", listed ? ", " : "", lba);
+				listed++;
+			}
+			l = e ? e + 1 : l + strlen(l);
+		}
+		if (d.errors) {
+			if (listed < d.errors) { size_t sl = strlen(secs); snprintf(secs + sl, sizeof(secs) - sl, " …"); }
+			snprintf(t, sizeof(t), T(STR_GL_D_SECTORS), d.errors, secs);
+			gd_add(0, 0xF0C060, T(STR_GL_D_ERRORS), "%s", t);
+		}
+	}
+	if (!tracks && buf && d.md5_sfx[0] && gd_read(d, d.md5_sfx, buf, 65536)) {   // a check's .md5: "<md5>  track NN"
+		for (char *l = buf; *l; ) {
+			char *e = strchr(l, '\n');
+			if (e) *e = 0;
+			char md5[40];
+			unsigned tn;
+			if (sscanf(l, "%39s track %u", md5, &tn) == 2) { snprintf(t, sizeof(t), T(STR_GL_D_TRACK), tn); gd_add(0, G, t, "%s", md5); tracks++; }
+			l = e ? e + 1 : l + strlen(l);
+		}
+	}
+	free(buf);
+	if (!tracks && d.fmt != GF_2048 && d.st != GS_BROKEN) gd_add(0, G, "MD5", "%s", T(STR_GL_D_NO_MD5));
+	// the set's files (a broken set shows what is there)
+	size_t off = 0;
+	for (int i = 0; i < d.nfiles; i++) {
+		gd_add(0, G, i ? "" : T(STR_GL_D_FILES), "%s", d.files + off);
+		off += strlen(d.files + off) + 1;
+	}
+}
+
+static void gd_build(const Game &g)
+{
+	gd_n = 0;
+	for (int i = 0; i < g.ndiscs; i++) gd_disc(g_gl.d[g.first + i], i + 1, g.ndiscs);
+}
+
+static int gd_vis() { return (hint_y() - ui_line(UI_SMALL) * 3 - (ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2)) / (ui_line(UI_BODY) * 12 / 10); }
+
+// ---- drawing
+static void gv_head(const GamesView &v, char *name, size_t n)
+{
+	gl_key_name(v.key, v.src, v.nsrc, name, n);
+	char sub[160];
+	snprintf(sub, sizeof(sub), T(v.trash ? STR_GL_TRASH_TITLE : STR_GL_TITLE), name);
+	ui_text_fit(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xA8B0C8, sub, ui_w() * 2 / 3, UI_CENTER);
+}
+
+// The list's buttons. A row too wide for the screen (Swedish, with the checks and a filter set)
+// leaves out the obvious ones first: ↑↓ select, then L1 clear, then L2/R2 by letter.
+static void gv_list_hints(const GamesView &v, int rows)
+{
+	const char *b[12], *l[12];
+	int drop[12], m = 0;   // drop: the order hints are left out in (0 = always shown)
+	auto add = [&](const char *btn, StrId s, int d) { b[m] = btn; l[m] = T(s); drop[m++] = d; };
+	if (rows) {
+		add("updown", STR_HINT_SELECT, 1);
+		if (rows > 1) add("l2r2", STR_HINT_LETTER, 3);
+		add("cross", STR_HINT_DETAILS, 0);
+	}
+	if (rows && gv_can_check(v)) add("square", STR_HINT_CHECK_ONE, 0);
+	if (rows && gv_can_trash(v)) add("triangle", v.trash ? STR_HINT_RESTORE : STR_HINT_TRASH, 0);
+	if (gv_can_check_all(v)) add("start", STR_HINT_CHECK_ALL, 0);
+	if (gv_can_empty(v)) add("start", STR_HINT_EMPTY_TRASH, 0);
+	add("r1", STR_GL_FILTER, 0);
+	if (g_games_filter.fmt || g_games_filter.redump || g_games_filter.errors || g_games_filter.other) add("l1", STR_HINT_CLEAR, 2);
+	add("select", STR_HINT_SOURCE, 0);
+	add("circle", STR_HINT_BACK, 0);
+	for (int d = 1; d <= 3; d++) {
+		int sum = 0;
+		for (int i = 0; i < m; i++) sum += ui_hint_width(b[i], l[i]);
+		if (sum + (m - 1) * (ui_w() / 60) <= ui_w() * 94 / 100) break;
+		int k = 0;
+		for (int i = 0; i < m; i++) if (drop[i] != d) { b[k] = b[i]; l[k] = l[i]; drop[k++] = drop[i]; }
+		m = k;
+	}
+	hint_bar(b, l, m);
+}
+
+static void gv_filter_draw(const GamesView &v)
+{
+	char vals[5][96];
+	int f[4] = {v.f.fmt, v.f.redump, v.f.errors, v.f.other};
+	for (int c = 0; c < 4; c++) snprintf(vals[c], sizeof(vals[c]), "%s", gl_f_word(c, f[c]));
+	snprintf(vals[4], sizeof(vals[4]), "%s", T(v.ftrash ? STR_GL_V_TRASH : STR_L_GAMES));
+	const char *labels[5] = {T(STR_GL_F_FORMAT), T(STR_GL_F_REDUMP), T(STR_GL_F_ERRORS), T(STR_GL_F_OTHER), T(STR_GL_F_SHOW)};
+	settings_rows(T(STR_GL_FILTER), labels, vals, 5, v.frow, 0);
+	const char *b[] = {"updown", "leftright", "l1", "circle"};
+	const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_CHANGE), T(STR_HINT_CLEAR), T(STR_HINT_DONE)};
+	hint_bar(b, l, 4);
+}
+
+// The note above the hint bar: a check's result or refusal; else the focused game's note (place,
+// duplicate, LibCrypt); else, while Redump is off, how to turn it on for the checks.
+static void gv_footer(const GamesView &v, const char *note)
+{
+	const char *t = v.note[0] ? v.note : note && note[0] ? note : g_redump == RD_OFF && !v.trash ? T(STR_GC_REDUMP_OFF) : NULL;
+	if (t) ui_text_fit(UI_SMALL, ui_w() / 2, hint_y() - ui_line(UI_SMALL) * 2, 0x6870A0, t, ui_w() * 2 / 3, UI_CENTER);
+}
+
+// The check job's progress: which game of how many, its name, how far through its file.
+static void gc_draw()
+{
+	int n = g_gc.n, i = g_gc.i < n ? g_gc.i : n - 1;
+	char det[64];
+	snprintf(det, sizeof(det), T(STR_GC_N_OF_M), i + 1, n);
+	uint32_t tot = g_gc.total, done = g_gc.done;
+	progress_draw(T(STR_GC_TITLE), det, tot ? (uint32_t)((uint64_t)done * 100 / tot) : 0, NULL, g_gc.abort);
+	if (g_gc.items && i >= 0) {
+		const char *b = g_gc.items[i].base, *sl = strrchr(b, '/');
+		int lb = ui_line(UI_BODY);
+		ui_text_fit(UI_SMALL, ui_w() / 2, ui_h() * 2 / 5 + lb / 3, 0xA8B0C8, sl ? sl + 1 : b, ui_w() * 3 / 5, UI_CENTER);
+	}
+}
+
+static void gv_detail_draw(const GamesView &v)
+{
+	const Game &g = g_gl.g[v.shown[v.row]];
+	int left = ui_w() / 6, right = ui_w() * 5 / 6, lh = ui_line(UI_BODY) * 12 / 10, vis = gd_vis();
+	int top = ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) * 2, vx = left + (right - left) * 3 / 10;
+	ui_text_fit(UI_BODY, ui_w() / 2, ui_h() / 10 + ui_line(UI_TITLE) + ui_line(UI_BODY) / 2, 0xFFFFFF, g.name, right - left, UI_CENTER);
+	int asz = ui_line(UI_SMALL) * 2 / 3, ax = right + ui_w() / 40;
+	if (v.dfirst > 0) ui_icon("up", ax, top + (lh - asz) / 2, asz, 0xC8D0E0);
+	if (v.dfirst + vis < gd_n) ui_icon("down", ax, top + (vis - 1) * lh + (lh - asz) / 2, asz, 0xC8D0E0);
+	for (int i = v.dfirst; i < gd_n && i < v.dfirst + vis; i++) {
+		const GdLine &l = gd_lines[i];
+		int y = top + (i - v.dfirst) * lh;
+		if (l.head) {
+			int kw = ui_text(UI_BODY, left, y, 0xFFFFFF, l.k) + ui_w() / 60;
+			int sy = y + ui_line(UI_BODY) - ui_line(UI_SMALL) - ui_line(UI_BODY) / 12;
+			ui_text_fit(UI_SMALL, left + kw, sy, 0xA8B0C8, l.v, right - left - kw);
+			continue;
+		}
+		int sy = y + (lh - ui_line(UI_SMALL)) / 2;
+		ui_text_fit(UI_SMALL, left, sy, 0xA8B0C8, l.k, vx - left - ui_w() / 80);
+		ui_text_fit(UI_SMALL, vx, sy, l.col, l.v, right - vx);
+	}
+	gv_footer(v, NULL);
+	const char *b[6], *lb[6];
+	int m = 0;
+	if (gd_n > vis) { b[m] = "updown"; lb[m++] = T(STR_HINT_SCROLL); b[m] = "l2r2"; lb[m++] = T(STR_HINT_PAGE); }
+	if (gv_can_check(v)) { b[m] = "square"; lb[m++] = T(STR_HINT_CHECK_ONE); }
+	if (gv_can_trash(v)) { b[m] = "triangle"; lb[m++] = T(v.trash ? STR_HINT_RESTORE : STR_HINT_TRASH); }
+	if (gv_can_rename(v)) { b[m] = "cross"; lb[m++] = T(STR_HINT_RENAME); }
+	b[m] = "circle"; lb[m++] = T(STR_HINT_BACK);
+	hint_bar(b, lb, m);
+}
+
+static void games_draw(const GamesView &v)
+{
+	if (v.checking) { gc_draw(); return; }
+	if (v.mode == GV_CONFIRM) { own_dialog_draw(v.ask, 1); return; }
+	draw_backdrop();
+	if (v.mode == GV_FILTER) { gv_filter_draw(v); return; }
+	if (v.mode == GV_DETAIL && gv_listed(v) && v.row < v.nshown) { gv_detail_draw(v); return; }
+	char name[64], msg[200] = "";
+	gv_head(v, name, sizeof(name));
+	int ls = ui_line(UI_SMALL), lb = ui_line(UI_BODY), lh = gv_lh(), vis = gv_vis();
+	int left = ui_w() / 6, right = ui_w() * 5 / 6;
+	if (!gv_ready(v)) snprintf(msg, sizeof(msg), "%s", T(STR_GL_READING));
+	else if (g_gl.oom || v.nomem) snprintf(msg, sizeof(msg), "%s", T(STR_GL_OOM));
+	else if (g_gl.gone) snprintf(msg, sizeof(msg), T(STR_GL_GONE), name);
+	else if (!g_gl.ng) snprintf(msg, sizeof(msg), T(v.trash ? STR_GL_TRASH_EMPTY : STR_GL_EMPTY), name);
+	if (msg[0]) {
+		draw_wrapped(UI_BODY, msg, ui_h() / 3, 0xC8D0E0);
+		gv_list_hints(v, 0);
+		return;
+	}
+	char t[300];
+	gv_summary(t, sizeof(t));
+	int ysum = gv_ysum();
+	ui_text_fit(UI_SMALL, ui_w() / 2, ysum, 0xC8D0E0, t, right - left, UI_CENTER);
+	// the criteria set, and how many of the games they show
+	int ycrit = gv_ycrit(), active = g_games_filter.fmt || g_games_filter.redump || g_games_filter.errors || g_games_filter.other;
+	char crit[160];
+	gl_criteria_text(g_games_filter, crit, sizeof(crit));
+	int cw = 0;
+	if (active) { snprintf(t, sizeof(t), T(STR_GL_SHOWN), v.nshown, g_gl.ng); cw = ui_text(UI_SMALL, right, ycrit, 0xA8B0C8, t, UI_RIGHT) + ui_w() / 40; }
+	ui_text_fit(UI_SMALL, left, ycrit, active ? 0x7DA7D9 : 0xA8B0C8, crit, right - left - cw);
+	int top = gv_top();
+	if (!v.nshown) {
+		ui_text(UI_BODY, ui_w() / 2, top + lh, 0xC8D0E0, T(STR_GL_NONE_MATCH), UI_CENTER);
+		gv_list_hints(v, 0);
+		return;
+	}
+	{   // more rows above / below: arrows at the right edge
+		int asz = ls * 2 / 3, ax = right + ui_w() / 40;
+		if (v.first > 0) ui_icon("up", ax, top + (lh * 3 / 4 - asz) / 2 - lh / 8, asz, 0xC8D0E0);
+		if (v.first + vis < v.nshown) ui_icon("down", ax, top + (vis - 1) * lh + (lh * 3 / 4 - asz) / 2 - lh / 8, asz, 0xC8D0E0);
+	}
+	for (int i = v.first; i < v.nshown && i < v.first + vis; i++) {
+		const Game &g = g_gl.g[v.shown[i]];
+		int y = top + (i - v.first) * lh;
+		char val[200];
+		gv_row_value(g, val, sizeof(val));
+		if (i == v.row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh, 0x703D6FD9);
+		int vy = y + lb - ls - lb / 12;
+		int vw = ui_text(UI_SMALL, right, vy, i == v.row ? 0xFFFFFF : gl_status_col(g.st), val, UI_RIGHT) + ui_w() / 40;
+		ui_text_fit(UI_BODY, left, y, 0xFFFFFF, g.name, right - left - vw);
+	}
+	// the focused game: where it is (All), where its duplicate is, its LibCrypt data
+	const Game &g = g_gl.g[v.shown[v.row]];
+	char note[300] = "";
+	if (g_gl.more) snprintf(note, sizeof(note), T(STR_GL_MORE), GL_MAX, GL_MAX);
+	else {
+		const GameDisc &d = g_gl.d[g.first];
+		char p[64];
+		if (!strcmp(v.key, "all")) { gv_place(d, p, sizeof(p)); snprintf(note, sizeof(note), "%s", p); }
+		for (int i = g.first; i < g.first + g.ndiscs; i++) {
+			const GameDisc &x = g_gl.d[i];
+			size_t l = strlen(note);
+			if (x.dup >= 0 && x.dup < g_gl.n) {   // the other copy: its file name and where it is
+				const GameDisc &o = g_gl.d[x.dup];
+				const char *ol = strrchr(o.base, '/');
+				char other[260];
+				gv_place(o, p, sizeof(p));
+				snprintf(other, sizeof(other), "%s%s%s", ol ? ol + 1 : o.base, p[0] ? " · " : "", p);
+				snprintf(note + l, sizeof(note) - l, "%s", l ? " · " : "");
+				l = strlen(note);
+				snprintf(note + l, sizeof(note) - l, T(STR_GL_DUP_ON), other);
+				break;
+			}
+		}
+		for (int i = g.first; i < g.first + g.ndiscs; i++)
+			if (g_gl.d[i].libcrypt) {
+				size_t l = strlen(note);
+				snprintf(note + l, sizeof(note) - l, "%s%s", l ? " · " : "", T(g_gl.d[i].libcrypt < 0 ? STR_GL_SBI_MISSING : STR_GL_SBI_PRESENT));
+				break;
+			}
+	}
+	gv_footer(v, note);
+	gv_list_hints(v, v.nshown);
+}
+
+// ---- input
+static int gv_filter_active() { return g_games_filter.fmt || g_games_filter.redump || g_games_filter.errors || g_games_filter.other; }
+
+static void gv_set_filter(GamesView &v, const GameFilter &f)
+{
+	if (!memcmp(&f, &g_games_filter, sizeof(f))) return;
+	g_games_filter = f;
+	cfg_save();
+	logf("game list filter: %d,%d,%d,%d", f.fmt, f.redump, f.errors, f.other);
+	gv_refilter(v);
+}
+
+// □ (all = 0: the focused game, each of its discs that can be checked) or START (all = 1: every
+// unchecked game shown): starts the check job, or says why the game cannot be checked.
+static void gv_check(GamesView &v, int all)
+{
+	const Game &g = g_gl.g[v.shown[v.row]];
+	int cap = all ? gv_unchecked(v, NULL, 0) : g.ndiscs, n = 0;
+	StrId why = STR_COUNT;
+	GcItem *items = cap > 0 ? (GcItem *)malloc((size_t)cap * sizeof(GcItem)) : NULL;
+	if (!items) { if (cap > 0) snprintf(v.note, sizeof(v.note), "%s", T(STR_GL_OOM)); return; }
+	if (all) n = gv_unchecked(v, items, cap);
+	else for (int i = g.first; i < g.first + g.ndiscs; i++) {
+		StrId r = gc_refusal(g_gl.d[i]);
+		if (r == STR_COUNT) gc_item(g_gl.d[i], items[n++]);
+		else if (why == STR_COUNT) why = r;
+	}
+	if (!n) {
+		free(items);
+		if (why != STR_COUNT) snprintf(v.note, sizeof(v.note), "%s", T(why));
+		logf("game list check: %s refused (%s)", g.name, why != STR_COUNT ? T(why) : "nothing to check");
+		return;
+	}
+	logf("game list check: %d disc(s)%s", n, all ? " (all unchecked shown)" : "");
+	v.back_detail = v.mode == GV_DETAIL;
+	v.checking = 1;
+	v.gc_sig = 0;
+	gc_start(items, n, g_input_src);
+}
+
+// One press; returns 0 when the screen closes.
+static int gv_input(GamesView &v, int p)
+{
+	if (v.checking) {   // the progress screen: O cancels (the screen waits for the job to stop)
+		if (p & B_CIRCLE) g_gc.abort = 1;
+		return 1;
+	}
+	v.note[0] = 0;
+	if (v.mode == GV_CONFIRM) {   // emptying the trash: X yes, O no
+		if (p & B_CROSS) gm_empty(v);
+		else if (p & B_CIRCLE) v.mode = GV_LIST;
+		return 1;
+	}
+	if (v.mode == GV_FILTER) {
+		int *vals[5] = {&v.f.fmt, &v.f.redump, &v.f.errors, &v.f.other, &v.ftrash};
+		static const int counts[5] = {3, 5, 3, 4, 2};
+		if (p & B_UP) v.frow = (v.frow + 4) % 5;
+		if (p & B_DOWN) v.frow = (v.frow + 1) % 5;
+		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
+		if (d) *vals[v.frow] = (*vals[v.frow] + counts[v.frow] + d) % counts[v.frow];   // right = the next one
+		if (p & B_L1) { GameFilter z = {0, 0, 0, 0}; v.f = z; }
+		if (p & B_CIRCLE) {   // closes and applies
+			v.mode = GV_LIST;
+			gv_set_filter(v, v.f);
+			if (v.ftrash != v.trash) { v.trash = v.ftrash; gv_switch(v); }
+		}
+		return 1;
+	}
+	if (v.mode == GV_DETAIL) {
+		int vis = gd_vis(), maxf = gd_n > vis ? gd_n - vis : 0;
+		if (p & B_UP) v.dfirst--;
+		if (p & B_DOWN) v.dfirst++;
+		if (p & B_L2) v.dfirst -= vis;
+		if (p & B_R2) v.dfirst += vis;
+		if (v.dfirst > maxf) v.dfirst = maxf;
+		if (v.dfirst < 0) v.dfirst = 0;
+		if (p & B_CIRCLE) v.mode = GV_LIST;
+		else if ((p & B_SQUARE) && gv_can_check(v) && v.row < v.nshown) gv_check(v, 0);
+		else if ((p & B_TRIANGLE) && gv_can_trash(v)) gm_move(v, v.trash ? GM_RESTORE : GM_TRASH, NULL);
+		else if ((p & B_CROSS) && gv_can_rename(v)) v.want_rename = 1;
+		return 1;
+	}
+	if (p & B_CIRCLE) return 0;
+	if (p & B_R1) { v.mode = GV_FILTER; v.f = g_games_filter; v.ftrash = v.trash; v.frow = 0; return 1; }
+	if ((p & B_L1) && gv_filter_active()) { GameFilter z = {0, 0, 0, 0}; gv_set_filter(v, z); }
+	if (p & B_SELECT) {   // the next source, remembered
+		v.nsrc = gl_sources(v.src, GL_SRCS);
+		int cur = -1;
+		for (int i = 0; i < v.nsrc; i++) if (!strcmp(v.src[i].key, v.key)) cur = i;
+		snprintf(v.key, sizeof(v.key), "%s", v.src[v.nsrc ? (cur + 1) % v.nsrc : 0].key);
+		snprintf(g_games_source, sizeof(g_games_source), "%s", v.key);
+		cfg_save();
+		gv_switch(v);
+		return 1;
+	}
+	if (!gv_listed(v) || !v.nshown) return 1;
+	if (p & B_UP) v.row = (v.row + v.nshown - 1) % v.nshown;
+	if (p & B_DOWN) v.row = (v.row + 1) % v.nshown;
+	if (p & B_R2) v.row = lib_first_letter_next(g_gl.g, v.shown, v.nshown, v.row, 1);
+	if (p & B_L2) v.row = lib_first_letter_next(g_gl.g, v.shown, v.nshown, v.row, -1);
+	gv_fix(v);
+	if (p & B_CROSS) { gd_build(g_gl.g[v.shown[v.row]]); v.dfirst = 0; v.mode = GV_DETAIL; }
+	else if ((p & B_SQUARE) && gv_can_check(v)) gv_check(v, 0);
+	else if ((p & B_START) && gv_can_check_all(v)) gv_check(v, 1);
+	else if ((p & B_TRIANGLE) && gv_can_trash(v)) gm_move(v, v.trash ? GM_RESTORE : GM_TRASH, NULL);
+	else if ((p & B_START) && gv_can_empty(v)) gm_empty_ask(v);
+	return 1;
+}
+
+static void games_screen()
+{
+	GamesView v;
+	gv_open(v);
+	pad_pressed();
+	g_redraw = 2;
+	while (!exit_requested) {
+		if (gv_poll(v)) g_redraw = 2;
+		if (g_redraw > 0) {
+			g_redraw = 0;
+			games_draw(v);
+			g_drawn = 2;
+			g_backdrop_shown = 0;
+		}
+		flip_frame();
+		int p = pad_pressed();
+		if (p) g_redraw = 2;
+		if (p && !gv_input(v, p)) break;
+		if (v.want_rename) {   // the file name view with this game as its preview; START renames it
+			v.want_rename = 0;
+			char pat[96];
+			if (gv_listed(v) && v.row < v.nshown && filename_screen(&g_gl.g[v.shown[v.row]], pat)) gm_move(v, GM_RENAME, pat);
+			pad_pressed();
+			g_redraw = 2;
+		}
+	}
+	gv_close(v);
+}
+
+// Settings (START): the game list, the standard for the drives (speed, re-reads, check, eject, rip
+// at once; a drive can have its own values, SELECT on its card), Redump, the Redump copy, remote
+// view, webhooks, the audit log, About. The rows by name, in their order on the screen:
+enum { SR_GAMES, SR_SPEED, SR_RETRIES, SR_CHECK, SR_EJECT, SR_AUTOSTART, SR_FILENAME, SR_REDUMP, SR_RDCOPY, SR_REMOTE,
+       SR_WEBHOOK, SR_AUDIT, SR_AUDIT_MB, SR_ABOUT, SR_COUNT };
 // One frame of the settings (START): the rows with their values and the buttons of the focused
 // row. (The UI tests on the host draw it.)
 static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, int webhook_on, int rdcount, const char *rdver, time_t rdwhen)
 {
-	const int NROWS = 13;
 	draw_backdrop();
-	char vals[13][96];
-	fn_label(g_name_pat, vals[5], sizeof(vals[5]));
-	fmt_speed(sd.speed, vals[0], sizeof(vals[0]));
-	fmt_int(sd.retries, vals[1], sizeof(vals[1]));
-	fmt_check(sd.check, vals[2], sizeof(vals[2]));
-	fmt_onoff(sd.eject, vals[3], sizeof(vals[3]));
-	fmt_onoff(sd.autostart, vals[4], sizeof(vals[4]));
-	snprintf(vals[6], sizeof(vals[0]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
+	char vals[SR_COUNT][96];
+	vals[SR_GAMES][0] = 0;   // the game list: X opens it
+	fn_label(g_name_pat, vals[SR_FILENAME], sizeof(vals[SR_FILENAME]));
+	fmt_speed(sd.speed, vals[SR_SPEED], sizeof(vals[SR_SPEED]));
+	fmt_int(sd.retries, vals[SR_RETRIES], sizeof(vals[SR_RETRIES]));
+	fmt_check(sd.check, vals[SR_CHECK], sizeof(vals[SR_CHECK]));
+	fmt_onoff(sd.eject, vals[SR_EJECT], sizeof(vals[SR_EJECT]));
+	fmt_onoff(sd.autostart, vals[SR_AUTOSTART], sizeof(vals[SR_AUTOSTART]));
+	snprintf(vals[SR_REDUMP], sizeof(vals[SR_REDUMP]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
 	if (rdcount > 0) {
 		// Redump's version (date) and when this copy was downloaded (date and time)
 		char date[16], ver[24], when[32];
 		snprintf(date, sizeof(date), "%.10s", rdver);
 		fmt_rd_version(date, ver, sizeof(ver));
 		fmt_local(rdwhen, when, sizeof(when));
-		snprintf(vals[7], sizeof(vals[7]), T(STR_RD_COPY_VALUE), ver, when);
+		snprintf(vals[SR_RDCOPY], sizeof(vals[SR_RDCOPY]), T(STR_RD_COPY_VALUE), ver, when);
 	} else {
-		snprintf(vals[7], sizeof(vals[7]), "%s", T(STR_RD_MISSING));
+		snprintf(vals[SR_RDCOPY], sizeof(vals[SR_RDCOPY]), "%s", T(STR_RD_MISSING));
 	}
 	char ip[20];
 	remote_ip(ip, sizeof(ip));
-	if (remote) snprintf(vals[8], sizeof(vals[8]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
-	else snprintf(vals[8], sizeof(vals[8]), "%s", T(STR_OFF));
-	if (!webhook_on) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_OFF));
-	else if (!g_webhook[0]) snprintf(vals[9], sizeof(vals[9]), "%s", T(STR_WEBHOOK_NOURL));
+	if (remote) snprintf(vals[SR_REMOTE], sizeof(vals[SR_REMOTE]), T(STR_REMOTE_ON), ip, REMOTE_PORT);
+	else snprintf(vals[SR_REMOTE], sizeof(vals[SR_REMOTE]), "%s", T(STR_OFF));
+	if (!webhook_on) snprintf(vals[SR_WEBHOOK], sizeof(vals[SR_WEBHOOK]), "%s", T(STR_OFF));
+	else if (!g_webhook[0]) snprintf(vals[SR_WEBHOOK], sizeof(vals[SR_WEBHOOK]), "%s", T(STR_WEBHOOK_NOURL));
 	else {
 		char host[96];
 		webhook_host(g_webhook, host, sizeof(host));
 		int ne = 0;
 		for (int i = 0; i < WH_COUNT; i++) ne += (g_webhook_mask >> i) & 1;
-		snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
+		snprintf(vals[SR_WEBHOOK], sizeof(vals[SR_WEBHOOK]), T(STR_WEBHOOK_ON_N), host, ne);
 	}
-	vals[10][0] = 0;   // the audit log: X opens it
-	snprintf(vals[11], sizeof(vals[11]), T(STR_AUDIT_MB_VAL), g_audit_mb);
-	snprintf(vals[12], sizeof(vals[12]), "v%s", APP_VERSION);
-	const char *labels[13] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
+	vals[SR_AUDIT][0] = 0;   // the audit log: X opens it
+	snprintf(vals[SR_AUDIT_MB], sizeof(vals[SR_AUDIT_MB]), T(STR_AUDIT_MB_VAL), g_audit_mb);
+	snprintf(vals[SR_ABOUT], sizeof(vals[SR_ABOUT]), "v%s", APP_VERSION);
+	const char *labels[SR_COUNT] = {T(STR_L_GAMES), T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
 	                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_AUDIT), T(STR_L_AUDIT_MB), T(STR_L_ABOUT)};
-	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, NROWS, row, 1u << 7 | 1u << 10 | 1u << 12);   // the Redump download, the audit log and About are actions
-	if (row == 10 || row == 12) {   // the audit log and About: X opens them
+	// the game list, the Redump download, the audit log and About are actions
+	settings_rows(T(STR_SETTINGS_TITLE), labels, vals, SR_COUNT, row, 1u << SR_GAMES | 1u << SR_RDCOPY | 1u << SR_AUDIT | 1u << SR_ABOUT);
+	if (row == SR_GAMES || row == SR_AUDIT || row == SR_ABOUT) {   // the game list, the audit log and About: X opens them
 		const char *b[] = {"updown", "l2r2", "cross", "circle"};
 		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_OPEN), T(STR_HINT_BACK)};
 		hint_bar(b, l, 4);
-	} else if (row == 9 || row == 5) {   // webhooks and the file name: X opens their own view
+	} else if (row == SR_WEBHOOK || row == SR_FILENAME) {   // webhooks and the file name: X opens their own view
 		const char *b[] = {"updown", "l2r2", "leftright", "cross", "triangle", "circle"};
-		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_CHANGE), T(row == 5 ? STR_HINT_EDIT : STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), T(STR_HINT_CHANGE), T(row == SR_FILENAME ? STR_HINT_EDIT : STR_HINT_SHOW), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 		hint_bar(b, l, 6);
 	} else {
-		const char *b[] = {"updown", "l2r2", row == 7 ? "cross" : "leftright", "triangle", "circle"};
-		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), row == 7 ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
+		const char *b[] = {"updown", "l2r2", row == SR_RDCOPY ? "cross" : "leftright", "triangle", "circle"};
+		const char *l[] = {T(STR_HINT_SELECT), T(STR_HINT_PAGE), row == SR_RDCOPY ? T(STR_HINT_DOWNLOAD) : T(STR_HINT_CHANGE), T(STR_HINT_DEFAULTS), T(STR_HINT_BACK)};
 		hint_bar(b, l, 5);
 	}
 }
@@ -4402,7 +6195,7 @@ static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, i
 static void settings_screen()
 {
 	int redump = g_redump, remote = g_remote, webhook_on = g_webhook_on, row = 0;
-	const int NROWS = 13;   // the last row opens About
+	const int NROWS = SR_COUNT;   // the first row opens the game list, the last About
 	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	DriveCfg sd = g_std;
 	char rdver[64] = "";
@@ -4423,32 +6216,38 @@ static void settings_screen()
 		if (p & B_DOWN) row = (row + 1) % NROWS;
 		if (p & B_R2) row = row + 9 < NROWS ? row + 9 : NROWS - 1;   // a page down / up (9 rows show)
 		if (p & B_L2) row = row >= 9 ? row - 9 : 0;
-		if ((p & B_CROSS) && row == 5) {
+		if ((p & B_CROSS) && row == SR_GAMES) {
+			games_screen();
+			pad_pressed();
+			g_redraw = 2;
+			continue;
+		}
+		if ((p & B_CROSS) && row == SR_FILENAME) {
 			filename_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 12) {
+		if ((p & B_CROSS) && row == SR_ABOUT) {
 			about_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 10) {
+		if ((p & B_CROSS) && row == SR_AUDIT) {
 			audit_screen();
 			sd = g_std; redump = g_redump; remote = g_remote; webhook_on = g_webhook_on;   // an undo may have changed them
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 9) {
+		if ((p & B_CROSS) && row == SR_WEBHOOK) {
 			webhook_settings_screen();
 			pad_pressed();
 			g_redraw = 2;
 			continue;
 		}
-		if ((p & B_CROSS) && row == 7) {
+		if ((p & B_CROSS) && row == SR_RDCOPY) {
 			redump_download_screen();
 			rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
 			pad_pressed();
@@ -4456,7 +6255,7 @@ static void settings_screen()
 			continue;
 		}
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (row == 7 || row == 10 || row == 12) d = 0;
+		if (row == SR_GAMES || row == SR_RDCOPY || row == SR_AUDIT || row == SR_ABOUT) d = 0;
 		int reset = 0;
 		if (p & B_TRIANGLE) {
 			reset = own_dialog(T(STR_RESET_Q), 1) == 1;
@@ -4473,30 +6272,30 @@ static void settings_screen()
 			}
 		}
 		if (d && !reset) {
-			if (row == 0) {
+			if (row == SR_SPEED) {
 				// right = faster: 2x, 4x, 8x, max (index 3 ... 0)
 				if (d > 0 && sd.speed > 0) sd.speed--;
 				if (d < 0 && sd.speed < 3) sd.speed++;
-			} else if (row == 1) {
+			} else if (row == SR_RETRIES) {
 				int k = 0; while (k < 6 && steps[k] != sd.retries) k++;
 				sd.retries = steps[(k + (d > 0 ? 1 : 5)) % 6];
-			} else if (row == 2) {
+			} else if (row == SR_CHECK) {
 				sd.check = (sd.check + (d > 0 ? 1 : 2)) % 3;
-			} else if (row == 3) {
+			} else if (row == SR_EJECT) {
 				sd.eject = !sd.eject;
-			} else if (row == 4) {
+			} else if (row == SR_AUTOSTART) {
 				sd.autostart = !sd.autostart;
-			} else if (row == 5) {   // the ready-made patterns, and the own one
+			} else if (row == SR_FILENAME) {   // the ready-made patterns, and the own one
 				fn_step(d);
-			} else if (row == 6) {
+			} else if (row == SR_REDUMP) {
 				redump = (redump + (d > 0 ? 1 : 2)) % 3;
-			} else if (row == 8) {
+			} else if (row == SR_REMOTE) {
 				remote = !remote;
 				remote_set(remote);
 				if (remote) notify_url(STR_REMOTE_HELP, "");
-			} else if (row == 9) {
+			} else if (row == SR_WEBHOOK) {
 				webhook_on = !webhook_on;
-			} else if (row == 11) {   // right = more; no wrap-around: 256 to 1 MB would drop the kept sectors
+			} else if (row == SR_AUDIT_MB) {   // right = more; no wrap-around: 256 to 1 MB would drop the kept sectors
 				int k = 0, ns = (int)(sizeof(audit_mb_steps) / sizeof(audit_mb_steps[0]));
 				while (k < ns - 1 && audit_mb_steps[k] != g_audit_mb) k++;
 				k += d;
@@ -5457,13 +7256,13 @@ static const char *rd_result_str() { return rd_code(g_rd_result); }
 
 // ---------------------------------------------------------------- jobs in the audit log
 
-// The Redump line of a rip's log ("verified Alundra (Europe)"), "unchecked" when there is none.
-static void redump_line_of(const char *base, char *out, size_t n)
+// The Redump line of an image's log ("verified Alundra (Europe)"), "unchecked" when there is none.
+static void redump_line_of(const char *base, const char *image, char *out, size_t n)
 {
 	snprintf(out, n, "unchecked");
 	if (!base[0]) return;
-	char p[320], b[4096];
-	snprintf(p, sizeof(p), "%s.log", base);
+	char p[340], b[4096];
+	own_find(base, image, "log", p, sizeof(p));
 	VFile *f = vf_open(p, "rb");
 	if (!f) return;
 	int got = (int)vf_read(f, b, sizeof(b) - 1);
@@ -5485,7 +7284,7 @@ static void audit_card_begin(int c, AuditSrc src, const char *what)
 	disc_key(k.audit_disc, sizeof(k.audit_disc));
 	const char *slash = strrchr(k.exist, '/');
 	const char *name = !strcmp(what, "rip") || !k.exist[0] ? k.fname : slash ? slash + 1 : k.exist;
-	redump_line_of(k.exist, k.rd_before, sizeof(k.rd_before));
+	redump_line_of(k.exist, ".bin", k.rd_before, sizeof(k.rd_before));
 	k.job_src = src;
 	k.audit_job = audit_job_begin(src, k.audit_disc, name, what);
 }
@@ -5531,7 +7330,7 @@ static void json_fields(char *js, size_t n)
 	o = strlen(js); snprintf(js + o, n - o, ",\"redump\":\"%s\",\"redump_name\":", rd_result_str()); json_str(js, n, g_rd_result_name);
 }
 
-static int g_state_busy() { return any_ripping() || g_ident_busy || g_repairing || lv1_patched; }
+static int g_state_busy() { return any_ripping() || g_ident_busy || g_repairing || lv1_patched || g_gc.running || g_files_busy; }
 
 // /status.json: the app, and every drive (internal first, then the USB drives by port) with its
 // disc, its job and its last rip. busy at the top: a drive is in use or the lv1 patch is on, never
@@ -5754,8 +7553,8 @@ static int rip_disc_inner(int fresh, int autorip)
 		if (vf_rename(part, bin)) logf("rename %s failed", part);
 		Card &k = g_cards[cur_card()];
 		if (k.exist[0] && strcmp(k.exist, g_base)) {   // the same disc under another name: this rip replaces it
-			static const char *ext[] = {".bin", ".cue", ".md5", ".log", ".sbi"};
-			for (int i = 0; i < 5; i++) { char o[300]; snprintf(o, sizeof(o), "%s%s", k.exist, ext[i]); vf_unlink(o); }
+			static const char *ext[] = {".bin", ".cue", ".md5", ".log", ".sbi", ".bin.md5", ".bin.log"};
+			for (const char *e : ext) { char o[300]; snprintf(o, sizeof(o), "%s%s", k.exist, e); vf_unlink(o); }
 			logf("replaced the earlier rip %s", k.exist);
 		}
 		idx_stale();
@@ -5764,9 +7563,10 @@ static int rip_disc_inner(int fresh, int autorip)
 	char binname[256];
 	snprintf(binname, sizeof(binname), "%s.bin", slash + 1);
 	write_cue(binname);
+	own_adopt(g_base, ".bin");   // an earlier rip's log of this name (old name): replaced below, as before
 	{
-		char mpath[300];
-		snprintf(mpath, sizeof(mpath), "%s.md5", g_base);
+		char mpath[340];
+		lib_own_name(g_base, ".bin", "md5", mpath, sizeof(mpath));
 		VFile *mf = vf_open(mpath, "wb");
 		if (mf) {
 			for (int t = 0; t < g_ntracks; t++) vf_printf(mf, "%s  track %02d\n", g_track_md5[t], g_tracks[t].num);
@@ -5885,21 +7685,197 @@ static void job_reset(int c);
 // Checks a rip from its file, without the disc: MD5 per track (track bounds from its .cue), its
 // .md5 written, the track MD5s and the Redump line of its log rewritten (a small log made when it
 // has none). As the card's job (job = 1) it shows its progress, can be cancelled and compares with
-// Redump as set. Otherwise (the audit's undo, on the UI thread) it touches no card's state and
-// compares with the local copy only (none: unchecked). Returns 0 checked, 1 cancelled, -1 no image.
+// Redump as set. With cf (the game list, any thread) it reads cf's image, touches no card's state,
+// compares with Redump as set by cf's disc ID, reports progress and stops through cf. Otherwise (the
+// audit's undo, on the UI thread) it touches no card's state and compares with the local copy only
+// (none: unchecked). Returns 0 checked, 1 cancelled, -1 no image.
+// A file written next to the one it replaces (<file>.tmp): ok drops at the first write that did not
+// write everything (a full disk: FatFs and stdio report a short count, the close still succeeds).
+struct TmpOut { VFile *f; int ok; size_t put; };
+static size_t g_tmp_cap = (size_t)-1;   // bytes a temp file takes (the tests lower it: a full disk)
+static int g_replace_unlinks;           // replacements that had to remove the old file first (FatFs)
+static void to_write(TmpOut &o, const void *p, size_t n)
+{
+	if (!o.ok) return;
+	size_t want = n;
+	if (o.put + n > g_tmp_cap) n = g_tmp_cap > o.put ? g_tmp_cap - o.put : 0;
+	size_t w = n ? vf_write(o.f, p, n) : 0;
+	o.put += w;
+	if (w != want) o.ok = 0;
+}
+static void to_printf(TmpOut &o, const char *fmt, ...)
+{
+	char b[1024];
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(b, sizeof(b), fmt, ap);
+	va_end(ap);
+	if (n < 0 || n >= (int)sizeof(b)) { o.ok = 0; return; }
+	to_write(o, b, (size_t)n);
+}
+// Closes o (written as tmp) and puts it in path's place. A short write or a failed close leaves path
+// as it was and removes tmp. The rename replaces path where it can (stdio: at once); where it cannot
+// (FatFs) path is removed first, and a <file>.tmp without its <file> is put back by tmp_restore.
+static int file_replace(TmpOut &o, const char *tmp, const char *path)
+{
+	int closed = vf_close(o.f) == 0;
+	if (!o.ok || !closed) { vf_unlink(tmp); logf("write %s failed (%s), %s kept", tmp, o.ok ? "close" : "short write", path); return -1; }
+	if (!vf_rename(tmp, path)) return 0;
+	g_replace_unlinks++;
+	vf_unlink(path);
+	if (vf_rename(tmp, path)) { logf("rename %s failed", tmp); return -1; }
+	return 0;
+}
+// A replacement cut short between removing <file> and renaming <file>.tmp (power lost): the .tmp is
+// whole (it was closed first), so it becomes <file> again. A .tmp next to its <file> is a write that
+// did not finish: it goes.
+static void tmp_restore(const char *path)
+{
+	char tmp[340];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	if (!vf_exists(tmp)) return;
+	if (vf_exists(path)) { vf_unlink(tmp); logf("%s: unfinished write removed", tmp); return; }
+	if (vf_rename(tmp, path)) logf("%s: could not be put back", tmp);
+	else logf("%s put back from its .tmp", path);
+}
+
+// Before the app writes an image's log or .md5 (image: its path or type): a lone <file>.tmp of
+// either is put back (tmp_restore), and an old <base>.log the app wrote and its .md5, when they are
+// this image's, take the typed names (lib_own_migration) the writer then works on. The game list
+// renames old logs as an audit job (gl_migrate); this covers a rip, repair or check that comes first.
+static void own_adopt(const char *base, const char *image)
+{
+	char p[340], from[2][320], to[2][320];
+	static const char *const whats[] = {"log", "md5"};
+	for (const char *w : whats) {
+		lib_own_name(base, image, w, p, sizeof(p));
+		tmp_restore(p);
+		snprintf(p, sizeof(p), "%s.%s", base, w);
+		if (lib_old_is_of(base, image, gl_io_exists)) tmp_restore(p);
+	}
+	LibIo io = gl_libio();
+	int n = lib_own_migration(base, image, &io, from, to);
+	for (int i = 0; i < n; i++) {
+		if (vf_rename(from[i], to[i])) logf("%s: could not be renamed to %s", from[i], to[i]);
+		else logf("%s renamed to %s (named after its image)", from[i], to[i]);
+	}
+}
+
+// The FILE lines of a cue renamed from leaf `from` to leaf `to` (file names without folder and
+// extension): each file named after the old leaf gets the new one (gm_owned); every other byte stays.
+// Written through <cue>.tmp (file_replace). 0 = done, also when no line names the old leaf.
+// The rewrite is sized first: every FILE line may grow by the new leaf (a 32 KB cue of short lines
+// and a long name: several hundred KB), so it never runs out of room.
+static size_t cue_rename_pass(const char *in, const char *from, const char *to, char *out, int *changed);
+static int cue_rename_files(const char *cue, const char *from, const char *to)
+{
+	static char in[GM_CUE_MAX + 2];   // (the UI thread only: moves run there)
+	VFile *f = vf_open(cue, "rb");
+	if (!f) return -1;
+	size_t n = vf_read(f, in, sizeof(in) - 1);
+	vf_close(f);
+	if (n >= sizeof(in) - 1) return -1;   // not a cue the app can rewrite whole
+	in[n] = 0;
+	int changed = 0;
+	size_t o = cue_rename_pass(in, from, to, NULL, &changed);
+	if (!changed) return 0;
+	char *out = (char *)malloc(o + 1);
+	if (!out) { logf("cue %s: no memory for its rewrite (%u bytes)", cue, (unsigned)o); return -1; }
+	cue_rename_pass(in, from, to, out, &changed);
+	char tmp[340];
+	snprintf(tmp, sizeof(tmp), "%s.tmp", cue);
+	TmpOut t = {vf_open(tmp, "wb"), 1, 0};
+	if (!t.f) { free(out); return -1; }
+	to_write(t, out, o);
+	free(out);
+	return file_replace(t, tmp, cue);
+}
+// cue_rename_files' rewrite of in: written to out when not NULL; returns its size.
+static size_t cue_rename_pass(const char *in, const char *from, const char *to, char *out, int *changed)
+{
+	size_t o = 0, fl = strlen(from), tl = strlen(to);
+	*changed = 0;
+	for (const char *p = in; *p; ) {
+		const char *eol = strchr(p, '\n');
+		size_t len = eol ? (size_t)(eol - p) + 1 : strlen(p);
+		const char *q = p, *nm = NULL;
+		while (*q == ' ' || *q == '\t') q++;
+		if (!strncasecmp(q, "FILE", 4) && (q[4] == ' ' || q[4] == '\t')) {
+			nm = q + 4;
+			while (*nm == ' ' || *nm == '\t') nm++;
+			if (*nm == '"') nm++;
+			if (!gm_owned_ci(nm, from)) nm = NULL;
+		}
+		if (nm) {   // the name's start, the new leaf, the rest of the line (extension, quote, type)
+			size_t head = (size_t)(nm - p), rest = len - head - fl;
+			if (out) { memcpy(out + o, p, head); memcpy(out + o + head, to, tl); memcpy(out + o + head + tl, nm + fl, rest); }
+			o += head + tl + rest;
+			*changed = 1;
+		} else { if (out) memcpy(out + o, p, len); o += len; }
+		p += len;
+	}
+	return o;
+}
+
+// The audit moved a file of a set (a rename, the trash, an undo): a .cue that got another name gets
+// its FILE lines along. Nonzero: the cue could not be rewritten (the move is put back).
+static int gm_moved_hook(const char *from, const char *to)
+{
+	size_t l = strlen(to);
+	if (l < 4 || strcasecmp(to + l - 4, ".cue")) return 0;
+	const char *a = strrchr(from, '/'), *b = strrchr(to, '/');
+	a = a ? a + 1 : from; b = b ? b + 1 : to;
+	size_t al = strlen(a);
+	if (al > 9 && !strcmp(a + al - 5, ".case")) al -= 5;   // home from where a case-only rename left it
+	if (al < 4) return 0;
+	char fa[256], fb[256];
+	snprintf(fa, sizeof(fa), "%.*s", (int)(al - 4), a);
+	snprintf(fb, sizeof(fb), "%.*s", (int)(strlen(b) - 4), b);
+	if (!strcmp(fa, fb)) return 0;   // the trash and back: same name
+	int rc = cue_rename_files(to, fa, fb);
+	if (rc) {   // the cue cut short between its removal and the rename of its .tmp: put it back first,
+		tmp_restore(to);   // so the audit can move it back (and this hook then renames its lines back)
+		logf("cue %s: its FILE lines could not be renamed", to);
+	}
+	return rc;
+}
+
+// A file the audit must not move now: a drive's job (rip, repair, check) or the game list's check
+// works on its set.
+static int gm_busy_hook(const char *path)
+{
+	for (int c = 0; c < NCARDS; c++) {
+		const Card &k = g_cards[c];
+		if (k.job && ((k.base[0] && gm_owned(path, k.base)) || (k.exist[0] && gm_owned(path, k.exist)))) return 1;
+	}
+	const char *g = gc_current();
+	return g[0] && gm_owned(path, g);
+}
+
+struct CheckFile {
+	int (*busy)(const char *base);     // checked right before writing: 1 = a drive rips into the set now (nothing written)
+	const char *image;                 // the image file (an .iso/.img without a cue: one track)
+	int cue;                           // the set has its own <base>.cue (the track layout; a .bin's always)
+	const char *title, *serial;        // a new log's title= and serial=; serial is also the online lookup's
+	volatile int *abort;               // set: stop
+	volatile uint32_t *done, *total;   // progress in sectors
+	int rd;                            // the result (rd_compare)
+	char rdname[RD_NAME];
+};
 static void (*g_check_tick)(uint32_t sectors);   // set: called now and then while check_image reads (not as a job)
-static int check_image(const char *base, int job = 0)
+static int check_image(const char *base, int job = 0, CheckFile *cf = NULL)
 {
 	char path[320];
 	// track starts (sectors) from the cue: INDEX 00 when there is one (the pregap belongs to the track)
 	uint32_t st[MAX_TRACKS + 1];
 	int nt = 0;
 	snprintf(path, sizeof(path), "%s.cue", base);
-	VFile *cf = vf_open(path, "rb");
-	if (cf) {
+	// never another set's cue: an .iso/.img next to a rip of its base reads none (unless its set has it)
+	VFile *cuef = !cf || cf->cue || !strcmp(lib_image_type(cf->image), ".bin") ? vf_open(path, "rb") : NULL;
+	if (cuef) {
 		char cb[8192];
-		int n = (int)vf_read(cf, cb, sizeof(cb) - 1);
-		vf_close(cf);
+		int n = (int)vf_read(cuef, cb, sizeof(cb) - 1);
+		vf_close(cuef);
 		cb[n > 0 ? n : 0] = 0;
 		int i0 = 0;
 		char *save = NULL;
@@ -5915,9 +7891,16 @@ static int check_image(const char *base, int job = 0)
 	}
 	if (!nt) { nt = 1; st[0] = 0; }   // no cue: the whole image as one track
 	st[0] = 0;
-	snprintf(path, sizeof(path), "%s.bin", base);
+	if (cf) snprintf(path, sizeof(path), "%s", cf->image);
+	else snprintf(path, sizeof(path), "%s.bin", base);
 	VFile *f = vf_open(path, "rb");
 	if (!f) { if (job) g_total = 1; logf("check %s: no image", base); return -1; }
+	if (cf) {
+		uint64_t size = 0;
+		vf_size(path, &size);
+		*cf->total = (uint32_t)(size / RAW_SIZE);
+		*cf->done = 0;
+	}
 	if (job) {   // size: read to the end once is slow; seek-free estimate from the identification
 		uint64_t size = (uint64_t)g_cards[cur_card()].mb * 1024 * 1024;
 		g_total = size ? (uint32_t)(size / RAW_SIZE) : 1;
@@ -5927,7 +7910,7 @@ static int check_image(const char *base, int job = 0)
 	uint8_t *buf = (uint8_t *)malloc(512 * RAW_SIZE);
 	uint32_t lba = 0;
 	int t = 0;
-	while (buf && !(job && g_abort)) {
+	while (buf && !(job && g_abort) && !(cf && *cf->abort)) {
 		size_t got = vf_read(f, buf, 512 * RAW_SIZE);
 		uint32_t secs = (uint32_t)(got / RAW_SIZE);
 		for (uint32_t i = 0; i < secs; i++, lba++) {
@@ -5935,12 +7918,13 @@ static int check_image(const char *base, int job = 0)
 			md5_update(&md[t], buf + (size_t)i * RAW_SIZE, RAW_SIZE);
 		}
 		if (job) { g_done = lba; if (lba > g_total) g_total = lba; }
+		else if (cf) { *cf->done = lba; if (lba > *cf->total) *cf->total = lba; }
 		else if (g_check_tick && lba % (16 * 512) == 0) g_check_tick(lba);   // about every 19 MB
 		if (got < 512 * RAW_SIZE) break;
 	}
 	vf_close(f);
 	free(buf);
-	if (job && g_abort) { logf("check %s: cancelled", base); return 1; }
+	if ((job && g_abort) || (cf && *cf->abort)) { logf("check %s: cancelled", base); return 1; }
 	uint8_t bin[MAX_TRACKS + 1][16];
 	char hex[MAX_TRACKS + 1][33];
 	for (int i = 0; i < nt; i++) { md5_final(&md[i], bin[i]); md5_hex(bin[i], hex[i]); }
@@ -5956,6 +7940,10 @@ static int check_image(const char *base, int job = 0)
 		redump_verify(info, sizeof(info));
 		rd = g_rd_result;
 		snprintf(rdname, sizeof(rdname), "%s", g_rd_result_name);
+	} else if (cf) {
+		rd = rd_compare(bin, nt, cf->serial, rdname, sizeof(rdname));
+		cf->rd = rd;
+		snprintf(cf->rdname, sizeof(cf->rdname), "%s", rdname);
 	} else {
 		rd_lock();
 		rd = rd_local_verify(bin, nt, rdname, sizeof(rdname));
@@ -5964,11 +7952,25 @@ static int check_image(const char *base, int job = 0)
 		if (rd != 1) rdname[0] = 0;
 	}
 	logf("check %s: %d track(s), redump %s %s", base, nt, rd_code(rd), rdname);
-	snprintf(path, sizeof(path), "%s.md5", base);
-	VFile *mf = vf_open(path, "wb");
-	if (mf) { for (int i = 0; i < nt; i++) vf_printf(mf, "%s  track %02d\n", hex[i], i + 1); vf_close(mf); }
-	// its log: the tracks' MD5s and the Redump line replaced, or a small log
-	snprintf(path, sizeof(path), "%s.log", base);
+	if (cf && cf->busy && cf->busy(base)) { logf("check %s: a drive rips into it now, nothing written", base); return -1; }
+	// the image's own .md5 and log (<base>.bin.md5, <base>.iso.log, ...; an old <base>.log of the app
+	// takes that name first). They are written next to them (<file>.tmp) and then put in their place:
+	// an app stopped (or the power lost) in the middle leaves the old file whole
+	const char *itype = cf ? lib_image_type(cf->image) : ".bin";
+	own_adopt(base, itype);
+	char tmp[350];
+	lib_own_name(base, itype, "md5", path, sizeof(path));
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	TmpOut mo = {vf_open(tmp, "wb"), 1, 0};
+	if (mo.f) {
+		for (int i = 0; i < nt; i++) to_printf(mo, "%s  track %02d\n", hex[i], i + 1);
+		file_replace(mo, tmp, path);
+	}
+	// its log: the tracks' MD5s and the Redump line replaced, or a small log. From the game list
+	// (cf) a Redump that could not be asked (-1) leaves the line the log has.
+	int keep_rd = cf && rd == -1;
+	lib_own_name(base, itype, "log", path, sizeof(path));
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
 	char *lb = (char *)malloc(65536);
 	int n = 0;
 	VFile *lf = lb ? vf_open(path, "rb") : NULL;
@@ -5976,8 +7978,8 @@ static int check_image(const char *base, int job = 0)
 	if (lb) lb[n > 0 ? n : 0] = 0;
 	char rdl[RD_NAME + 32];
 	snprintf(rdl, sizeof(rdl), "redump=%s%s%s\n", rd_code(rd), rdname[0] ? " " : "", rdname);
-	VFile *of = lb ? vf_open(path, "wb") : NULL;
-	if (of) {
+	TmpOut of = {lb ? vf_open(tmp, "wb") : NULL, 1, 0};
+	if (of.f) {
 		if (n > 0) {
 			int put = 0;
 			for (char *l = lb; *l; ) {
@@ -5989,25 +7991,26 @@ static int check_image(const char *base, int job = 0)
 					mp = strstr(l, " md5=");
 					if (mp && mp >= l + len) mp = NULL;   // on a later line
 				}
-				if (!strncmp(l, "redump=", 7)) { if (!put) { vf_printf(of, "%s", rdl); put = 1; } }
+				if (!strncmp(l, "redump=", 7) && keep_rd) to_write(of, l, len);
+				else if (!strncmp(l, "redump=", 7)) { if (!put) { to_printf(of, "%s", rdl); put = 1; } }
 				else if (mp) {   // the track's MD5 as the image has it now
-					vf_write(of, l, (size_t)(mp + 5 - l));
-					vf_printf(of, "%s\n", hex[tn - 1]);
+					to_write(of, l, (size_t)(mp + 5 - l));
+					to_printf(of, "%s\n", hex[tn - 1]);
 				}
-				else vf_write(of, l, len);
+				else to_write(of, l, len);
 				l += len;
 			}
-			if (!put) vf_printf(of, "%s", rdl);
+			if (!put && !keep_rd) to_printf(of, "%s", rdl);
 		} else {
 			const Card *k = job ? &g_cards[cur_card()] : NULL;
 			const char *slash = strrchr(base, '/');
-			vf_printf(of, "PSX Ripper rip log\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n",
-			          k ? k->title : slash ? slash + 1 : base, k ? k->serial : "");
-			vf_printf(of, "sectors=%u\n", lba);
-			for (int i = 0; i < nt; i++) vf_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], hex[i]);
-			vf_printf(of, "%s", rdl);
+			to_printf(of, LIB_LOG_MARK "\ntitle=%s\nserial=%s\nchecked=from the image (no rip log before)\n",
+			          k ? k->title : cf && cf->title ? cf->title : slash ? slash + 1 : base, k ? k->serial : cf && cf->serial ? cf->serial : "");
+			to_printf(of, "sectors=%u\n", lba);
+			for (int i = 0; i < nt; i++) to_printf(of, "track=%02d start=%u md5=%s\n", i + 1, st[i], hex[i]);
+			to_printf(of, "%s", rdl);
 		}
-		vf_close(of);
+		file_replace(of, tmp, path);
 	}
 	free(lb);
 	return 0;
@@ -6018,8 +8021,9 @@ static int check_image(const char *base, int job = 0)
 // already, and the counts follow; so a later repair reads them again.
 static void riplog_put_back(const char *base, const uint32_t *lbas, const uint8_t *zero, int n)
 {
-	char path[320];
-	snprintf(path, sizeof(path), "%s.log", base);
+	char path[340];
+	own_adopt(base, ".bin");
+	lib_own_name(base, ".bin", "log", path, sizeof(path));
 	char *lb = (char *)malloc(65536);
 	uint8_t *add = (uint8_t *)malloc(n);
 	if (!lb || !add) { free(lb); free(add); return; }
@@ -6070,8 +8074,9 @@ static void riplog_put_back(const char *base, const uint32_t *lbas, const uint8_
 // unreadable= / bad= lines leave the log and the counts follow.
 static void riplog_take_out(const char *base, const uint32_t *lbas, int n)
 {
-	char path[320];
-	snprintf(path, sizeof(path), "%s.log", base);
+	char path[340];
+	own_adopt(base, ".bin");
+	lib_own_name(base, ".bin", "log", path, sizeof(path));
 	char *lb = (char *)malloc(65536);
 	if (!lb) return;
 	int len = 0;
@@ -6168,10 +8173,23 @@ static void check_job_thread(void *arg)
 	sysThreadExit(0);
 }
 
+// The game list's check job works on this card's rip (its file, or the one a rip replaces): the
+// card's job is refused, its tab says why.
+static int card_gc_refused(Card &k)
+{
+	if (!gc_on(k.base, k.exist)) return 0;
+	snprintf(k.res, sizeof(k.res), "%s", T(STR_GC_CARD_BUSY));
+	k.res_col = 0xF0C060; k.res_rd = -2; k.res_failed = 2;
+	logf("job refused: the game list checks %s", gc_current());
+	g_redraw = 2;
+	return 1;
+}
+
 static void check_job_start(int c, AuditSrc src)
 {
 	Card &k = g_cards[c];
 	if (k.job || !k.exist[0]) return;
+	if (card_gc_refused(k)) return;
 	job_reset(c);
 	k.job = 1;
 	k.res[0] = 0; k.res_rd = -2;
@@ -6182,6 +8200,118 @@ static void check_job_start(int c, AuditSrc src)
 	audit_card_begin(c, src, "check");
 	sys_ppu_thread_t t;
 	if (sysThreadCreate(&t, check_job_thread, (void *)(long)c, 1000, 0x10000, 0, (char *)"psxcheck")) { audit_card_end(c, "failed"); k.job = 0; g_state = ST_HOME; }
+}
+
+// ---------------------------------------------------------------- the game list's checks (□, START)
+// The user data (2048 bytes) of sector lba of a 2352 image file: after the header (MODE1) or the
+// header and subheader (MODE2). 0 when read.
+static int image_user_sector(VFile *f, uint32_t lba, uint8_t *out2048)
+{
+	static uint8_t raw[RAW_SIZE];   // (the check job's thread only)
+	if (vf_seek(f, (uint64_t)lba * RAW_SIZE) || vf_read(f, raw, RAW_SIZE) != RAW_SIZE) return -1;
+	memcpy(out2048, raw + (raw[15] == 1 ? 16 : 24), 2048);
+	return 0;
+}
+
+// The disc ID of a 2352 image, as the identification reads it from a disc: SYSTEM.CNF, else the
+// volume name. Empty when it has none (or no ISO 9660 file system).
+static void image_serial(const char *image, char *out)
+{
+	out[0] = 0;
+	VFile *f = vf_open(image, "rb");
+	if (!f) return;
+	static uint8_t pvd[2048], dir[2048], cnf[2049];
+	if (!image_user_sector(f, 16, pvd) && !memcmp(pvd + 1, "CD001", 5)) {
+		char vol[33];
+		memcpy(vol, pvd + 40, 32);
+		vol[32] = 0;
+		for (int i = 31; i >= 0 && (vol[i] == ' ' || vol[i] == 0); i--) vol[i] = 0;
+		uint32_t root = pvd[158] | (pvd[159] << 8) | (pvd[160] << 16) | ((uint32_t)pvd[161] << 24), lba, size;
+		if (!image_user_sector(f, root, dir) && !find_file(dir, 2048, "SYSTEM.CNF", &lba, &size) && !image_user_sector(f, lba, cnf)) {
+			cnf[2048] = 0;
+			serial_from_cnf((const char *)cnf, out);
+		}
+		if (!out[0]) serial_from_volume(vol, out);
+	}
+	vf_close(f);
+}
+
+// One disc's check from its file, as an audit check job with its Redump line before and after: an
+// app rip (a cue) through check_image as it is; a 2352 .iso/.img without a cue as one track, whose
+// new log names the title of its disc ID (read from the image) or its file name. Returns 0 compared
+// with Redump, 1 cancelled, -1 failed (unreadable, or a drive rips into it), -2 not compared: no disc
+// ID for the online lookup (found before hashing: nothing done), -3 Redump could not be asked (the
+// MD5s are written, the log keeps its Redump line).
+static int gc_check_one(const GcItem &it, AuditSrc src)
+{
+	char serial[16] = "", title[128];
+	const char *leaf = strrchr(it.base, '/');
+	leaf = leaf ? leaf + 1 : it.base;
+	int single = !it.cue;   // (a .cue of the same base next to an .iso is the other set's)
+	if (single) image_serial(it.image, serial);
+	if (!serial[0]) snprintf(serial, sizeof(serial), "%s", it.id);
+	const char *known = single && serial[0] ? lookup_title(serial) : NULL;
+	snprintf(title, sizeof(title), "%s", single ? (known ? known : leaf) : it.title);
+	if (g_redump == RD_ONLINE && !serial[0]) { logf("game list check %s: no disc ID to look up online, left out", it.base); return -2; }
+	char key[160], before[RD_NAME + 16], after[RD_NAME + 16];
+	snprintf(key, sizeof(key), "%s:%u", serial[0] ? serial : title, (unsigned)(it.size / RAW_SIZE));
+	redump_line_of(it.base, it.image, before, sizeof(before));
+	uint32_t job = audit_job_begin(src, key, leaf, "check");
+	CheckFile cf = {};
+	cf.busy = gc_card_busy;
+	cf.image = it.image; cf.cue = it.cue; cf.title = title; cf.serial = serial;
+	cf.abort = &g_gc.abort; cf.done = &g_gc.done; cf.total = &g_gc.total;
+	int r = check_image(it.base, 0, &cf);
+	if (r == 0 && cf.rd != -1 && job) {   // (Redump not asked: the log's line stays, no change to note)
+		snprintf(after, sizeof(after), "%s%s%s", rd_code(cf.rd), cf.rdname[0] ? " " : "", cf.rdname);
+		audit_note(job, AU_RIPS, key, "redump", "", before, after);
+	}
+	if (job) audit_job_end(job, r == 0 && cf.rd != -1 ? "finished" : r == 1 ? "cancelled" : "failed");
+	for (int c = 0; c < NCARDS; c++)   // a drive's card showing this rip: its Redump state follows the log
+		if (!strcmp(g_cards[c].exist, it.base) || !strcmp(g_cards[c].base, it.base)) g_cards[c].recheck = 1;
+	return r == 0 && cf.rd == -1 ? -3 : r;
+}
+
+static AuditSrc g_gc_src;
+// The check job: each disc in turn, a disc a drive started ripping into meanwhile is left out.
+// arg != NULL: a thread of its own (it exits); NULL: run in place.
+static void gc_thread(void *arg)
+{
+	for (int i = 0; i < g_gc.n && !g_gc.abort; i++) {
+		g_gc.i = i;
+		g_gc.done = 0; g_gc.total = 0;
+		const GcItem &it = g_gc.items[i];
+		int busy = gc_card_busy(it.base);
+		int r = busy ? -1 : gc_check_one(it, g_gc_src);
+		if (busy) logf("game list check %s: a drive rips into it, left out", it.base);
+		if (r == 0) g_gc.checked++;
+		else if (r == -2) g_gc.nocmp++;
+		else if (r == -3) { g_gc.unreach = 1; break; }   // the next ones would not get an answer either
+		else if (r < 0) g_gc.failed++;
+		if (g_gc_after) g_gc_after(i);
+	}
+	logf("game list check: %d checked, %d not compared, %d failed, of %d%s%s", g_gc.checked, g_gc.nocmp, g_gc.failed, g_gc.n,
+	     g_gc.abort ? " (cancelled)" : "", g_gc.unreach ? " (Redump could not be asked: stopped)" : "");
+	gl_changed();
+	__sync_synchronize();
+	g_gc.running = 0;
+	g_redraw = 2;
+	if (arg) sysThreadExit(0);
+}
+
+// Starts the check job over items (it owns them now; the screen frees them when it ended) at the
+// app's lowest priority, as the list's scan: a rip on another drive goes first. Where no thread can
+// be started it runs here and now.
+static void gc_start(GcItem *items, int n, AuditSrc src)
+{
+	g_gc.items = items; g_gc.n = n; g_gc.i = 0;
+	g_gc.done = g_gc.total = 0;
+	g_gc.checked = g_gc.failed = g_gc.nocmp = g_gc.unreach = 0;
+	g_gc.abort = 0;
+	g_gc_src = src;
+	g_gc.running = 1;
+	sys_ppu_thread_t t;
+	if (sysThreadCreate(&t, gc_thread, (void *)1, GL_PRIO, 0x10000, 0, (char *)"psxgcheck")) gc_thread(NULL);
 }
 
 // A rip in the background, for one card: the home screen keeps running and shows it in the card.
@@ -6231,6 +8361,7 @@ static void rip_job_start(int c, AuditSrc src, int fresh)
 	Card &k = g_cards[c];
 	if (k.job) return;
 	if (!g_parallel && any_ripping()) { own_dialog(T(STR_REPAIR_WAIT), 0); return; }   // one at a time then
+	if (card_gc_refused(k)) return;
 	job_reset(c);
 	k.job = 1;
 	OnCard o(c);
@@ -6244,17 +8375,18 @@ static void rip_job_start(int c, AuditSrc src, int fresh)
 	}
 }
 
-// Rip log next to the image (<name>.log): what was read and which sectors are still wrong, so a
+// Rip log next to the image (<name>.bin.log): what was read and which sectors are still wrong, so a
 // later "repair" (after cleaning the disc) can re-read just those sectors.
 static void write_riplog()
 {
-	char path[320];
-	snprintf(path, sizeof(path), "%s.log", g_base);
+	char path[340];
+	own_adopt(g_base, ".bin");
+	lib_own_name(g_base, ".bin", "log", path, sizeof(path));
 	VFile *f = vf_open(path, "wb");
 	if (!f) return;
 	time_t now = time(NULL);
 	struct tm *g = gmtime(&now);
-	vf_printf(f, "PSX Ripper rip log\n");
+	vf_printf(f, LIB_LOG_MARK "\n");
 	vf_printf(f, "title=%s\nserial=%s\n", g_res_title, g_serial);
 	if (g) vf_printf(f, "date=%04d-%02d-%02d %02d:%02d UTC\n", g->tm_year + 1900, g->tm_mon + 1, g->tm_mday, g->tm_hour, g->tm_min);
 	vf_printf(f, "sectors=%u\ncheck=%s\nretries=%d\n", g_leadout, g_check == CHECK_OFF ? "off" : g_check == CHECK_ON ? "on" : "bitperfect", g_retries);
@@ -6316,6 +8448,7 @@ static void repair_job_start(int c, AuditSrc src)
 {
 	Card &k = g_cards[c];
 	if (k.job) return;
+	if (card_gc_refused(k)) return;
 	job_reset(c);
 	k.job = 1;
 	k.repairing = 1;
@@ -6337,8 +8470,8 @@ static int repair_disc_inner()
 	int err = 0, code = 0;
 	if (prepare_disc(&err, &code)) { if (g_use == SRC_BD) lv1_storage_unpatch(); return 0; }
 	if (g_cards[cur_card()].exist[0]) snprintf(g_base, sizeof(g_base), "%s", g_cards[cur_card()].exist);   // maybe another name
-	char path[320];
-	snprintf(path, sizeof(path), "%s.log", g_base);
+	char path[340];
+	own_find(g_base, ".bin", "log", path, sizeof(path));
 	VFile *lf = vf_open(path, "rb");
 	// its own buffer: riplog_open_count() below reads the log into CX.log_buf and would overwrite
 	// this one while it is being parsed (that once wrote a log without its sector list)
@@ -6462,8 +8595,9 @@ static int repair_disc_inner()
 	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
 	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);
 	{
-		char mpath[300];
-		snprintf(mpath, sizeof(mpath), "%s.md5", g_base);
+		char mpath[340];
+		own_adopt(g_base, ".bin");
+		lib_own_name(g_base, ".bin", "md5", mpath, sizeof(mpath));
 		VFile *mf = vf_open(mpath, "wb");
 		if (mf) { for (int t = 0; t < g_ntracks; t++) vf_printf(mf, "%s  track %02d\n", g_track_md5[t], g_tracks[t].num); vf_close(mf); }
 	}
@@ -6636,13 +8770,14 @@ int main(int argc, char *argv[])
 		t_card = -1;
 		logf("thread-local storage %s (thread saw %d)", g_parallel ? "ok: parallel rips" : "NOT working: one rip at a time", seen);
 	}
-	{ sys_mutex_attr_t ma; sysMutexAttrInitialize(ma); sysMutexCreate(&g_rd_mx, &ma); sysMutexCreate(&g_idx_mx, &ma); }
+	{ sys_mutex_attr_t ma; sysMutexAttrInitialize(ma); sysMutexCreate(&g_rd_mx, &ma); sysMutexCreate(&g_idx_mx, &ma); sysMutexCreate(&g_gl_mx, &ma); }
 	lang_init();
 	netInitialize();
 	// start-up checks: config, lv1 state after an earlier crash, USB file systems
 	char warn[400] = "";
 	audit_init("/dev_hdd0/tmp/psxrip_audit", &vf_io);
 	audit_set_hooks(set_setting_hook, recheck_hook);
+	audit_set_move_hooks(gm_moved_hook, gm_busy_hook);
 	audit_set_progress(audit_undo_tick);
 	int had_cfg = cfg_load();
 	audit_apply_cap();   // also without a config file (the default size)
