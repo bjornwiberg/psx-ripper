@@ -1242,6 +1242,7 @@ static void mcp_ui_scenarios()
 		static pthread_t bt;
 		posted = hooked = 0; btn_rc = -9; btn_out.clear();
 		on_ui([]() { g_cards[0].prev_rip = 0; g_cards[0].exist[0] = 0; g_cards[0].state = DISC_READY; g_cards[1].job = 1; OnCard oc(1); g_state = ST_RIPPING; });
+		int par_was = g_parallel;
 		g_parallel = 0;
 		call("go_tab", "internal");
 		on_ui([]() {
@@ -1270,6 +1271,7 @@ static void mcp_ui_scenarios()
 		need(btn_rc == 0 && btn_out.find("\"dialog\":null") != std::string::npos && !u.dlg_open,
 		     "a press posted while a screen opens reaches the new screen's loop (not its entry swallow)", btn_out.c_str());
 		on_ui([]() { g_cards[1].job = 0; OnCard oc(1); g_state = ST_HOME; });
+		g_parallel = par_was;
 	}
 	// set_setting, then rip in the same frame: the rip uses the new value (the card takes it first)
 	{

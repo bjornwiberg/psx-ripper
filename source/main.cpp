@@ -5748,6 +5748,7 @@ static int home_screen()
 			}
 		}
 		int p = pad_pressed();
+		int mcp_only = g_pad_mcp;   // a screen opened below (START) would overwrite g_pad_mcp
 		if ((p & B_UP) && nc > 1) { sel = list[(si + nc - 1) % nc]; g_redraw = 2; }   // also up/down change the tab
 		if ((p & B_DOWN) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }
 		if ((p & B_R1) && nc > 1) { sel = list[(si + 1) % nc]; g_redraw = 2; }   // the next / previous tab
@@ -5815,7 +5816,7 @@ static int home_screen()
 			g_redraw = 2;
 		}
 		if ((p & B_CIRCLE) && !jobs) {   // exit only when nothing rips (a ripping tab's O cancels its rip)
-			if (g_pad_mcp & B_CIRCLE) {   // not over MCP: the app, and MCP with it, could not be started again from afar
+			if (mcp_only & B_CIRCLE) {   // not over MCP: the app, and MCP with it, could not be started again from afar
 				g_req_flip = 0;
 				ui_req_done(-1, T_en(STR_CAN_NO_EXIT));
 				continue;
