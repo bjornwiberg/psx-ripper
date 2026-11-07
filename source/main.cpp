@@ -676,8 +676,12 @@ static void sysutil_callback(u64 status, u64 param, void *usrdata)
 	if (status >= SYSUTIL_OSK_LOADED && status <= SYSUTIL_OSK_INPUT_CANCELED) g_osk_event = (int)status;
 }
 
-// the system's disc callbacks are about its own drive only
-static void disc_eject_cb(void) { g_cards[0].inserted = 0; g_cards[0].present = 0; }
+// the system's disc callbacks are about its own drive only. An unmount through webMAN makes the
+// system report the internal disc as ejected a moment later, with no insert after it: an eject
+// until g_unmount_until is that, not the user, and the disc stays present.
+static uint64_t now_ms();
+static volatile uint64_t g_unmount_until = 0;
+static void disc_eject_cb(void) { if (now_ms() < g_unmount_until) return; g_cards[0].inserted = 0; g_cards[0].present = 0; }
 static void disc_insert_cb(u32 type, char *title) { g_cards[0].inserted = 1; g_cards[0].present = 1; }
 
 static void lv1_storage_unpatch();
@@ -2370,8 +2374,11 @@ static void sanitize(char *s)
 }
 
 // Sends a web command to webMAN on this console (no internet involved). Returns 0 if webMAN answered.
-static int webman_get(const char *path)
+// body (may be NULL): the start of webMAN's answer, NUL-terminated, for callers that check it.
+static int webman_get_body(const char *path, char *body, int max)
 {
+	if (body && max > 0) body[0] = 0;
+	int got = 0;
 	int sock = socket(AF_INET, SOCK_STREAM, 0);
 	if (sock < 0) return -1;
 	struct sockaddr_in sa;
@@ -2393,6 +2400,12 @@ static int webman_get(const char *path)
 		for (;;) {
 			int r = recv(sock, tmp, sizeof(tmp), 0);
 			if (r == 0) break;
+			if (r > 0 && body && got < max - 1) {
+				int k = r < max - 1 - got ? r : max - 1 - got;
+				memcpy(body + got, tmp, k);
+				got += k;
+				body[got] = 0;
+			}
 			if (r < 0 && time(NULL) - t0 >= 3) { logf("webMAN %s: no answer within 3 s", path); break; }
 			if (r < 0) usleep(20000);
 		}
@@ -2402,6 +2415,8 @@ static int webman_get(const char *path)
 	logf("webMAN %s -> %s", path, ret ? "not reachable" : "ok");
 	return ret;
 }
+
+static int webman_get(const char *path) { return webman_get_body(path, NULL, 0); }
 
 // webMAN request from a background thread (notifications): the caller never waits for it.
 static void webman_thread(void *arg)
@@ -2418,11 +2433,17 @@ static void webman_get_async(const char *path)
 	if (p && sysThreadCreate(&t, webman_thread, p, 1500, 0x4000, 0, (char *)"psxwebman")) free(p);
 }
 
-// Unmounts any mounted disc image so the real disc is read.
+// Unmounts any mounted disc image so the real disc is read. /mount.ps3/unmount answers "Error!" while
+// the app runs and leaves the image mounted: the internal drive then reads that image, whatever
+// disc is in it. /mount_ps3/unmount (no XMB action) works from inside the app.
 static void webman_unmount()
 {
-	if (webman_get("/mount.ps3/unmount") == 0)
-		usleep(1500 * 1000);   // let Cobra hand the drive back to the real disc
+	static char body[8192];
+	g_unmount_until = now_ms() + 8000;
+	if (webman_get_body("/mount_ps3/unmount", body, sizeof(body)) != 0) { g_unmount_until = 0; return; }
+	g_unmount_until = now_ms() + 8000;
+	if (strstr(body, "Error")) logf("webMAN: unmount refused, a mounted image may still hide the disc");
+	usleep(1500 * 1000);   // let Cobra hand the drive back to the real disc
 }
 
 // ---------------------------------------------------------------- lv1 storage patch
@@ -7160,7 +7181,10 @@ static int prepare_disc(int *err, int *code)
 	char *name = g_name;
 	g_ntracks = 0; g_leadout = 0; g_nlc = 0; g_qzero = 0; g_qchecked = 0; g_readerrs = 0;
 	g_qoff = 0; g_qcal_done = 0; memset(g_qhist, 0, sizeof(g_qhist));
-	if (!g_mounttest && g_use == SRC_BD) webman_unmount();
+	// headless runs unmount here; the app unmounts once at start (see main): an unmount that works
+	// makes the system report the disc as ejected and inserted again, so doing it on every identify
+	// left the internal card empty right after it found the disc
+	if (g_headless && !g_mounttest && g_use == SRC_BD) webman_unmount();
 
 	int ret;
 	if (g_use == SRC_USB) {   // no lv2 device and no lv1 patch: our own driver talks to the drive
@@ -8814,6 +8838,7 @@ int main(int argc, char *argv[])
 	usbodd_init();   // USB SuperDrives
 	{ sys_ppu_thread_t t; sysThreadCreate(&t, usb_presence_thread, NULL, 1500, 0x4000, 0, (char *)"psxusbpoll"); }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
+	webman_unmount();   // a game image webMAN mounted earlier would hide the internal drive's disc
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
 	while (!exit_requested) {
 		int a = home_screen();   // rips run on their cards, from the home screen
