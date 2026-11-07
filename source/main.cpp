@@ -632,8 +632,12 @@ static void sysutil_callback(u64 status, u64 param, void *usrdata)
 	if (status >= SYSUTIL_OSK_LOADED && status <= SYSUTIL_OSK_INPUT_CANCELED) g_osk_event = (int)status;
 }
 
-// the system's disc callbacks are about its own drive only
-static void disc_eject_cb(void) { g_cards[0].inserted = 0; g_cards[0].present = 0; }
+// the system's disc callbacks are about its own drive only. An unmount through webMAN makes the
+// system report the internal disc as ejected a moment later, with no insert after it: an eject
+// until g_unmount_until is that, not the user, and the disc stays present.
+static uint64_t now_ms();
+static volatile uint64_t g_unmount_until = 0;
+static void disc_eject_cb(void) { if (now_ms() < g_unmount_until) return; g_cards[0].inserted = 0; g_cards[0].present = 0; }
 static void disc_insert_cb(u32 type, char *title) { g_cards[0].inserted = 1; g_cards[0].present = 1; }
 
 static void lv1_storage_unpatch();
@@ -2391,7 +2395,9 @@ static void webman_get_async(const char *path)
 static void webman_unmount()
 {
 	static char body[8192];
-	if (webman_get_body("/mount_ps3/unmount", body, sizeof(body)) != 0) return;
+	g_unmount_until = now_ms() + 8000;
+	if (webman_get_body("/mount_ps3/unmount", body, sizeof(body)) != 0) { g_unmount_until = 0; return; }
+	g_unmount_until = now_ms() + 8000;
 	if (strstr(body, "Error")) logf("webMAN: unmount refused, a mounted image may still hide the disc");
 	usleep(1500 * 1000);   // let Cobra hand the drive back to the real disc
 }
