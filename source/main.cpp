@@ -2326,8 +2326,11 @@ static void sanitize(char *s)
 }
 
 // Sends a web command to webMAN on this console (no internet involved). Returns 0 if webMAN answered.
-static int webman_get(const char *path)
+// body (may be NULL): the start of webMAN's answer, NUL-terminated, for callers that check it.
+static int webman_get_body(const char *path, char *body, int max)
 {
+	if (body && max > 0) body[0] = 0;
+	int got = 0;
 	int sock = socket(AF_INET, SOCK_STREAM, 0);
 	if (sock < 0) return -1;
 	struct sockaddr_in sa;
@@ -2349,6 +2352,12 @@ static int webman_get(const char *path)
 		for (;;) {
 			int r = recv(sock, tmp, sizeof(tmp), 0);
 			if (r == 0) break;
+			if (r > 0 && body && got < max - 1) {
+				int k = r < max - 1 - got ? r : max - 1 - got;
+				memcpy(body + got, tmp, k);
+				got += k;
+				body[got] = 0;
+			}
 			if (r < 0 && time(NULL) - t0 >= 3) { logf("webMAN %s: no answer within 3 s", path); break; }
 			if (r < 0) usleep(20000);
 		}
@@ -2358,6 +2367,8 @@ static int webman_get(const char *path)
 	logf("webMAN %s -> %s", path, ret ? "not reachable" : "ok");
 	return ret;
 }
+
+static int webman_get(const char *path) { return webman_get_body(path, NULL, 0); }
 
 // webMAN request from a background thread (notifications): the caller never waits for it.
 static void webman_thread(void *arg)
@@ -2374,11 +2385,15 @@ static void webman_get_async(const char *path)
 	if (p && sysThreadCreate(&t, webman_thread, p, 1500, 0x4000, 0, (char *)"psxwebman")) free(p);
 }
 
-// Unmounts any mounted disc image so the real disc is read.
+// Unmounts any mounted disc image so the real disc is read. /mount.ps3/unmount answers "Error!" while
+// the app runs and leaves the image mounted: the internal drive then reads that image, whatever
+// disc is in it. /mount_ps3/unmount (no XMB action) works from inside the app.
 static void webman_unmount()
 {
-	if (webman_get("/mount.ps3/unmount") == 0)
-		usleep(1500 * 1000);   // let Cobra hand the drive back to the real disc
+	static char body[8192];
+	if (webman_get_body("/mount_ps3/unmount", body, sizeof(body)) != 0) return;
+	if (strstr(body, "Error")) logf("webMAN: unmount refused, a mounted image may still hide the disc");
+	usleep(1500 * 1000);   // let Cobra hand the drive back to the real disc
 }
 
 // ---------------------------------------------------------------- lv1 storage patch
