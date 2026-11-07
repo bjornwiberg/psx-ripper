@@ -8360,7 +8360,7 @@ static void rip_job_start(int c, AuditSrc src, int fresh)
 {
 	Card &k = g_cards[c];
 	if (k.job) return;
-	if (!g_parallel && any_ripping()) { own_dialog(T(STR_REPAIR_WAIT), 0); return; }   // one at a time then
+	if (!g_parallel && any_ripping()) { own_dialog(T(STR_RIP_ONE_AT_A_TIME), 0); return; }   // one at a time then
 	if (card_gc_refused(k)) return;
 	job_reset(c);
 	k.job = 1;
