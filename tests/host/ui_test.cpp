@@ -3195,7 +3195,29 @@ static McpGameQuery gq(const char *src = "", int limit = 50)
 	memset(&q, 0, sizeof q);
 	snprintf(q.source, sizeof q.source, "%s", src);
 	q.limit = limit;
+	q.expect = -1;   // (empty_trash: no expectation)
 	return q;
+}
+// empty_trash's expect by ids, as mcp.cpp hands it on
+static McpGameQuery gq_ids(const char *src, std::vector<const char *> ids)
+{
+	McpGameQuery q = gq(src);
+	q.expect = (int)ids.size();
+	q.expect_ids = 1;
+	for (const char *id : ids) q.expect_hash += mcp_id_hash(id);
+	return q;
+}
+// The rows' ids of a list_games answer (a group's discs have no name).
+static std::vector<std::string> row_ids(const std::string &out)
+{
+	std::vector<std::string> ids;
+	size_t p = 0;
+	while ((p = out.find("{\"id\":\"", p)) != std::string::npos) {
+		p += 7;
+		size_t e = out.find('"', p);
+		if (out.compare(e, 9, "\",\"name\":") == 0) ids.push_back(out.substr(p, e - p));
+	}
+	return ids;
 }
 static int src_rows(AuditDom dom, const char *what, AuditSrc src)   // job rows of a domain by kind and source
 {
@@ -3311,6 +3333,76 @@ static void mcp_games_scenarios()
 		need(rc != 0 && has("No game") && has("list_games"), "get_game: an id the list does not have", O);
 		rc = get("Alundra");
 		need(rc != 0 && has("No game"), "get_game: not an id", O);
+		// query: a part of the name, any case
+		q = gq(); snprintf(q.query, sizeof q.query, "CROC");
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":2") && has("usb1:/dev_usb001/PSXISO/Croc 2") && !has("Alundra") && has("\"query\":\"CROC\""),
+		     "list_games: query, any case, every source", O);
+		q = gq("hdd"); q.redump = 1; snprintf(q.query, sizeof q.query, "fantasy");
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":1") && has("Final Fantasy IX") && !has("Alundra"), "list_games: query and the filter together", O);
+		q = gq(); snprintf(q.query, sizeof q.query, "zzz");
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":0") && has("\"games\":[]"), "list_games: a query nothing matches", O);
+		q = gq(); snprintf(q.query, sizeof q.query, "\xC3\x89" "chapp");
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":1"), "list_games: a query that is not ASCII", O);
+		// one scan per source for list_games and one for get_game: they never read each other's again
+		// (the folders' dates are old: only the app's changes and a stick's age make a scan stale)
+		system("touch -t 202601010000 out/gl/dev_hdd0/PSXISO out/gl/dev_usb001/PSXISO");
+		rc = list(gq());
+		uint32_t reads = g_mg_reads;
+		rc = get(FF9);
+		need(rc == 0 && g_mg_reads == reads, "get_game: read from list_games' scan of All");
+		McpGameQuery p2 = gq("", 5); p2.offset = 5;
+		rc = list(p2);
+		need(rc == 0 && g_mg_reads == reads, "list_games: the next page from the same scan after get_game");
+		rc = list(gq("hdd"));
+		need(rc == 0 && g_mg_reads == reads + 1, "list_games: another source is read");
+		rc = get("usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]");
+		need(rc == 0 && g_mg_reads == reads + 2, "get_game: a source list_games has not read is read on its own");
+		rc = list(gq("hdd"));
+		need(rc == 0 && g_mg_reads == reads + 2, "list_games: its scan was not replaced by get_game's");
+		rc = get("usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]");
+		need(rc == 0 && g_mg_reads == reads + 2, "get_game: its own scan is kept too");
+		// a page that does not fit is cut (next_offset says where to go on); never a whole failure
+		{
+			static char small[2 * 6000 + 200];
+			std::set<std::string> seen;
+			int off = 0, pages = 0, cuts = 0;
+			for (; off >= 0 && pages < 40; pages++) {
+				McpGameQuery c = gq("", 200); c.offset = off;
+				rc = h.list_games(&c, small, sizeof small); out = small;
+				if (rc != 0 || !json_ok(small)) { need(false, "list_games: a cut page is valid JSON", O); break; }
+				std::vector<std::string> ids = row_ids(out);
+				for (auto &s : ids) seen.insert(s);
+				cuts += has("\"cut\":true");
+				size_t at = out.find("\"next_offset\":");
+				off = at == std::string::npos || out.compare(at + 14, 4, "null") == 0 ? -1 : atoi(out.c_str() + at + 14);
+				if (off >= 0 && off != c.offset + (int)ids.size()) { need(false, "list_games: next_offset is the first row left out", O); break; }
+			}
+			need(cuts > 0 && seen.size() == 22 && off < 0, "list_games: cut pages give every game once");
+			static char tiny[2 * 300 + 200];
+			McpGameQuery c = gq("", 200);
+			rc = h.list_games(&c, tiny, sizeof tiny); out = tiny;
+			need(rc != 0 && has("smaller limit"), "list_games: too large even for one row: says to use a smaller limit", O);
+		}
+		// MCP turned off: its scans are freed (also when one is in use then: when that call ends)
+		rc = list(gq());
+		need(g_mg != NULL && g_mg_one != NULL, "MCP's scans are kept while it is on");
+		char sb[256];
+		h.set_setting("mcp", "1", NULL, sb, sizeof sb);
+		h.set_setting("mcp", "0", NULL, sb, sizeof sb);
+		need(g_mg == NULL && g_mg_one == NULL, "set_setting mcp=0: MCP's scans are freed");
+		rc = list(gq());
+		{
+			MgLock held;   // a list_games call that is still reading
+			h.set_setting("mcp", "1", NULL, sb, sizeof sb);
+			h.set_setting("mcp", "0", NULL, sb, sizeof sb);
+			need(g_mg != NULL, "set_setting mcp=0 while a call reads: the UI does not wait for it");
+		}
+		need(g_mg == NULL, "set_setting mcp=0 while a call reads: freed when the call ends");
+		h.set_setting("mcp", "1", NULL, sb, sizeof sb);
 	}
 
 	bg_start();
@@ -3345,15 +3437,31 @@ static void mcp_games_scenarios()
 		need(rc == 0 && has("\"result\":{\"restored\":\"Ape Escape (Europe)\"") && vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin"),
 		     "restore_game: back in its folder", O);
 		need(src_rows(AU_FILES, "restore", AU_MCP) == 1, "restore_game: an audit job with source mcp");
-		// a game on another source: the list shows that source on the way, as SELECT would (All
-		// shows every source: it stays)
+		// a game on another source: the list shows that source on the way (All shows every source: it
+		// stays), but only SELECT remembers a source: MCP never saves games_source
+		auto saved_src = [&]() { FILE *f = fopen(CFG_PATH, "r"); char b[8192] = ""; if (f) { b[fread(b, 1, sizeof b - 1, f)] = 0; fclose(f); }
+		                         const char *s = strstr(b, "\ngames_source="); return std::string(s ? s + 14 : "", s ? strcspn(s + 14, "\n") : 0); };
 		rc = act("check_games", NULL, NULL, gq("hdd"));
-		need(rc != 0 && !strcmp(g_games_source, "hdd"), "check_games on the hard disk: the list shows it (remembered)", O);
+		need(rc != 0 && !strcmp(g_games_source, "hdd"), "check_games on the hard disk: the list shows it", O);
 		rc = act("trash_game", "usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]");
-		need(rc == 0 && vf_exists("/dev_usb001/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin") && !strcmp(g_games_source, "usb1"),
-		     "trash_game on the stick: the list switched to it (remembered)", O);
+		need(rc == 0 && vf_exists("/dev_usb001/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin") && !strcmp(g_games_source, "hdd") && saved_src() == "hdd",
+		     "trash_game on the stick: the list switched to it, the source is not remembered", O);
 		rc = act("restore_game", "usb1:/dev_usb001/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88]");
 		need(rc == 0 && vf_exists("/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88].bin"), "restore_game on the stick", O);
+		rc = act("check_games", NULL, NULL, gq("all"));
+		need(rc != 0 && !strcmp(g_games_source, "hdd") && saved_src() == "hdd", "check_games on All: not remembered either", O);
+		h.ui("go_screen", "home", outb, sizeof outb);
+		h.ui("go_screen", "games", outb, sizeof outb);
+		bg_frames(4);
+		need(!strcmp(g_gl.key, "hdd"), "the list opened again shows the remembered source");
+		// a source that is not connected cannot be chosen, as SELECT offers only the connected ones
+		uint64_t t0 = now_ms();
+		rc = act("check_games", NULL, NULL, gq("usb5"));
+		need(rc != 0 && has("not connected") && now_ms() - t0 < 1000 && !strcmp(g_games_source, "hdd"), "check_games on a source that is not there: refused at once", O);
+		rc = act("trash_game", "usb5:/dev_usb005/PSXISO/Croc 2 (Europe) [SLES_020.88]");
+		need(rc != 0 && has("not connected"), "trash_game on a source that is not there", O);
+		bg_frames(2);
+		need(!strcmp(g_gl.key, "hdd"), "the list still shows the hard disk");
 	}
 	// rename_game: the rename view's checks, the new names, get_game by the new id
 	{
@@ -3377,6 +3485,33 @@ static void mcp_games_scenarios()
 		need(rc != 0 && has("control"), "rename_game: a control character", O);
 		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/.trash/Klonoa (Fixed)", "%T");
 		need(rc != 0, "rename_game: an id that is not there", O);
+		// a name starting with a dot would hide the game (the list and webMAN skip such names)
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", ".%T");
+		need(rc != 0 && has(T_en(STR_GM_DOT)) && vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).bin"), "rename_game: a name starting with a dot", O);
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", ".");
+		need(rc != 0 && has(T_en(STR_GM_DOT)), "rename_game: the name \".\"", O);
+		// a game of 12 discs with long names: every disc's new id comes back (more than 2048 bytes)
+		const char *LONG = "A Game With A Very Long Title That Goes On And On (Europe) (En,Fr,De,Es,It,Nl,Sv)";
+		for (int i = 1; i <= 12; i++) {
+			char nm[160];
+			snprintf(nm, sizeof nm, "%s (Disc %d)", LONG, i);
+			gs_set("out/gl/dev_hdd0/PSXISO", nm, 3, NULL);
+		}
+		gl_changed();   // (as a rip into the folder: the list reads it again)
+		bg_frames(4);
+		char lid[200];
+		snprintf(lid, sizeof lid, "hdd:/dev_hdd0/PSXISO/%s (Disc 1)", LONG);
+		rc = act("rename_game", lid, "%T (Renamed)");
+		std::vector<std::string> nids;
+		for (size_t p = 0; (p = out.find("{\"id\":\"hdd:/dev_hdd0/PSXISO/A Game With", p)) != std::string::npos; p++) nids.push_back(out.substr(p, 20));
+		need(rc == 0 && json_ok(out.c_str()) && nids.size() >= 12 && has("(Disc 12) (Renamed)\",\"name\":") && out.find("\"discs\":[") < out.find("\"state\":"),
+		     "rename_game: the 12 discs' new ids", O);
+		snprintf(lid, sizeof lid, "hdd:/dev_hdd0/PSXISO/A Game With A Very Long Title That Goes On And On (Disc 1) (Renamed)");   // (the title: no regions)
+		rc = act("trash_game", lid);
+		need(rc == 0 && has("(Disc 12) (Renamed)\",\"name\":"), "trash_game: the 12 discs' new ids", O);
+		std::string tid = std::string(lid).insert(strlen("hdd:/dev_hdd0/PSXISO/"), ".trash/");
+		rc = act("empty_trash", NULL, NULL, gq_ids("hdd", {tid.c_str()}));
+		need(rc == 0 && has("\"emptied\":true"), "empty_trash: the 12 discs (the ids expected)", O);
 	}
 	// empty_trash: never without confirm (the whole MCP path), then final, with source mcp
 	{
@@ -3387,12 +3522,26 @@ static void mcp_games_scenarios()
 		int st = mcp_handle(body, strlen(body), outb, sizeof outb);
 		out = outb;
 		need(st == 200 && has("\"isError\":true") && has("confirm: true") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash without confirm: refused, nothing deleted", O);
-		snprintf(body, sizeof body, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"empty_trash\",\"arguments\":{\"source\":\"hdd\",\"confirm\":true}}}");
+		// only one source's trash, the one the agent names (never all of them at once)
+		rc = act("empty_trash", NULL, NULL, gq("all"));
+		need(rc != 0 && has("one source") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash on All: refused", O);
+		rc = act("empty_trash", NULL, NULL, gq(""));
+		need(rc != 0 && has("one source") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash without a source: refused", O);
+		// expect: what the agent saw in that trash; anything else there now: refused, nothing deleted
+		McpGameQuery e = gq("hdd"); e.expect = 2;
+		rc = act("empty_trash", NULL, NULL, e);
+		need(rc != 0 && has("Not emptied") && has("1 game") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash: expect 2 games, 1 there: refused", O);
+		rc = act("empty_trash", NULL, NULL, gq_ids("hdd", {"hdd:/dev_hdd0/PSXISO/.trash/Spyro"}));
+		need(rc != 0 && has("Not emptied") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash: expect another game's id: refused", O);
+		rc = act("empty_trash", NULL, NULL, gq_ids("hdd", {"hdd:/dev_hdd0/PSXISO/.trash/Driver", "hdd:/dev_hdd0/PSXISO/.trash/Spyro"}));
+		need(rc != 0 && has("Not emptied") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash: expect one id too many: refused", O);
+		need(src_rows(AU_FILES, "empty", AU_MCP) == 1, "empty_trash refused: no audit job");
+		snprintf(body, sizeof body, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"empty_trash\",\"arguments\":{\"source\":\"hdd\",\"confirm\":true,\"expect\":[\"hdd:/dev_hdd0/PSXISO/.trash/Driver\"]}}}");
 		st = mcp_handle(body, strlen(body), outb, sizeof outb);
 		out = outb;
 		need(st == 200 && has("\"isError\":false") && !vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin") && vf_exists("/dev_hdd0/PSXISO/Spyro.bin"),
-		     "empty_trash with confirm: the trash's files deleted, nothing else", O);
-		need(src_rows(AU_FILES, "empty", AU_MCP) == 1, "empty_trash: an audit job with source mcp");
+		     "empty_trash with confirm and the ids expected: the trash's files deleted, nothing else", O);
+		need(src_rows(AU_FILES, "empty", AU_MCP) == 2, "empty_trash: an audit job with source mcp");
 		rc = act("empty_trash", NULL, NULL, gq("hdd"));
 		need(rc != 0 && has("empty"), "empty_trash: an empty trash", O);
 	}
@@ -3464,6 +3613,68 @@ static void mcp_games_scenarios()
 		need(rc == 0 && has("\"cancelled\":true"), "list_games: the last check was cancelled", O);
 		g_gc_after = NULL;
 		host_thread_gc = 0;
+	}
+	// a check job running (not this screen's progress): trash and restore are refused as the pad's
+	// triangle is not offered then
+	{
+		g_gc.running = 1;
+		int rc = act("trash_game", APE);
+		need(rc != 0 && has(T_en(STR_GC_CARD_BUSY)) && vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin"), "trash_game while a check job runs: refused", O);
+		rc = act("restore_game", APE_T);
+		need(rc != 0, "restore_game while a check job runs: refused", O);
+		g_gc.running = 0;
+	}
+	// G9: a rip and an image of one base name are two games; each id acts on its own files
+	{
+		const char *CV = "Castlevania Chronicles (USA) [SLUS_013.48]";
+		gs_set("out/gl/dev_hdd0/PSXISO", CV, 3, NULL);
+		std::string rip = std::string("hdd:/dev_hdd0/PSXISO/") + CV, iso = rip + ".iso";
+		int rc = list(gq("hdd"));
+		std::string ripq = "\"id\":\"" + rip + "\",", isoq = "\"id\":\"" + iso + "\",";
+		need(rc == 0 && has(ripq.c_str()) && has(isoq.c_str()), "G9: the rip and the .iso are two rows", O);
+		rc = act("trash_game", iso.c_str());
+		std::string isot = std::string("hdd:/dev_hdd0/PSXISO/.trash/") + CV + ".iso";
+		need(rc == 0 && has(isot.c_str()) && vf_exists("/dev_hdd0/PSXISO/.trash/Castlevania Chronicles (USA) [SLUS_013.48].iso") &&
+		     vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].bin") && vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].cue") &&
+		     !vf_exists("/dev_hdd0/PSXISO/.trash/Castlevania Chronicles (USA) [SLUS_013.48].bin"), "G9: trash_game of the .iso moves only the image", O);
+		rc = list(gq("hdd"));
+		need(rc == 0 && has(ripq.c_str()) && !has(isoq.c_str()), "G9: list_games still shows the rip", O);
+		rc = get(isot.c_str());
+		need(rc == 0 && has("\"in_trash\":true") && has(".iso"), "G9: get_game on the trash id", O);
+		rc = act("restore_game", isot.c_str());
+		need(rc == 0 && vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso"), "G9: restore_game of the .iso", O);
+		rc = act("trash_game", rip.c_str());
+		need(rc == 0 && vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso") &&
+		     vf_exists("/dev_hdd0/PSXISO/.trash/Castlevania Chronicles (USA) [SLUS_013.48].bin"), "G9: trash_game of the rip leaves the .iso", O);
+		rc = act("restore_game", (std::string("hdd:/dev_hdd0/PSXISO/.trash/") + CV).c_str());
+		need(rc == 0 && vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].bin"), "G9: restore_game of the rip", O);
+	}
+	// a game request while the detail view, the filter panel or the rename view is open: they leave as
+	// circle does and the list carries it out
+	{
+		auto screen_is = [&](const char *s) { UiState u; ui_snapshot(u); return !strcmp(SCR_NAMES[u.scr], s); };
+		h.ui("go_screen", "home", outb, sizeof outb);
+		h.ui("go_screen", "games", outb, sizeof outb);
+		h.ui("press_button", "cross", outb, sizeof outb); out = outb;
+		need(screen_is("game_detail"), "the detail view is open", O);
+		int rc = act("trash_game", APE);
+		need(rc == 0 && has("\"trashed\"") && has("\"state\":{\"screen\":\"games\"") && vf_exists("/dev_hdd0/PSXISO/.trash/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "trash_game from the detail view", O);
+		h.ui("press_button", "r1", outb, sizeof outb);
+		need(screen_is("game_filter"), "the filter panel is open");
+		rc = act("restore_game", APE_T);
+		need(rc == 0 && has("\"restored\"") && has("\"state\":{\"screen\":\"games\"") && vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "restore_game from the filter panel", O);
+		h.ui("go_screen", "home", outb, sizeof outb);   // (the list shows the trash now: back to its games)
+		h.ui("go_screen", "games", outb, sizeof outb);
+		h.ui("press_button", "cross", outb, sizeof outb);
+		h.ui("press_button", "cross", outb, sizeof outb); out = outb;
+		need(screen_is("game_rename"), "the rename view is open", O);
+		rc = act("trash_game", APE);
+		need(rc == 0 && has("\"trashed\"") && has("\"state\":{\"screen\":\"games\"") && vf_exists("/dev_hdd0/PSXISO/.trash/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "trash_game from the rename view", O);
+		rc = act("restore_game", APE_T);
+		need(rc == 0, "restore_game", O);
 	}
 	h.ui("go_screen", "home", outb, sizeof outb);
 	bg_stop();

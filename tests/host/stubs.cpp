@@ -137,6 +137,14 @@ int sysMutexUnlock(sys_mutex_t m)
 	if (!--g_host_depth[m]) g_host_owner[m] = pthread_t();
 	return pthread_mutex_unlock(&g_host_mx[m]);
 }
+int sysMutexTryLock(sys_mutex_t m)
+{
+	if (m < 1 || m >= (sys_mutex_t)g_host_mx_n) return -1;
+	if (pthread_mutex_trylock(&g_host_mx[m])) return -1;
+	g_host_owner[m] = pthread_self();
+	g_host_depth[m]++;
+	return 0;
+}
 int host_mutex_held(sys_mutex_t m)   // by the calling thread
 {
 	return m >= 1 && m < (sys_mutex_t)g_host_mx_n && g_host_depth[m] > 0 && pthread_equal(g_host_owner[m], pthread_self());

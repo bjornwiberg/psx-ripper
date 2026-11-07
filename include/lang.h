@@ -475,6 +475,7 @@ enum StrId {
 	STR_CAN_SETTINGS_BUSY,
 	STR_CAN_NO_EXIT,
 	STR_GC_NOTHING,
+	STR_GM_DOT,   // a rename to a name starting with a dot (hidden)
 	STR_COUNT
 };
 

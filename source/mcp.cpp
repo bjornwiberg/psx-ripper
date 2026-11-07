@@ -295,10 +295,11 @@ static void w_base64(W *w, const unsigned char *d, int n)
 
 // ---- the tool table ----
 
-enum ArgType { A_DRIVE, A_SCREEN, A_BUTTON, A_KEY, A_VALUE, A_FROM, A_MAX, A_SOURCE, A_FILTER, A_OFFSET, A_LIMIT, A_ID, A_PATTERN, A_CONFIRM };
+enum ArgType { A_DRIVE, A_SCREEN, A_BUTTON, A_KEY, A_VALUE, A_FROM, A_MAX, A_SOURCE, A_FILTER, A_OFFSET, A_LIMIT, A_ID, A_PATTERN, A_CONFIRM,
+               A_SOURCE1 /* one source: not all */, A_EXPECT, A_QUERY };
 struct Arg { const char *name; ArgType type; bool required; const char *desc; };
 enum ToolKind { T_STATE, T_SHOT, T_DRIVES, T_LIST, T_SET, T_SCREEN, T_UI, T_LOG, T_GAMES, T_GAME, T_GACT };
-#define NARGS 4   // a tool's arguments at most
+#define NARGS 5   // a tool's arguments at most
 struct Tool { const char *name; ToolKind kind; bool reads; const char *desc; Arg args[NARGS]; };
 
 static const char *const k_screens[] = {"home", "settings", "drive_settings", "filename", "webhooks", "about", "audit_log", "remote_control", "games", NULL};
@@ -321,6 +322,7 @@ static const struct { const char *name; const char *const *values; const char *d
 #define DRIVE_ARG {"drive", A_DRIVE, true, DRIVE_DESC}
 #define ID_ARG {"id", A_ID, true, "The game's id, as list_games gives it"}
 #define SOURCE_DESC "The source: hdd, usbN (the USB drive's port) or all (default all)"
+#define CHECK_POLL "Answers at once with started: poll get_state for the progress (screen game_check; it reads nothing), and call list_games for the result when it has ended."
 static const Tool k_tools[] = {
 	{"get_state", T_STATE, true, "What the screen shows: the screen, the selected tab and row, an open dialog with its buttons, and every drive's state.", {}},
 	{"get_screenshot", T_SHOT, true, "A JPEG picture of the app's screen (system dialogs drawn by the console are not in it).", {}},
@@ -348,18 +350,20 @@ static const Tool k_tools[] = {
 	{"list_games", T_GAMES, true, "The game list: every game image in the PSXISO folder of the hard disk and the USB drives (not only the app's rips), "
 		"read on its own without touching the screen. Gives the summary line's counts, the sources, and the games in alphabetical order, each with its "
 		"id, name, disc ID, format, tracks, status, errors, Redump name, place, marks (duplicate, .sbi missing, in the trash) and the discs of a "
-		"multi-disc game; and a game-list check's progress or last result. Page with offset and limit. Use this instead of press_button on the games screen.", {
+		"multi-disc game; and a game-list check's last result (to follow a running check, poll get_state instead: list_games may read a USB drive again). "
+		"Page with offset and limit: next_offset is the next page's offset (null: no more); a page too large for one answer is cut there (cut: true). "
+		"Use this instead of press_button on the games screen.", {
 		{"source", A_SOURCE, false, SOURCE_DESC},
 		{"filter", A_FILTER, false, "The filter panel's criteria; all must match (each one left out: any)"},
+		{"query", A_QUERY, false, "Only games whose name has this text, in any case (A-Z; other letters as they are)"},
 		{"offset", A_OFFSET, false, "The first game to give (0 = the first; default 0)"},
 		{"limit", A_LIMIT, false, "How many games, at most 200 (default 50)"}}},
 	{"get_game", T_GAME, true, "One game as its detail view shows it, per disc: status, format, disc ID, Redump name, when and on which drive it was ripped, "
 		"size, place, cover, last check, LibCrypt, duplicate, tracks with their MD5, sectors with errors and its files. Read on its own without touching the screen.", {ID_ARG}},
 	{"check_game", T_GACT, false, "Checks the game's discs against Redump from their files, as square in the game list does (Redump must be on; not a 2048 image, "
-		"a broken set or a game a drive works on). Answers at once with started: get_state shows the progress (screen game_check), list_games the progress "
-		"and then the result. Logged in the audit log. Use this instead of press_button.", {ID_ARG}},
+		"a broken set or a game a drive works on). " CHECK_POLL " Logged in the audit log. Use this instead of press_button.", {ID_ARG}},
 	{"check_games", T_GACT, false, "Checks every game of a source and filter that has no Redump result yet and can be checked, as START in the game list does. "
-		"Answers at once with started: get_state and list_games show the progress and the result. Use this instead of press_button.", {
+		CHECK_POLL " Use this instead of press_button.", {
 		{"source", A_SOURCE, false, SOURCE_DESC},
 		{"filter", A_FILTER, false, "The filter panel's criteria; all must match (each one left out: any)"}}},
 	{"cancel_check", T_GACT, false, "Stops the game list's running check, as circle on its progress screen does: the game being checked and those not "
@@ -372,10 +376,13 @@ static const Tool k_tools[] = {
 	{"trash_game", T_GACT, false, "Moves the game, every file of it, to the trash of its source (PSXISO/.trash), as triangle in the game list does. Logged in "
 		"the audit log and undoable there. Use this instead of press_button.", {ID_ARG}},
 	{"restore_game", T_GACT, false, "Moves a game in the trash back to its folder, as triangle in the trash does. Use this instead of press_button.", {ID_ARG}},
-	{"empty_trash", T_GACT, false, "Deletes every game in the trash of a source (all: of every source), as START and yes in the trash do. This is final: "
-		"the files cannot be restored, not even from the audit log. Refused unless confirm is true. Use this instead of press_button.", {
-		{"source", A_SOURCE, false, SOURCE_DESC},
-		{"confirm", A_CONFIRM, false, "Must be true: emptying the trash is final"}}},
+	{"empty_trash", T_GACT, false, "Deletes every game in the trash of one source (never all at once), as START and yes in the trash do. This is final: "
+		"the files cannot be restored, not even from the audit log. Refused unless confirm is true. List that trash first (list_games with the source "
+		"and filter show: trash) and pass what you saw as expect: when the trash holds anything else by then, nothing is deleted. "
+		"Use this instead of press_button.", {
+		{"source", A_SOURCE1, true, "The source whose trash is emptied: hdd or usbN (the USB drive's port)"},
+		{"confirm", A_CONFIRM, false, "Must be true: emptying the trash is final"},
+		{"expect", A_EXPECT, false, "What list_games showed in that trash: the number of its games, or their ids (any order)"}}},
 };
 static const int k_ntools = sizeof(k_tools) / sizeof(k_tools[0]);
 
@@ -409,6 +416,9 @@ static void w_tools_list(W *w)
 			case A_FROM: w_str(w, "\"type\":\"integer\",\"minimum\":0"); break;
 			case A_MAX: w_fmt(w, "\"type\":\"integer\",\"minimum\":1,\"maximum\":%d", MCP_MAX_LOG_LINES); break;
 			case A_SOURCE: w_str(w, "\"type\":\"string\",\"pattern\":\"^(all|hdd|usb[0-7])$\""); break;
+			case A_SOURCE1: w_str(w, "\"type\":\"string\",\"pattern\":\"^(hdd|usb[0-7])$\""); break;
+			case A_EXPECT: w_str(w, "\"type\":[\"integer\",\"array\"],\"minimum\":0,\"items\":{\"type\":\"string\",\"minLength\":1}"); break;
+			case A_QUERY: w_fmt(w, "\"type\":\"string\",\"maxLength\":%d", MCP_MAX_QUERY); break;
 			case A_FILTER:   // (no additionalProperties of its own: the tool's arguments have the one)
 				w_str(w, "\"type\":\"object\",\"properties\":{");
 				for (size_t f = 0; f < sizeof(k_filter) / sizeof(k_filter[0]); f++) {
@@ -518,11 +528,44 @@ static int check_filter(const char *v, const char *e, McpGameQuery *q, Err *er)
 	return 0;
 }
 
+// empty_trash's expect (at its value): a count (an integer of 0 or more) or the games' ids (an array
+// of non-empty strings), into q; -1 with the error.
+static int check_expect(const char *v, const char *e, McpGameQuery *q, Err *er)
+{
+	if (*v == '[') {
+		q->expect = 0;
+		q->expect_ids = 1;
+		q->expect_hash = 0;
+		for (const char *p = j_ws(v + 1, e); p < e && *p != ']'; ) {
+			char id[MAX_VALUE];
+			int len = *p == '"' ? j_decode(p, e, id, sizeof(id)) : -1;
+			if (len <= 0 || (int)strlen(id) != len) return set_err(er, -32602, "expect", "the ids must be non-empty strings (as list_games gives them)");
+			q->expect++;
+			q->expect_hash += mcp_id_hash(id);
+			p = j_ws(j_skip(p, e), e);
+			if (p < e && *p == ',') p = j_ws(p + 1, e);
+		}
+		return 0;
+	}
+	const char *end = j_skip(v, e);
+	int n = 0;
+	bool ok = *v >= '0' && *v <= '9' && end - v <= 9;
+	for (const char *p = v; ok && p < end; p++) {
+		if (*p < '0' || *p > '9') ok = false;
+		else n = n * 10 + (*p - '0');
+	}
+	if (!ok) return set_err(er, -32602, "expect", "must be the number of games (0 or more) or their ids");
+	q->expect = n;
+	q->expect_ids = 0;
+	return 0;
+}
+
 static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Err *er)
 {
 	memset(a->given, 0, sizeof(a->given));
 	memset(&a->q, 0, sizeof(a->q));
 	a->q.limit = MCP_DEFAULT_GAMES;
+	a->q.expect = -1;
 	if (obj) {
 		// every key must be one of the tool's, once
 		JIt it = j_members(obj, e);
@@ -568,6 +611,10 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			if (check_filter(v, e, &a->q, er)) return -1;
 			continue;
 		}
+		if (g.type == A_EXPECT) {
+			if (check_expect(v, e, &a->q, er)) return -1;
+			continue;
+		}
 		if (g.type == A_CONFIRM) {
 			if (*v != 't' && *v != 'f') return set_err(er, -32602, g.name, "must be true or false");
 			a->num[i] = *v == 't';
@@ -587,7 +634,7 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			continue;
 		}
 		if (*v != '"') return set_err(er, -32602, g.name, "must be a string");
-		int len = j_decode(v, e, a->str[i], g.type == A_VALUE || g.type == A_ID || g.type == A_PATTERN ? MAX_VALUE : MAX_KEY);
+		int len = j_decode(v, e, a->str[i], g.type == A_VALUE || g.type == A_ID || g.type == A_PATTERN || g.type == A_QUERY ? MAX_VALUE : MAX_KEY);
 		if (len < 0) return set_err(er, -32602, g.name, "too long");
 		if ((int)strlen(a->str[i]) != len || strpbrk(a->str[i], "\r\n"))
 			return set_err(er, -32602, g.name, "must not contain line breaks or NUL");
@@ -607,6 +654,13 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 		case A_SOURCE:
 			if (!valid_source(a->str[i])) return set_err(er, -32602, g.name, "must be all, hdd or usbN (N the USB drive's port, 0 to 7)");
 			snprintf(a->q.source, sizeof(a->q.source), "%s", a->str[i]);
+			break;
+		case A_SOURCE1:   // (a trash is emptied one source at a time: the one the agent listed)
+			if (strcmp(a->str[i], "all") && valid_source(a->str[i])) { snprintf(a->q.source, sizeof(a->q.source), "%s", a->str[i]); break; }
+			return set_err(er, -32602, g.name, "must be one source, hdd or usbN (N the USB drive's port, 0 to 7): a trash is emptied one source at a time");
+		case A_QUERY:
+			if (len > MCP_MAX_QUERY) return set_err(er, -32602, g.name, "too long (at most %d bytes)", MCP_MAX_QUERY);
+			snprintf(a->q.query, sizeof(a->q.query), "%s", a->str[i]);
 			break;
 		default: break;
 		}

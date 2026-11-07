@@ -479,6 +479,7 @@ static const char *en[STR_COUNT] = {
 	"A job runs on this drive: its settings can be opened when it has ended.",
 	"Circle on the home screen exits the app; MCP does not exit it. Use the controller.",
 	"Nothing to check: every game here has a Redump result or cannot be checked",
+	"The new name starts with a dot, which hides the game: choose another pattern",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -954,6 +955,7 @@ static const char *sv[STR_COUNT] = {
 	"Ett jobb pågår på läsaren: dess inställningar kan öppnas när det är klart.",
 	"Cirkel på startskärmen avslutar appen; MCP avslutar den inte. Använd handkontrollen.",
 	"Inget att kontrollera: varje spel här har ett Redump-resultat eller kan inte kontrolleras",
+	"Det nya namnet börjar med en punkt, vilket döljer spelet: välj ett annat mönster",
 };
 
 static const char **table = en;

@@ -296,7 +296,7 @@ static void tool_errors(int &bad)
 			: !strcmp(k_tools[i], "press_button") ? "{\"button\":\"cross\"}"
 			: !strcmp(k_tools[i], "get_game") || !strcmp(k_tools[i], "check_game") || !strcmp(k_tools[i], "trash_game") || !strcmp(k_tools[i], "restore_game") ? "{\"id\":\"hdd:/a\"}"
 			: !strcmp(k_tools[i], "rename_game") ? "{\"id\":\"hdd:/a\",\"pattern\":\"%T\"}"
-			: !strcmp(k_tools[i], "empty_trash") ? "{\"confirm\":true}"
+			: !strcmp(k_tools[i], "empty_trash") ? "{\"source\":\"hdd\",\"confirm\":true}"
 			: (!strncmp(k_tools[i], "get_", 4) || !strcmp(k_tools[i], "list_settings") || !strcmp(k_tools[i], "read_log") || !strcmp(k_tools[i], "list_games") ||
 			   !strcmp(k_tools[i], "check_games") || !strcmp(k_tools[i], "cancel_check")) ? "{}"
 			: "{\"drive\":\"usb0\"}";
@@ -535,12 +535,34 @@ static std::string q_text(const McpGameQuery *q)
 	snprintf(b, sizeof(b), "%s|%d,%d,%d,%d,%d|%d|%d", q->source, q->fmt, q->redump, q->errors, q->other, q->trash, q->offset, q->limit);
 	return b;
 }
-static int h_games(const McpGameQuery *q, char *out, int n) { g_call = "games|" + q_text(q); return answer(out, n); }
+static McpGameQuery g_q;   // the last query a game hook got
+static int h_games(const McpGameQuery *q, char *out, int n) { g_q = *q; g_call = "games|" + q_text(q); return answer(out, n); }
 static int h_game(const char *id, char *out, int n) { g_call = std::string("game|") + id; return answer(out, n); }
 static int h_gact(const char *tool, const char *id, const char *pat, const McpGameQuery *q, char *out, int n)
 {
+	g_q = *q;
 	g_call = std::string(tool) + "|" + (id ? id : "(null)") + "|" + (pat ? pat : "(null)") + "|" + q_text(q);
 	return answer(out, n);
+}
+// tools/list: the tool's description has text
+static bool has_desc(const char *name, const char *text)
+{
+	call("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}");
+	char want[64];
+	snprintf(want, sizeof(want), "{\"name\":\"%s\",\"description\":\"", name);
+	const char *d = strstr(g_out, want);
+	const char *end = d ? strstr(d, "\",\"inputSchema\"") : NULL;
+	return d && end && std::string(d, end - d).find(text) != std::string::npos;
+}
+// tools/list: empty_trash takes one source, required (all is not one)
+static bool has_schema_source1()
+{
+	call("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}");
+	const char *d = strstr(g_out, "{\"name\":\"empty_trash\",");
+	const char *end = d ? strstr(d + 1, "{\"name\":") : NULL;
+	std::string t = d ? std::string(d, end ? end - d : strlen(d)) : "";
+	return t.find("\"source\":{\"type\":\"string\",\"pattern\":\"^(hdd|usb[0-7])$\"") != std::string::npos &&
+	       t.find("\"required\":[\"source\"]") != std::string::npos && t.find("\"expect\":{") != std::string::npos;
 }
 static void games(int &bad)
 {
@@ -589,8 +611,41 @@ static void games(int &bad)
 	CHECK(text_ok(tool("trash_game", "{\"id\":\"hdd:/a\"}"), esc)); CHECK(g_call == "trash_game|hdd:/a|(null)||0,0,0,0,0|0|50");
 	CHECK(text_ok(tool("restore_game", "{\"id\":\"hdd:/.trash/a\"}"), esc)); CHECK(g_call == "restore_game|hdd:/.trash/a|(null)||0,0,0,0,0|0|50");
 	CHECK(text_ok(tool("empty_trash", "{\"confirm\":true,\"source\":\"usb1\"}"), esc)); CHECK(g_call == "empty_trash|(null)|(null)|usb1|0,0,0,0,0|0|50");
+	CHECK(g_q.expect == -1);
+	// empty_trash: one source (required, never all); expect = the games the agent saw in that trash,
+	// a number or their ids (hashed: any order)
+	CHECK(has_schema_source1());
+	CHECK(text_ok(tool("empty_trash", "{\"confirm\":true,\"source\":\"hdd\",\"expect\":3}"), esc));
+	CHECK(g_call == "empty_trash|(null)|(null)|hdd|0,0,0,0,0|0|50" && g_q.expect == 3 && !g_q.expect_ids);
+	CHECK(text_ok(tool("empty_trash", "{\"confirm\":true,\"source\":\"hdd\",\"expect\":0}"), esc));
+	CHECK(g_q.expect == 0 && !g_q.expect_ids);
+	CHECK(text_ok(tool("empty_trash", "{\"confirm\":true,\"source\":\"usb2\",\"expect\":[\"usb2:/a\",\"usb2:/\\u00e9\"]}"), esc));
+	CHECK(g_q.expect == 2 && g_q.expect_ids && g_q.expect_hash == mcp_id_hash("usb2:/a") + mcp_id_hash("usb2:/\xc3\xa9"));
+	CHECK(text_ok(tool("empty_trash", "{\"confirm\":true,\"source\":\"usb2\",\"expect\":[\"usb2:/\\u00e9\",\"usb2:/a\"]}"), esc));
+	CHECK(g_q.expect == 2 && g_q.expect_hash == mcp_id_hash("usb2:/a") + mcp_id_hash("usb2:/\xc3\xa9"));
+	CHECK(text_ok(tool("empty_trash", "{\"confirm\":true,\"source\":\"usb2\",\"expect\":[]}"), esc));
+	CHECK(g_q.expect == 0 && g_q.expect_ids && g_q.expect_hash == 0);
+	CHECK(param_err(tool("empty_trash", "{\"confirm\":true}"), "source"));
+	CHECK(param_err(tool("empty_trash", "{\"confirm\":true,\"source\":\"all\"}"), "source"));
+	CHECK(param_err(tool("empty_trash", "{\"confirm\":true,\"source\":\"hdd\",\"expect\":-1}"), "expect"));
+	CHECK(param_err(tool("empty_trash", "{\"confirm\":true,\"source\":\"hdd\",\"expect\":\"3\"}"), "expect"));
+	CHECK(param_err(tool("empty_trash", "{\"confirm\":true,\"source\":\"hdd\",\"expect\":1.5}"), "expect"));
+	CHECK(param_err(tool("empty_trash", "{\"confirm\":true,\"source\":\"hdd\",\"expect\":[1]}"), "expect"));
+	CHECK(param_err(tool("empty_trash", "{\"confirm\":true,\"source\":\"hdd\",\"expect\":[\"\"]}"), "expect"));
+	CHECK(param_err(tool("empty_trash", "{\"confirm\":true,\"source\":\"hdd\",\"expect\":[\"a\\u0000b\"]}"), "expect"));
+	CHECK(param_err(tool("empty_trash", "{\"confirm\":true,\"source\":\"hdd\",\"expect\":{\"n\":1}}"), "expect"));
+	CHECK(param_err(tool("check_games", "{\"expect\":1}"), "expect"));
+	// list_games' query: a part of the name
+	CHECK(text_ok(tool("list_games", "{\"query\":\"Croc\"}"), esc));
+	CHECK(!strcmp(g_q.query, "Croc"));
+	CHECK(text_ok(tool("list_games", NULL), esc));
+	CHECK(g_q.query[0] == 0);
+	CHECK(param_err(tool("list_games", "{\"query\":5}"), "query"));
+	CHECK(param_err(tool("list_games", (std::string("{\"query\":\"") + std::string(96, 'x') + "\"}").c_str()), "query"));
+	// progress is polled with get_state; list_games gives the result
+	CHECK(has_desc("check_game", "poll get_state") && has_desc("check_games", "poll get_state"));
 	// empty_trash without confirm: true is refused and the hook is not called (it is final)
-	for (const char *args : {"{}", "{\"confirm\":false}", "{\"source\":\"hdd\"}"}) {
+	for (const char *args : {"{\"source\":\"hdd\"}", "{\"source\":\"hdd\",\"confirm\":false}"}) {
 		g_call = "";
 		CHECK(tool("empty_trash", args) == 200);
 		CHECK(has("\"isError\":true") && has("confirm: true") && has("cannot be restored") && g_call.empty() && valid_json(g_out));
@@ -614,7 +669,7 @@ static void games(int &bad)
 	CHECK(param_err(tool("get_game", "{\"id\":5}"), "id"));
 	CHECK(param_err(tool("trash_game", "{\"id\":\"a\\nb\"}"), "id"));
 	CHECK(param_err(tool("rename_game", "{\"id\":\"hdd:/a\"}"), "pattern"));
-	CHECK(param_err(tool("empty_trash", "{\"confirm\":\"yes\"}"), "confirm"));
+	CHECK(param_err(tool("empty_trash", "{\"source\":\"hdd\",\"confirm\":\"yes\"}"), "confirm"));   // (the source is required: given)
 	CHECK(param_err(tool("cancel_check", "{\"id\":\"hdd:/a\"}"), "id"));
 	// a refusal is the app's text
 	g_ret = -1; g_answer = "The game list is checking this rip";

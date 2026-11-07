@@ -477,7 +477,13 @@ static void cfg_save() { cfg_save_src(g_input_src); }
 static void setting_applied(const char *key);   // below: what the screens do besides changing the value
 
 // The web server's paths after a switch changed (the server runs while any is on).
-static void remote_apply() { remote_set((g_remote ? REMOTE_VIEW : 0) | (g_mcp ? REMOTE_MCP : 0) | (g_status_json ? REMOTE_STATUS : 0)); }
+static void mg_free();
+// The web server's paths as the switches say; MCP off: its own scans of the game list are freed.
+static void remote_apply()
+{
+	remote_set((g_remote ? REMOTE_VIEW : 0) | (g_mcp ? REMOTE_MCP : 0) | (g_status_json ? REMOTE_STATUS : 0));
+	if (!g_mcp) mg_free();
+}
 
 // The audit's undo of a setting row: the value goes through the config parser like a line in the
 // file, and the save records the change as an undo.
@@ -3531,13 +3537,15 @@ struct UiReq {
 	int gact;      // RK_GAME: GA_*
 	char gid[240];     // RK_GAME: the game's id (one game's actions)
 	char gpat[96];     // RK_GAME rename: the pattern
-	char gsrc[8];      // RK_GAME check all, empty: the source ("" = all)
+	char gsrc[8];      // RK_GAME check all ("" = all), empty (always one source): the source
 	GameFilter gf;     // RK_GAME check all: the filter, and whether it asks for the trash
 	int gtrash;
+	int gexp, gexp_ids;      // RK_GAME empty: the games the agent expects in that trash (-1: not given),
+	uint64_t gexp_hash;      // and with gexp_ids the sum of their ids' mcp_id_hash
 	int seq;       // which request this is (MCP numbers them): the UI takes only the one it looked at
 	int rc;        // the UI's answer: 0 done, else refused with why
 	char why[400];
-	char res[2048];    // RK_GAME done: what was done (a JSON object), before the state
+	char *res;     // RK_GAME done: what was done (a JSON object; malloc'd by the UI, freed with the slot)
 };
 static UiReq g_req;
 static volatile int g_req_state = RQ_FREE;
@@ -3553,8 +3561,11 @@ static void ui_req_done(int rc, const char *why)
 	g_req.rc = rc;
 	snprintf(g_req.why, sizeof(g_req.why), "%s", why ? why : "");
 	__sync_synchronize();
-	if (!__sync_bool_compare_and_swap(&g_req_state, RQ_TAKEN, RQ_DONE))
-		__sync_bool_compare_and_swap(&g_req_state, RQ_GONE, RQ_FREE);   // MCP stopped waiting: the slot is free again
+	if (!__sync_bool_compare_and_swap(&g_req_state, RQ_TAKEN, RQ_DONE)) {   // MCP stopped waiting: the slot is free again
+		if (g_req_state == RQ_GONE) { free(g_req.res); g_req.res = NULL; }    // (nobody reads it now)
+		__sync_synchronize();
+		__sync_bool_compare_and_swap(&g_req_state, RQ_GONE, RQ_FREE);
+	}
 }
 // A frame was shown: the request taken before it is done (its state is what the frame shows).
 static void ui_req_frame()
@@ -5493,6 +5504,7 @@ static int gm_move(GamesView &v, int gi, int what, const char *pat, AuditSrc src
 			const GameDisc &d = g_gl.d[g.first + i];
 			const char *sl = strrchr(d.base, '/');
 			fn_game_name(pat, d, leaf[i], 200);
+			if (leaf[i][0] == '.') { gm_say(v, tr, why, wn, STR_GM_DOT); n = -1; break; }   // hidden: the list and webMAN skip such names
 			if (!sl || !strcmp(leaf[i], sl + 1)) continue;
 			same = 0;
 			// a set of that name there already (any of its files): refused, nothing mixed into it
@@ -6379,8 +6391,8 @@ static void gv_set_filter(GamesView &v, const GameFilter &f)
 	logf("game list filter: %d,%d,%d,%d", f.fmt, f.redump, f.errors, f.other);
 	gv_refilter(v);
 }
-// The source shown (SELECT, or MCP on its way to a game), remembered with source src. The caller
-// reads it (gv_switch).
+// The source shown by SELECT, remembered with source src. The caller reads it (gv_switch). (MCP on
+// its way to a game switches only the view: gv_mcp_wait.)
 static void gv_set_source(GamesView &v, const char *key, AuditSrc src)
 {
 	snprintf(v.key, sizeof(v.key), "%s", key);
@@ -8129,9 +8141,10 @@ static void js_drives(Js &j)
 	j.o = (int)strlen(j.p);
 	if (j.o >= j.n - 2) j.over = true;   // cut short
 }
-static int js_end(Js &j, char *out, int n)
+// hint: what to ask for instead when it is too large (NULL: none)
+static int js_end(Js &j, char *out, int n, const char *hint = NULL)
 {
-	if (j.over) { snprintf(out, n, "The answer is too large."); return -1; }
+	if (j.over) { snprintf(out, n, "The answer is too large%s%s.", hint ? ": " : "", hint ? hint : ""); return -1; }
 	utf8_fix(out);   // the drives' texts come from the discs
 	return 0;
 }
@@ -8228,11 +8241,13 @@ static int ui_call(const UiReq &r, uint64_t end, char *out, int n)
 	int rc;
 	if (g_req.rc) { snprintf(out, n, "%s", g_req.why[0] ? g_req.why : "Refused."); utf8_fix(out); rc = -1; }
 	else if (r.kind == RK_GAME) {   // what the game list did, then the state
-		int k = snprintf(out, n, "{\"result\":%s,\"state\":", g_req.res[0] ? g_req.res : "{}");
+		int k = snprintf(out, n, "{\"result\":%s,\"state\":", g_req.res && g_req.res[0] ? g_req.res : "{}");
 		rc = k > 0 && k < n - 256 ? mcp_state(out + k, n - k - 1) : -1;
 		if (rc) snprintf(out, n, "Done, but the answer is too large: get_state shows the screen.");
 		else { size_t l = strlen(out); out[l] = '}'; out[l + 1] = 0; }
 	} else rc = mcp_state(out, n);   // before the slot is free: no other request can change the screen first
+	free(g_req.res);
+	g_req.res = NULL;
 	__sync_synchronize();
 	g_req_state = RQ_FREE;
 	return rc;
@@ -8432,23 +8447,52 @@ static void mg_check(Js &j)
 		return;
 	}
 	js_put(j, "{\"running\":false,\"last\":");
-	if (!g_gc_last.set) js_put(j, "null}");
+	int set = g_gc_last.set;
+	__sync_synchronize();   // the counts after set (the job wrote them before it)
+	if (!set) js_put(j, "null}");
 	else js_put(j, "{\"discs\":%d,\"checked\":%d,\"failed\":%d,\"not_compared\":%d,\"cancelled\":%s,\"unreachable\":%s}}", g_gc_last.n, g_gc_last.checked,
 	            g_gc_last.failed, g_gc_last.nocmp, g_gc_last.cancelled ? "true" : "false", g_gc_last.unreach ? "true" : "false");
 }
 
-// MCP's own scan, kept while it is current, so pages of list_games and get_game read one scan.
-static GlResult *g_mg;                 // (under g_mg_mx)
-static uint32_t g_mg_changes;          // g_gl_changes when it was read
+// MCP's own scans, kept while they are current: list_games' (so pages of a list come from one scan)
+// and get_game's own (a source list_games has not read), so neither reads the other's again.
+// Freed when MCP is turned off and when the app exits (mg_free).
+static GlResult *g_mg;                 // list_games' scan (under g_mg_mx)
+static GlResult *g_mg_one;             // get_game's, when list_games' has not the game's source
+static uint32_t g_mg_changes, g_mg_one_changes;   // g_gl_changes when each was read
+static uint32_t g_mg_reads;            // scans read (the host tests count them)
+static volatile int g_mg_drop;         // free the scans when the call holding them ends (MCP was turned off meanwhile)
 #define MG_KEEP 60                     // seconds a scan of a USB folder counts as current (FAT32 and exFAT folders do not show changes in their date)
-struct MgLock { MgLock() { sysMutexLock(g_mg_mx, 0); } ~MgLock() { sysMutexUnlock(g_mg_mx); } };
-// The scan of key ("hdd", "all", "t:usb0", ...): the one in hand when no file changed since (the app's
-// changes: g_gl_changes; others: the hard disk's folder dates, a USB folder's age), else read again
-// now (names in English). NULL: no memory.
-static const GlResult *mg_scan(const char *key)
+static void mg_drop()   // (under g_mg_mx)
 {
-	GlResult *r = g_mg;
-	int fresh = r && r != &g_gl_oom && !strcmp(r->key, key) && !r->oom && !r->gone && g_mg_changes == g_gl_changes;
+	g_mg_drop = 0;
+	gl_free(g_mg);
+	gl_free(g_mg_one);
+	g_mg = g_mg_one = NULL;
+}
+struct MgLock {
+	MgLock() { sysMutexLock(g_mg_mx, 0); }
+	~MgLock()
+	{
+		if (g_mg_drop) mg_drop();
+		sysMutexUnlock(g_mg_mx);
+		// mg_free found the lock held after this call last looked: it is free now, so they go here
+		if (g_mg_drop && sysMutexTryLock(g_mg_mx) == 0) { mg_drop(); sysMutexUnlock(g_mg_mx); }
+	}
+};
+// MCP turned off, or the app exits: its scans go now, or when the call reading one ends (never
+// waits for that: the caller may be the UI thread).
+static void mg_free()
+{
+	g_mg_drop = 1;
+	__sync_synchronize();
+	if (sysMutexTryLock(g_mg_mx) == 0) { mg_drop(); sysMutexUnlock(g_mg_mx); }
+}
+// Scan r of key read when g_gl_changes was ch is still current: no file changed since (the app's
+// changes: g_gl_changes; others: the hard disk's folder dates, a USB folder's age).
+static int mg_fresh(const GlResult *r, uint32_t ch, const char *key)
+{
+	int fresh = r && r != &g_gl_oom && !strcmp(r->key, key) && !r->oom && !r->gone && ch == g_gl_changes;
 	int trash = !strncmp(key, "t:", 2);
 	const char *src = trash ? key + 2 : key;
 	for (int i = 0; fresh && i < r->nsrc; i++) {
@@ -8460,14 +8504,21 @@ static const GlResult *mg_scan(const char *key)
 		if (vf_mtime(dir, &m)) { if (time(NULL) - r->t0 > MG_KEEP) fresh = 0; }
 		else if (m >= r->t0) fresh = 0;
 	}
-	if (fresh) return r;
-	gl_free(g_mg);
-	g_mg = NULL;
+	return fresh;
+}
+// The scan of key ("hdd", "all", "t:usb0", ...) in slot *slot: the one in hand when it is current,
+// else read again now (names in English). NULL: no memory.
+static const GlResult *mg_scan(GlResult **slot, uint32_t *changes, const char *key)
+{
+	if (mg_fresh(*slot, *changes, key)) return *slot;
+	gl_free(*slot);
+	*slot = NULL;
 	uint32_t ch = g_gl_changes;
 	LibIo io = gl_libio();
-	g_mg = gl_build(key, &io, T_en);
-	g_mg_changes = ch;
-	return g_mg;
+	*slot = gl_build(key, &io, T_en);
+	*changes = ch;
+	g_mg_reads++;
+	return *slot;
 }
 // Why a scan has no list: no memory, or its source is not connected. 0 when it has one.
 static int mg_unlisted(const GlResult *r, const char *src, char *out, int n)
@@ -8486,7 +8537,15 @@ static const char *const MG_F_REDUMP[] = {"any", "verified", "unchecked", "no_ma
 static const char *const MG_F_ERRORS[] = {"any", "with", "without"};
 static const char *const MG_F_OTHER[] = {"any", "broken", "duplicates", "sbi_missing"};
 
-// list_games: the scan of a source (or its trash), the rows the filter shows, one page of them.
+#define MG_TAIL 512   // list_games: room kept after the rows for the rest of the answer
+// name has part in it, ASCII letters in any case (other bytes as they are).
+static int name_has(const char *name, const char *part)
+{
+	size_t k = strlen(part);
+	for (const char *p = name; *p; p++) if (!strncasecmp(p, part, k)) return 1;
+	return !k;
+}
+// list_games: the scan of a source (or its trash), the rows the filter and query show, one page of them.
 static int mcp_list_games(const McpGameQuery *q, char *out, int n)
 {
 	const char *src = q->source[0] ? q->source : "all";
@@ -8495,11 +8554,16 @@ static int mcp_list_games(const McpGameQuery *q, char *out, int n)
 	GameFilter f = {q->fmt, q->redump, q->errors, q->other};
 	if (f.fmt < 0 || f.fmt > 2 || f.redump < 0 || f.redump > 4 || f.errors < 0 || f.errors > 2 || f.other < 0 || f.other > 3) { snprintf(out, n, "Not a filter."); return -1; }
 	MgLock lock;
-	const GlResult *r = mg_scan(key);
+	const GlResult *r = mg_scan(&g_mg, &g_mg_changes, key);
 	if (mg_unlisted(r, src, out, n)) return -1;
 	int *rows = r->ng ? (int *)malloc((size_t)r->ng * sizeof(int)) : NULL;
 	if (r->ng && !rows) { snprintf(out, n, "Out of memory."); return -1; }
 	int nr = rows ? lib_filter(r->g, r->ng, r->d, &f, rows) : 0;
+	if (q->query[0]) {   // a part of the name, any case
+		int k = 0;
+		for (int i = 0; i < nr; i++) if (name_has(r->g[rows[i]].name, q->query)) rows[k++] = rows[i];
+		nr = k;
+	}
 	int off = q->offset > 0 ? q->offset : 0, lim = q->limit > 0 && q->limit <= MCP_MAX_GAMES ? q->limit : MCP_DEFAULT_GAMES;
 	Js j = js_begin(out, n);
 	js_put(j, "{\"source\":\"%s\",\"trash\":%s,\"sources\":[", src, q->trash ? "true" : "false");
@@ -8519,18 +8583,25 @@ static int mcp_list_games(const McpGameQuery *q, char *out, int n)
 	js_put(j, ",\"games\":%d,\"verified\":%d,\"errors\":%d,\"rerip\":%d,\"broken\":%d}", r->ng, c[GS_VERIFIED], c[GS_ERRORS], c[GS_RERIP], c[GS_BROKEN]);
 	js_put(j, ",\"filter\":{\"format\":\"%s\",\"redump\":\"%s\",\"errors\":\"%s\",\"other\":\"%s\",\"show\":\"%s\"}", MG_F_FORMAT[f.fmt], MG_F_REDUMP[f.redump],
 	       MG_F_ERRORS[f.errors], MG_F_OTHER[f.other], q->trash ? "trash" : "games");
-	js_put(j, ",\"matching\":%d,\"offset\":%d,\"limit\":%d,\"next_offset\":", nr, off, lim);
-	if (off + lim < nr) js_put(j, "%d", off + lim); else js_put(j, "null");
-	js_put(j, ",\"more_than_limit\":%s,\"games\":[", r->more ? "true" : "false");
-	for (int i = off; i < nr && i < off + lim; i++) {
+	js_put(j, ",\"query\":");
+	js_str(j, q->query);
+	js_put(j, ",\"matching\":%d,\"offset\":%d,\"limit\":%d,\"more_than_limit\":%s,\"games\":[", nr, off, lim, r->more ? "true" : "false");
+	// the rows that fit: a row that would leave too little room for the rest is left out, and the
+	// page ends before it (next_offset; cut). Not even the first row: too large.
+	int i = off, cut = 0;
+	for (; i < nr && i < off + lim; i++) {
+		int at = j.o;
 		js_put(j, i > off ? "," : "");
 		mg_row(j, *r, r->g[rows[i]]);
+		if (i > off && (j.over || j.o > j.n - MG_TAIL)) { j.o = at; j.p[at] = 0; j.over = false; cut = 1; break; }
 	}
-	js_put(j, "],\"check\":");
+	js_put(j, "],\"next_offset\":");
+	if (i < nr) js_put(j, "%d", i); else js_put(j, "null");
+	js_put(j, ",\"cut\":%s,\"check\":", cut ? "true" : "false");
 	mg_check(j);
 	js_put(j, "}");
 	free(rows);
-	return js_end(j, out, n);
+	return js_end(j, out, n, "use a smaller limit");
 }
 
 // get_game: one game (any of its discs' ids) with the detail view of each disc.
@@ -8542,7 +8613,12 @@ static int mcp_get_game(const char *id, char *out, int n)
 	GdLine *lines = (GdLine *)malloc(GD_LINES * sizeof(GdLine));
 	if (!lines) { snprintf(out, n, "Out of memory."); return -1; }
 	MgLock lock;
-	const GlResult *r = mg_scan(key);
+	// list_games' scan when it has the game's source (or All) and is current; else get_game's own
+	char allkey[8];
+	snprintf(allkey, sizeof(allkey), "%sall", key[0] == 't' ? "t:" : "");
+	const GlResult *r = g_mg;
+	if (!(r && r != &g_gl_oom && (!strcmp(r->key, key) || !strcmp(r->key, allkey)) && mg_fresh(r, g_mg_changes, r->key)))
+		r = mg_scan(&g_mg_one, &g_mg_one_changes, key);
 	int rc = mg_unlisted(r, src, out, n), di = rc ? -1 : gl_find_id(*r, id), gi = di >= 0 ? gl_game_of(*r, di) : -1;
 	if (!rc && gi < 0) { snprintf(out, n, "No game with the id \"%.300s\" is there now: list_games gives the ids.", id); utf8_fix(out); rc = -1; }
 	if (!rc) {
@@ -8563,11 +8639,13 @@ static int mcp_game(const char *tool, const char *id, const char *pat, const Mcp
 		{"trash_game", GA_TRASH}, {"restore_game", GA_RESTORE}, {"empty_trash", GA_EMPTY}};
 	UiReq *r = (UiReq *)calloc(1, sizeof(UiReq));
 	if (!r) { snprintf(out, n, "Out of memory."); return -1; }
-	r->kind = RK_GAME; r->card = -1; r->gact = -1;
+	r->kind = RK_GAME; r->card = -1; r->gact = -1; r->gexp = -1;
 	for (size_t i = 0; i < sizeof(acts) / sizeof(acts[0]); i++) if (!strcmp(tool, acts[i].name)) r->gact = acts[i].ga;
 	int one = r->gact == GA_CHECK_ONE || r->gact == GA_RENAME || r->gact == GA_TRASH || r->gact == GA_RESTORE, rc = -1;
 	char key[8];
 	if (r->gact < 0) snprintf(out, n, "Unknown tool \"%.20s\".", tool);
+	else if (r->gact == GA_EMPTY && (!q || !q->source[0] || !strcmp(q->source, "all")))   // (mcp.cpp asks for one; never all at once)
+		snprintf(out, n, "empty_trash takes one source, hdd or usbN: a trash is emptied one source at a time, the one you listed.");
 	else if (r->gact == GA_CANCEL && !g_gc.running) snprintf(out, n, "No game list check runs: there is nothing to cancel.");
 	else if (one && (!id || strlen(id) >= sizeof(r->gid) || !gl_id_key(id, key, sizeof(key)))) {
 		snprintf(out, n, "No game has the id \"%.300s\": list_games gives the ids.", id ? id : "");
@@ -8583,6 +8661,7 @@ static int mcp_game(const char *tool, const char *id, const char *pat, const Mcp
 			snprintf(r->gsrc, sizeof(r->gsrc), "%s", q->source);
 			r->gf.fmt = q->fmt; r->gf.redump = q->redump; r->gf.errors = q->errors; r->gf.other = q->other;
 			r->gtrash = q->trash;
+			r->gexp = q->expect; r->gexp_ids = q->expect_ids; r->gexp_hash = q->expect_hash;
 		}
 		rc = ui_call_one(*r, out, n);
 	}
@@ -8606,8 +8685,11 @@ static int gv_req_scan(const GamesView &v, const UiReq &r, char *key, size_t kn,
 	*trash = gl_in_trash(strchr(r.gid, ':') + 1);
 	return 1;
 }
-// A game request waits while the list goes to the source and the games or trash it needs (as SELECT,
-// remembered, and the filter panel's Show) and while that is read. 1: it waits (not taken yet).
+// A game request waits while the list goes to the source and the games or trash it needs (as SELECT
+// and the filter panel's Show) and while that is read. Only the view switches: SELECT alone remembers
+// a source (games_source), so the list opens on the user's own next time. A source that is not
+// connected cannot be chosen (SELECT offers only the connected ones): refused at once. 1: it waits
+// (not taken yet), or it was refused.
 static int gv_mcp_wait(GamesView &v)
 {
 	UiReq r;
@@ -8616,7 +8698,22 @@ static int gv_mcp_wait(GamesView &v)
 	int trash = 0;
 	if (!gv_req_scan(v, r, key, sizeof(key), &trash)) return 0;
 	if (strcmp(key, v.key) || trash != v.trash) {
-		if (strcmp(key, v.key)) gv_set_source(v, key, AU_MCP);
+		if (strcmp(key, v.key)) {
+			v.nsrc = gl_sources(v.src, GL_SRCS);
+			int there = 0;
+			for (int i = 0; i < v.nsrc; i++) there |= !strcmp(v.src[i].key, key);
+			if (!there) {
+				if (ui_req_take(1 << RK_GAME, r.seq)) {
+					char name[64], why[200];
+					gl_key_name(key, v.src, v.nsrc, name, sizeof(name), T_en);
+					snprintf(why, sizeof(why), T_en(STR_GL_GONE), name);
+					snprintf(why + strlen(why), sizeof(why) - strlen(why), "; list_games gives the sources.");
+					ui_req_done(-1, why);
+				}
+				return 1;
+			}
+			snprintf(v.key, sizeof(v.key), "%s", key);
+		}
 		v.trash = trash;
 		gv_switch(v);
 		return 1;
@@ -8629,32 +8726,48 @@ static int gv_mcp_cancel()
 	UiReq r;
 	if (!ui_req_peek(r) || r.kind != RK_GAME || r.gact != GA_CANCEL || !ui_req_take(1 << RK_GAME, r.seq)) return 0;
 	gc_cancel(AU_MCP);
-	snprintf(g_req.res, sizeof(g_req.res), "{\"cancelled\":true}");
+	g_req.res = strdup("{\"cancelled\":true}");
 	g_req_flip = 1;
 	return 1;
 }
-// A move's result: what was done, the English note, and each disc's new id and name.
-static void gv_moved(char *res, size_t rn, const char *verb, const char *name, const char *note, char (*ids)[260], char (*leaves)[200], int nd)
+// A request's result (malloc'd: ui_call frees it with the slot), printf-style.
+static char *req_res(const char *fmt, ...)
 {
-	Js j = {res, (int)rn, 0, false};
-	js_put(j, "{\"%s\":", verb);
-	js_str(j, name);
-	js_put(j, ",\"note\":");
-	js_str(j, note);
-	js_put(j, ",\"discs\":[");
-	for (int i = 0; i < nd; i++) {
-		js_put(j, "%s{\"id\":", i ? "," : "");
-		js_str(j, ids[i]);
-		js_put(j, ",\"name\":");
-		js_str(j, leaves[i]);
-		js_put(j, "}");
+	char b[1024];
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(b, sizeof(b), fmt, ap);
+	va_end(ap);
+	return strdup(b);
+}
+// A move's result: what was done, the English note, and each disc's new id and name, every one of
+// them (the buffer grows until they fit). NULL: no memory.
+static char *gv_moved(const char *verb, const char *name, const char *note, char (*ids)[260], char (*leaves)[200], int nd)
+{
+	for (size_t rn = 1024 + (size_t)nd * 1024; ; rn *= 2) {
+		char *res = (char *)malloc(rn);
+		if (!res) return NULL;
+		Js j = {res, (int)rn, 0, false};
+		js_put(j, "{\"%s\":", verb);
+		js_str(j, name);
+		js_put(j, ",\"note\":");
+		js_str(j, note);
+		js_put(j, ",\"discs\":[");
+		for (int i = 0; i < nd; i++) {
+			js_put(j, "%s{\"id\":", i ? "," : "");
+			js_str(j, ids[i]);
+			js_put(j, ",\"name\":");
+			js_str(j, leaves[i]);
+			js_put(j, "}");
+		}
+		js_put(j, "]}");
+		if (!j.over) return res;
+		free(res);
 	}
-	js_put(j, "]}");
-	if (j.over) snprintf(res, rn, "{\"%s\":true}", verb);
 }
 // Carries out the game request taken (g_req_seen) with the pad's functions and their checks, source
-// mcp: the answer is res (done) or why (refused, in English).
-static int gv_mcp_do(GamesView &v, const UiReq &r, char *why, size_t wn, char *res, size_t rn)
+// mcp: the answer is *res (done; malloc'd) or why (refused, in English).
+static int gv_mcp_do(GamesView &v, const UiReq &r, char *why, size_t wn, char **res)
 {
 	if (r.gact == GA_CANCEL) { snprintf(why, wn, "No game list check runs: there is nothing to cancel."); return -1; }
 	if (!gv_listed(v)) {
@@ -8673,7 +8786,7 @@ static int gv_mcp_do(GamesView &v, const UiReq &r, char *why, size_t wn, char *r
 		int nr = rows ? lib_filter(g_gl.g, g_gl.ng, g_gl.d, &r.gf, rows) : 0;
 		int rc = gv_check_rows(v, rows, nr, 1, AU_MCP, T_en, why, wn);
 		free(rows);
-		if (!rc) snprintf(res, rn, "{\"started\":true,\"discs\":%d}", g_gc.n);
+		if (!rc) *res = req_res("{\"started\":true,\"discs\":%d}", g_gc.n);
 		return rc;
 	}
 	if (r.gact == GA_EMPTY) {   // START and yes in the trash: the call's confirm is the yes
@@ -8681,13 +8794,29 @@ static int gv_mcp_do(GamesView &v, const UiReq &r, char *why, size_t wn, char *r
 			snprintf(why, wn, "%s", g_gc.running ? T_en(STR_GC_CARD_BUSY) : "The trash is empty: there is nothing to delete.");
 			return -1;
 		}
-		char note[300] = "";
+		if (r.gexp >= 0) {   // what the agent saw in this trash (as the pad's question shows the count): anything else there now, nothing goes
+			char name[64], id[260];
+			gl_key_name(v.key, v.src, v.nsrc, name, sizeof(name), T_en);
+			uint64_t h = 0;
+			for (int g = 0; g < g_gl.ng; g++) { gl_disc_id(g_gl, g_gl.d[g_gl.g[g].first], id, sizeof(id)); h += mcp_id_hash(id); }
+			if (g_gl.ng != r.gexp || (r.gexp_ids && h != r.gexp_hash)) {
+				if (g_gl.ng != r.gexp)
+					snprintf(why, wn, "Not emptied: the trash of %s has %d game%s now, not the %d expected. Nothing was deleted: list_games (this source, filter show: trash) shows what is there.",
+					         name, g_gl.ng, g_gl.ng == 1 ? "" : "s", r.gexp);
+				else
+					snprintf(why, wn, "Not emptied: the games in the trash of %s are not the ones expected. Nothing was deleted: list_games (this source, filter show: trash) shows what is there.", name);
+				logf("game list empty %s refused (mcp): not the trash expected", v.key);
+				return -1;
+			}
+		}
+		char note[300] = "", b[1024];
 		int rc = gm_empty(v, AU_MCP, T_en, note, sizeof(note));
-		Js j = {res, (int)rn, 0, false};
+		Js j = {b, (int)sizeof(b), 0, false};
 		js_put(j, "{\"emptied\":%s,\"note\":", rc ? "false" : "true");
 		js_str(j, note);
 		js_put(j, "}");
 		if (rc) snprintf(why, wn, "%s", note);
+		else *res = strdup(j.over ? "{\"emptied\":true}" : b);
 		return rc;
 	}
 	// one game, by any of its discs' ids, in the scan the list shows
@@ -8699,16 +8828,17 @@ static int gv_mcp_do(GamesView &v, const UiReq &r, char *why, size_t wn, char *r
 		if (in) { snprintf(why, wn, "The game is in the trash: restore it to check it."); return -1; }
 		if (g_redump == RD_OFF) { snprintf(why, wn, "%s", T_en(STR_GC_REDUMP_OFF)); return -1; }
 		int rc = gv_check_rows(v, &gi, 1, 0, AU_MCP, T_en, why, wn);
-		if (!rc) snprintf(res, rn, "{\"started\":true,\"discs\":%d}", g_gc.n);
+		if (!rc) *res = req_res("{\"started\":true,\"discs\":%d}", g_gc.n);
 		return rc;
 	}
 	if (r.gact == GA_TRASH && in) { snprintf(why, wn, "The game is already in the trash."); return -1; }
 	if (r.gact == GA_RESTORE && !in) { snprintf(why, wn, "The game is not in the trash: there is nothing to restore."); return -1; }
 	if (r.gact == GA_RENAME && in) { snprintf(why, wn, "A game in the trash is not renamed: restore it first."); return -1; }
-	if (r.gact == GA_RENAME && g_gc.running) { snprintf(why, wn, "%s", T_en(STR_GC_CARD_BUSY)); return -1; }   // (the pad offers no rename then)
+	if (g_gc.running) { snprintf(why, wn, "%s", T_en(STR_GC_CARD_BUSY)); return -1; }   // (the pad offers no △ or rename then: gv_can_trash)
 	// each disc's new id (worked out before the move: the list is read again after it)
-	int nd = g.ndiscs < 8 ? g.ndiscs : 8, what = r.gact == GA_RENAME ? GM_RENAME : r.gact == GA_TRASH ? GM_TRASH : GM_RESTORE;
-	char ids[8][260], leaves[8][200], name[128];
+	int nd = g.ndiscs, what = r.gact == GA_RENAME ? GM_RENAME : r.gact == GA_TRASH ? GM_TRASH : GM_RESTORE;
+	char (*ids)[260] = (char (*)[260])malloc((size_t)nd * 260), (*leaves)[200] = (char (*)[200])malloc((size_t)nd * 200), name[128];
+	if (!ids || !leaves) { free(ids); free(leaves); snprintf(why, wn, "%s.", T_en(STR_GL_OOM)); return -1; }
 	const char *pat = r.gpat[0] ? r.gpat : FN_PRESETS[0];   // as the view: an empty pattern is the first ready-made one
 	snprintf(name, sizeof(name), "%s", g.name);
 	for (int i = 0; i < nd; i++) {
@@ -8726,16 +8856,20 @@ static int gv_mcp_do(GamesView &v, const UiReq &r, char *why, size_t wn, char *r
 	}
 	char note[300] = "";
 	int rc = gm_move(v, gi, what, pat, AU_MCP, T_en, note, sizeof(note));
-	if (rc) { snprintf(why, wn, "%s", note[0] ? note : "Not moved."); return -1; }
-	gv_moved(res, rn, what == GM_RENAME ? "renamed" : what == GM_TRASH ? "trashed" : "restored", name, note, ids, leaves, nd);
-	return 0;
+	if (rc) snprintf(why, wn, "%s", note[0] ? note : "Not moved.");
+	else {
+		const char *verb = what == GM_RENAME ? "renamed" : what == GM_TRASH ? "trashed" : "restored";
+		if (!(*res = gv_moved(verb, name, note, ids, leaves, nd))) *res = req_res("{\"%s\":true}", verb);
+	}
+	free(ids);
+	free(leaves);
+	return rc ? -1 : 0;
 }
 static void gv_mcp(GamesView &v)
 {
-	char why[400] = "";
-	g_req.res[0] = 0;
-	if (gv_mcp_do(v, g_req_seen, why, sizeof(why), g_req.res, sizeof(g_req.res))) ui_req_done(-1, why[0] ? why : "Refused.");
-	else g_req_flip = 1;   // done when the next frame shows it
+	char why[400] = "", *res = NULL;
+	if (gv_mcp_do(v, g_req_seen, why, sizeof(why), &res)) { free(res); ui_req_done(-1, why[0] ? why : "Refused."); }
+	else { g_req.res = res; g_req_flip = 1; }   // done when the next frame shows it
 }
 
 // ---- the settings table for list_settings and set_setting: its values are the option arrays the
@@ -10130,6 +10264,7 @@ static void gc_thread(void *arg)
 	     g_gc.abort ? " (cancelled)" : "", g_gc.unreach ? " (Redump could not be asked: stopped)" : "");
 	g_gc_last.n = g_gc.n; g_gc_last.checked = g_gc.checked; g_gc_last.failed = g_gc.failed; g_gc_last.nocmp = g_gc.nocmp;
 	g_gc_last.cancelled = g_gc.abort; g_gc_last.unreach = g_gc.unreach;
+	__sync_synchronize();   // the counts before set: MCP's thread reads set first
 	g_gc_last.set = 1;
 	gl_changed();
 	__sync_synchronize();
@@ -10728,6 +10863,7 @@ int main(int argc, char *argv[])
 		if (webman_get("/refresh.ps3")) tell(T(STR_REFRESH_MANUAL));
 	}
 	lv1_storage_unpatch();
+	mg_free();   // MCP's scans of the game list
 	logf("---- PSX Ripper exit ----");
 	return 0;
 }

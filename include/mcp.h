@@ -12,11 +12,27 @@
 #define MCP_MAX_GAMES 200              // list_games' limit may not be larger
 #define MCP_DEFAULT_GAMES 50
 
+#define MCP_MAX_QUERY 95                // list_games' query: at most this many bytes
+
+#include <stdint.h>
+
 // The game list's query (list_games, check_games, empty_trash): the source ("hdd", "usbN", "all";
 // "" = all) and the filter panel's criteria as the config's games_filter has them (0 = any:
 // fmt 1 2352, 2 2048; redump 1 verified, 2 not checked, 3 no match, 4 not verified; errors 1 with,
 // 2 without; other 1 broken, 2 duplicates, 3 .sbi missing), trash = the trash instead of the games.
-struct McpGameQuery { char source[8]; int fmt, redump, errors, other, trash; int offset, limit; };
+// query (list_games): a part of the game's name, any case ("" = any). expect (empty_trash): how
+// many games the agent saw in that trash (-1 = not given); with expect_ids, expect_hash is the sum
+// of mcp_id_hash() over their ids, so the set of ids is compared in any order.
+struct McpGameQuery { char source[8]; int fmt, redump, errors, other, trash; int offset, limit;
+                      char query[MCP_MAX_QUERY + 1]; int expect, expect_ids; uint64_t expect_hash; };
+
+// A game id's hash (64-bit FNV-1a) for empty_trash's expect.
+static inline uint64_t mcp_id_hash(const char *s)
+{
+	uint64_t h = 14695981039346656037ULL;
+	for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+	return h;
+}
 
 // Every hook returns 0 and writes a JSON value (NUL-terminated, at most n bytes with the NUL)
 // into out, or returns non-zero and writes a plain English message (why it was refused, "busy",
@@ -39,7 +55,8 @@ struct McpHooks {
 	// tool: check_game, check_games, cancel_check, rename_game, trash_game, restore_game, empty_trash,
 	// carried out by the game list screen as the pad would. id: the game (check_game, rename_game,
 	// trash_game, restore_game); pattern: rename_game's; q: check_games' and empty_trash's source and
-	// filter. empty_trash is called only when the agent confirmed it (confirm: true).
+	// filter, empty_trash's expect. empty_trash is called only when the agent confirmed it (confirm:
+	// true) and named one source (never all).
 	int (*game)(const char *tool, const char *id, const char *pattern, const McpGameQuery *q, char *out, int n);
 };
 
