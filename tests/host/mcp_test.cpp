@@ -370,6 +370,11 @@ static void protocol_errors(int &bad)
 	// an id too long to echo
 	std::string longid = "{\"jsonrpc\":\"2.0\",\"id\":\"" + std::string(300, 'a') + "\",\"method\":\"ping\"}";
 	error_shape(bad, call(longid.c_str()), 400, -32600, "null");
+	// "id": null is allowed by JSON-RPC (though discouraged): handled, and echoed as null
+	CHECK(call("{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}") == 200);
+	CHECK(has("\"id\":null,\"result\":{}"));
+	error_shape(bad, call("{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"resources/list\"}"), 200, -32601, "null");
+	error_shape(bad, call("{\"jsonrpc\":\"2.0\",\"id\":nul,\"method\":\"ping\"}"), 400, -32700, "null");
 }
 
 static void notifications(int &bad)

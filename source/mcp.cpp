@@ -810,8 +810,9 @@ int mcp_handle(const char *body, int len, char *out, int n)
 	if (!idv) return 202;
 	char id[MAX_ID + 1];
 	const char *idend = j_skip(idv, e);
-	if ((*idv != '"' && *idv != '-' && (*idv < '0' || *idv > '9')) || idend - idv > MAX_ID) {
-		set_err(&er, -32600, NULL, "Invalid request: the id must be a string or a number (at most %d characters)", MAX_ID);
+	// a string, a number, or null (JSON-RPC allows it, though it discourages it)
+	if ((*idv != '"' && *idv != '-' && *idv != 'n' && (*idv < '0' || *idv > '9')) || idend - idv > MAX_ID) {
+		set_err(&er, -32600, NULL, "Invalid request: the id must be a string, a number or null (at most %d characters)", MAX_ID);
 		return finish_error(out, n, NULL, &er, 400);
 	}
 	memcpy(id, idv, idend - idv);
