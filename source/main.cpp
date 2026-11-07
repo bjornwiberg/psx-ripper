@@ -7424,7 +7424,7 @@ static int can_rip(int c, Tr tr, char *why, size_t n)
 		snprintf(why, n, tr(STR_NO_SPACE), g_disc_mb, (unsigned)(g_disc_mb + 2 - g_space_short));
 		return CAN_TELL;
 	}
-	if (!g_parallel && any_ripping()) return can_say(CAN_TELL, tr, STR_REPAIR_WAIT, why, n);   // one at a time then
+	if (!g_parallel && any_ripping()) return can_say(CAN_TELL, tr, STR_RIP_ONE_AT_A_TIME, why, n);   // one at a time then
 	return CAN_OK;
 }
 static void do_rip(int c, AuditSrc src)
@@ -10337,7 +10337,7 @@ static void rip_job_start(int c, AuditSrc src, int fresh)
 {
 	Card &k = g_cards[c];
 	if (k.job) return;
-	if (!g_parallel && any_ripping()) { own_dialog(T(STR_REPAIR_WAIT), 0); return; }   // one at a time then
+	if (!g_parallel && any_ripping()) { own_dialog(T(STR_RIP_ONE_AT_A_TIME), 0); return; }   // one at a time then
 	if (card_gc_refused(k)) return;
 	job_reset(c);
 	k.job = 1;
