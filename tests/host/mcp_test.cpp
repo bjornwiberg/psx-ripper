@@ -122,7 +122,8 @@ static void ping(int &bad)
 }
 
 static const char *k_tools[] = {"get_state", "get_screenshot", "get_drives", "list_settings", "set_setting",
-	"go_screen", "go_tab", "press_button", "rip", "repair", "check", "cancel", "skip_rereads", "eject", "read_log"};
+	"go_screen", "go_tab", "press_button", "rip", "repair", "check", "cancel", "skip_rereads", "eject", "read_log",
+	"list_games", "get_game", "check_game", "check_games", "cancel_check", "rename_game", "trash_game", "restore_game", "empty_trash"};
 static const int k_ntools = sizeof(k_tools) / sizeof(k_tools[0]);
 
 static void tools_list(int &bad)
@@ -293,7 +294,11 @@ static void tool_errors(int &bad)
 		const char *args = !strcmp(k_tools[i], "set_setting") ? "{\"key\":\"a\",\"value\":\"b\"}"
 			: !strcmp(k_tools[i], "go_screen") ? "{\"screen\":\"home\"}"
 			: !strcmp(k_tools[i], "press_button") ? "{\"button\":\"cross\"}"
-			: (!strncmp(k_tools[i], "get_", 4) || !strcmp(k_tools[i], "list_settings") || !strcmp(k_tools[i], "read_log")) ? "{}"
+			: !strcmp(k_tools[i], "get_game") || !strcmp(k_tools[i], "check_game") || !strcmp(k_tools[i], "trash_game") || !strcmp(k_tools[i], "restore_game") ? "{\"id\":\"hdd:/a\"}"
+			: !strcmp(k_tools[i], "rename_game") ? "{\"id\":\"hdd:/a\",\"pattern\":\"%T\"}"
+			: !strcmp(k_tools[i], "empty_trash") ? "{\"confirm\":true}"
+			: (!strncmp(k_tools[i], "get_", 4) || !strcmp(k_tools[i], "list_settings") || !strcmp(k_tools[i], "read_log") || !strcmp(k_tools[i], "list_games") ||
+			   !strcmp(k_tools[i], "check_games") || !strcmp(k_tools[i], "cancel_check")) ? "{}"
 			: "{\"drive\":\"usb0\"}";
 		CHECK(tool(k_tools[i], args) == 200);
 		if (!has("\"isError\":true") || !has("not available")) { printf("  %s\n", k_tools[i]); CHECK(0); }
@@ -522,6 +527,103 @@ static void small_buffer(int &bad)
 	g_answer = "{\"ok\":true}";
 }
 
+// ---- the game list's tools: their arguments reach the hooks as the app needs them; empty_trash is
+// never called without confirm: true
+static std::string q_text(const McpGameQuery *q)
+{
+	char b[160];
+	snprintf(b, sizeof(b), "%s|%d,%d,%d,%d,%d|%d|%d", q->source, q->fmt, q->redump, q->errors, q->other, q->trash, q->offset, q->limit);
+	return b;
+}
+static int h_games(const McpGameQuery *q, char *out, int n) { g_call = "games|" + q_text(q); return answer(out, n); }
+static int h_game(const char *id, char *out, int n) { g_call = std::string("game|") + id; return answer(out, n); }
+static int h_gact(const char *tool, const char *id, const char *pat, const McpGameQuery *q, char *out, int n)
+{
+	g_call = std::string(tool) + "|" + (id ? id : "(null)") + "|" + (pat ? pat : "(null)") + "|" + q_text(q);
+	return answer(out, n);
+}
+static void games(int &bad)
+{
+	McpHooks hk = g_hooks;
+	hk.list_games = h_games; hk.get_game = h_game; hk.game = h_gact;
+	mcp_init(&hk, "1.2.3-test");
+	g_ret = 0; g_answer = "{\"ok\":true}";
+	const char *esc = "{\\\"ok\\\":true}";
+	// the schema: the source, the filter panel's criteria, the page
+	CHECK(call("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}") == 200);
+	CHECK(valid_json(g_out));
+	CHECK(has("\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200"));
+	CHECK(has("\"source\":{\"type\":\"string\",\"pattern\":\"^(all|hdd|usb[0-7])$\""));
+	CHECK(has("\"redump\":{\"type\":\"string\",\"enum\":[\"any\",\"verified\",\"unchecked\",\"no_match\",\"not_verified\"]"));
+	CHECK(has("\"show\":{\"type\":\"string\",\"enum\":[\"games\",\"trash\"]"));
+	CHECK(has("\"confirm\":{\"type\":\"boolean\""));
+	for (const char *a : {"check_game", "check_games", "cancel_check", "rename_game", "trash_game", "restore_game", "empty_trash"}) {
+		char want[64];
+		snprintf(want, sizeof(want), "{\"name\":\"%s\",\"description\":\"", a);
+		const char *d = strstr(g_out, want);
+		const char *end = d ? strstr(d + strlen(want), "\",\"inputSchema\"") : NULL;
+		bool steer = d && end && std::string(d, end - d).find("instead of press_button") != std::string::npos;
+		if (!steer) printf("  %s does not steer away from press_button\n", a);
+		CHECK(steer);
+	}
+	{
+		const char *d = strstr(g_out, "{\"name\":\"empty_trash\",\"description\":\"");
+		const char *end = d ? strstr(d, "\",\"inputSchema\"") : NULL;
+		CHECK(d && end && std::string(d, end - d).find("This is final") != std::string::npos);
+	}
+	CHECK(has("{\"name\":\"list_games\",") && has("{\"name\":\"get_game\","));
+	CHECK(has("and the game list's tools (check_game"));   // press_button: the game tools do their work directly
+	CHECK(call("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}") == 200);
+	CHECK(has("list_games and get_game read the game list"));
+	// routing: what each tool hands its hook
+	CHECK(text_ok(tool("list_games", NULL), esc)); CHECK(g_call == "games||0,0,0,0,0|0|50");
+	CHECK(text_ok(tool("list_games", "{\"source\":\"usb3\",\"filter\":{\"format\":\"2048\",\"redump\":\"not_verified\",\"errors\":\"with\",\"other\":\"sbi_missing\",\"show\":\"trash\"},\"offset\":10,\"limit\":200}"), esc));
+	CHECK(g_call == "games|usb3|2,4,1,3,1|10|200");
+	CHECK(text_ok(tool("list_games", "{\"filter\":{\"redump\":\"unchecked\"},\"source\":\"all\"}"), esc)); CHECK(g_call == "games|all|0,2,0,0,0|0|50");
+	CHECK(text_ok(tool("get_game", "{\"id\":\"hdd:/dev_hdd0/PSXISO/\\u00c9chapp\\u00e9e\"}"), esc)); CHECK(g_call == "game|hdd:/dev_hdd0/PSXISO/\xc3\x89" "chapp\xc3\xa9" "e");
+	CHECK(text_ok(tool("check_game", "{\"id\":\"hdd:/a\"}"), esc)); CHECK(g_call == "check_game|hdd:/a|(null)||0,0,0,0,0|0|50");
+	CHECK(text_ok(tool("check_games", "{\"source\":\"hdd\",\"filter\":{\"format\":\"2352\"}}"), esc)); CHECK(g_call == "check_games|(null)|(null)|hdd|1,0,0,0,0|0|50");
+	CHECK(text_ok(tool("cancel_check", NULL), esc)); CHECK(g_call == "cancel_check|(null)|(null)||0,0,0,0,0|0|50");
+	CHECK(text_ok(tool("rename_game", "{\"id\":\"usb0:/b\",\"pattern\":\"%N [%D]\"}"), esc)); CHECK(g_call == "rename_game|usb0:/b|%N [%D]||0,0,0,0,0|0|50");
+	CHECK(text_ok(tool("rename_game", "{\"id\":\"usb0:/b\",\"pattern\":\"\"}"), esc)); CHECK(g_call == "rename_game|usb0:/b|||0,0,0,0,0|0|50");
+	CHECK(text_ok(tool("trash_game", "{\"id\":\"hdd:/a\"}"), esc)); CHECK(g_call == "trash_game|hdd:/a|(null)||0,0,0,0,0|0|50");
+	CHECK(text_ok(tool("restore_game", "{\"id\":\"hdd:/.trash/a\"}"), esc)); CHECK(g_call == "restore_game|hdd:/.trash/a|(null)||0,0,0,0,0|0|50");
+	CHECK(text_ok(tool("empty_trash", "{\"confirm\":true,\"source\":\"usb1\"}"), esc)); CHECK(g_call == "empty_trash|(null)|(null)|usb1|0,0,0,0,0|0|50");
+	// empty_trash without confirm: true is refused and the hook is not called (it is final)
+	for (const char *args : {"{}", "{\"confirm\":false}", "{\"source\":\"hdd\"}"}) {
+		g_call = "";
+		CHECK(tool("empty_trash", args) == 200);
+		CHECK(has("\"isError\":true") && has("confirm: true") && has("cannot be restored") && g_call.empty() && valid_json(g_out));
+	}
+	// bad arguments: a protocol error naming the field, no hook called
+	CHECK(param_err(tool("list_games", "{\"limit\":201}"), "limit"));
+	CHECK(param_err(tool("list_games", "{\"limit\":0}"), "limit"));
+	CHECK(param_err(tool("list_games", "{\"offset\":-1}"), "offset"));
+	CHECK(param_err(tool("list_games", "{\"offset\":\"5\"}"), "offset"));
+	CHECK(param_err(tool("list_games", "{\"source\":\"usb8\"}"), "source"));
+	CHECK(param_err(tool("list_games", "{\"source\":\"dvd\"}"), "source"));
+	CHECK(param_err(tool("list_games", "{\"source\":\"usb0x\"}"), "source"));
+	CHECK(param_err(tool("list_games", "{\"filter\":\"2048\"}"), "filter"));
+	CHECK(param_err(tool("list_games", "{\"filter\":{\"status\":\"verified\"}}"), "filter"));
+	CHECK(param_err(tool("list_games", "{\"filter\":{\"format\":\"4096\"}}"), "filter"));
+	CHECK(param_err(tool("list_games", "{\"filter\":{\"format\":2048}}"), "filter"));
+	CHECK(param_err(tool("list_games", "{\"filter\":{\"format\":\"2048\",\"format\":\"2352\"}}"), "filter"));
+	CHECK(param_err(tool("list_games", "{\"page\":2}"), "page"));
+	CHECK(param_err(tool("get_game", "{}"), "id"));
+	CHECK(param_err(tool("get_game", "{\"id\":\"\"}"), "id"));
+	CHECK(param_err(tool("get_game", "{\"id\":5}"), "id"));
+	CHECK(param_err(tool("trash_game", "{\"id\":\"a\\nb\"}"), "id"));
+	CHECK(param_err(tool("rename_game", "{\"id\":\"hdd:/a\"}"), "pattern"));
+	CHECK(param_err(tool("empty_trash", "{\"confirm\":\"yes\"}"), "confirm"));
+	CHECK(param_err(tool("cancel_check", "{\"id\":\"hdd:/a\"}"), "id"));
+	// a refusal is the app's text
+	g_ret = -1; g_answer = "The game list is checking this rip";
+	CHECK(tool("trash_game", "{\"id\":\"hdd:/a\"}") == 200);
+	CHECK(has("\"text\":\"The game list is checking this rip\"}],\"isError\":true}"));
+	g_ret = 0; g_answer = "{\"ok\":true}";
+	mcp_init(&g_hooks, "1.2.3-test");
+}
+
 int main()
 {
 	setvbuf(stdout, NULL, _IOLBF, 0);
@@ -530,7 +632,7 @@ int main()
 		{"initialize", initialize}, {"ping", ping}, {"tools_list", tools_list}, {"routing", routing},
 		{"bad_arguments", bad_arguments}, {"tool_errors", tool_errors}, {"screenshot", screenshot},
 		{"protocol_errors", protocol_errors}, {"notifications", notifications}, {"too_large", too_large},
-		{"depth", depth}, {"fuzz", fuzz}, {"small_buffer", small_buffer},
+		{"depth", depth}, {"fuzz", fuzz}, {"small_buffer", small_buffer}, {"games", games},
 	};
 	for (auto &t : tests) {
 		int bad = 0;

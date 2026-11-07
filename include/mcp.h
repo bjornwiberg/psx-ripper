@@ -9,6 +9,14 @@
 #define MCP_MAX_LOG_LINES 500          // read_log's max_lines may not be larger
 #define MCP_DEFAULT_LOG_LINES 100
 #define MCP_MAX_RESPONSE (512 * 1024)   // the response buffer: a screenshot (base64) is the largest answer
+#define MCP_MAX_GAMES 200              // list_games' limit may not be larger
+#define MCP_DEFAULT_GAMES 50
+
+// The game list's query (list_games, check_games, empty_trash): the source ("hdd", "usbN", "all";
+// "" = all) and the filter panel's criteria as the config's games_filter has them (0 = any:
+// fmt 1 2352, 2 2048; redump 1 verified, 2 not checked, 3 no match, 4 not verified; errors 1 with,
+// 2 without; other 1 broken, 2 duplicates, 3 .sbi missing), trash = the trash instead of the games.
+struct McpGameQuery { char source[8]; int fmt, redump, errors, other, trash; int offset, limit; };
 
 // Every hook returns 0 and writes a JSON value (NUL-terminated, at most n bytes with the NUL)
 // into out, or returns non-zero and writes a plain English message (why it was refused, "busy",
@@ -25,6 +33,14 @@ struct McpHooks {
 	int (*ui)(const char *tool, const char *arg, char *out, int n);
 	// from: first line (0 = the first line of the log), or -1 for the last max lines
 	int (*read_log)(int from, int max, char *out, int n);
+	// The game list. list_games and get_game only read (their own scan, never the screen's).
+	int (*list_games)(const McpGameQuery *q, char *out, int n);
+	int (*get_game)(const char *id, char *out, int n);
+	// tool: check_game, check_games, cancel_check, rename_game, trash_game, restore_game, empty_trash,
+	// carried out by the game list screen as the pad would. id: the game (check_game, rename_game,
+	// trash_game, restore_game); pattern: rename_game's; q: check_games' and empty_trash's source and
+	// filter. empty_trash is called only when the agent confirmed it (confirm: true).
+	int (*game)(const char *tool, const char *id, const char *pattern, const McpGameQuery *q, char *out, int n);
 };
 
 void mcp_init(const McpHooks *hooks, const char *version);

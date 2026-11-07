@@ -12,6 +12,9 @@ extern void (*host_frame)();
 extern int host_webman_calls, host_remote_flags;
 int host_mutex_held(unsigned m);
 extern void (*host_io)();
+// 1: the game list's check job (thread "psxgcheck") runs on a thread of its own, as on the console
+// (else it runs in place, before gc_start returns)
+extern int host_thread_gc;
 // The console's drives: paths /dev_... and exfatN:/... are looked up under host_root ("" = they do
 // not exist, as on an empty console); host_exfat[port] = an exFAT drive is on that port;
 // host_label[port] = its volume label (FAT32 or exFAT).

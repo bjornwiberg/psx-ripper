@@ -295,16 +295,32 @@ static void w_base64(W *w, const unsigned char *d, int n)
 
 // ---- the tool table ----
 
-enum ArgType { A_DRIVE, A_SCREEN, A_BUTTON, A_KEY, A_VALUE, A_FROM, A_MAX };
+enum ArgType { A_DRIVE, A_SCREEN, A_BUTTON, A_KEY, A_VALUE, A_FROM, A_MAX, A_SOURCE, A_FILTER, A_OFFSET, A_LIMIT, A_ID, A_PATTERN, A_CONFIRM };
 struct Arg { const char *name; ArgType type; bool required; const char *desc; };
-enum ToolKind { T_STATE, T_SHOT, T_DRIVES, T_LIST, T_SET, T_SCREEN, T_UI, T_LOG };
-struct Tool { const char *name; ToolKind kind; bool reads; const char *desc; Arg args[3]; };
+enum ToolKind { T_STATE, T_SHOT, T_DRIVES, T_LIST, T_SET, T_SCREEN, T_UI, T_LOG, T_GAMES, T_GAME, T_GACT };
+#define NARGS 4   // a tool's arguments at most
+struct Tool { const char *name; ToolKind kind; bool reads; const char *desc; Arg args[NARGS]; };
 
 static const char *const k_screens[] = {"home", "settings", "drive_settings", "filename", "webhooks", "about", "audit_log", "remote_control", "games", NULL};
 static const char *const k_buttons[] = {"cross", "circle", "triangle", "square", "up", "down", "left", "right", "start", "select", "l1", "r1", "l2", "r2", NULL};
+// The game list's filter, as its panel has it: each criterion's values in the panel's order (the
+// first is "any"; McpGameQuery has the index), and Show (games or the trash).
+static const char *const k_f_format[] = {"any", "2352", "2048", NULL};
+static const char *const k_f_redump[] = {"any", "verified", "unchecked", "no_match", "not_verified", NULL};
+static const char *const k_f_errors[] = {"any", "with", "without", NULL};
+static const char *const k_f_other[] = {"any", "broken", "duplicates", "sbi_missing", NULL};
+static const char *const k_f_show[] = {"games", "trash", NULL};
+static const struct { const char *name; const char *const *values; const char *desc; } k_filter[] = {
+	{"format", k_f_format, "2352 (raw) or 2048 (data only) images"},
+	{"redump", k_f_redump, "The Redump result: verified, not checked, does not match, or not verified (not checked or does not match)"},
+	{"errors", k_f_errors, "With or without sectors the rip log still lists as wrong"},
+	{"other", k_f_other, "Broken sets, duplicates, or LibCrypt games without their .sbi"},
+	{"show", k_f_show, "The games (default) or the trash"}};
 
 #define DRIVE_DESC "The drive: internal, or usbN by its port as the tabs show it"
 #define DRIVE_ARG {"drive", A_DRIVE, true, DRIVE_DESC}
+#define ID_ARG {"id", A_ID, true, "The game's id, as list_games gives it"}
+#define SOURCE_DESC "The source: hdd, usbN (the USB drive's port) or all (default all)"
 static const Tool k_tools[] = {
 	{"get_state", T_STATE, true, "What the screen shows: the screen, the selected tab and row, an open dialog with its buttons, and every drive's state.", {}},
 	{"get_screenshot", T_SHOT, true, "A JPEG picture of the app's screen (system dialogs drawn by the console are not in it).", {}},
@@ -314,11 +330,11 @@ static const Tool k_tools[] = {
 		{"key", A_KEY, true, "The setting's key, as list_settings gives it"},
 		{"value", A_VALUE, true, "The new value, one of the setting's allowed values (any text for free-text settings); numbers and true/false are taken as their text (true = 1)"},
 		{"drive", A_DRIVE, false, "The drive for a per-drive setting; leave out for the standard settings"}}},
-	{"go_screen", T_SCREEN, false, "Opens one of the app's screens, the way the pad goes there, and returns the screen state. To change a setting use set_setting; to rip, check and so on use the action tools.", {
+	{"go_screen", T_SCREEN, false, "Opens one of the app's screens, the way the pad goes there, and returns the screen state. To change a setting use set_setting; to rip, check and so on use the action tools; for the game list, list_games, get_game and the game tools (check_game, rename_game, trash_game, ...).", {
 		{"screen", A_SCREEN, true, "The screen to open"},
 		{"drive", A_DRIVE, false, "The drive, only with drive_settings (and required there)"}}},
 	{"go_tab", T_UI, false, "Shows a drive's tab on the home screen (going there first) and returns the screen state.", {DRIVE_ARG}},
-	{"press_button", T_UI, false, "Fallback: presses one pad button in the app, as the pad would, and returns the screen state. Use it only to answer a dialog (cross = yes/OK, circle = no) or to move around a screen; rip, check, repair, cancel, skip_rereads, eject and set_setting do their work directly. It never presses into the console's own on-screen keyboard, and circle on the home screen is refused (it would exit the app, and MCP with it).", {
+	{"press_button", T_UI, false, "Fallback: presses one pad button in the app, as the pad would, and returns the screen state. Use it only to answer a dialog (cross = yes/OK, circle = no) or to move around a screen; rip, check, repair, cancel, skip_rereads, eject, set_setting and the game list's tools (check_game, check_games, cancel_check, rename_game, trash_game, restore_game, empty_trash) do their work directly. It never presses into the console's own on-screen keyboard, and circle on the home screen is refused (it would exit the app, and MCP with it).", {
 		{"button", A_BUTTON, true, "The button"}}},
 	{"rip", T_UI, false, "Starts ripping the disc in the drive (same checks as the pad, on its tab); returns the screen state or why not. Like the pad's cross, it replaces an existing rip at the drive's destination without asking. Use this instead of press_button.", {DRIVE_ARG}},
 	{"repair", T_UI, false, "Re-reads the sectors the drive's rip lists as bad (same checks as the pad, on its tab); returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
@@ -329,6 +345,37 @@ static const Tool k_tools[] = {
 	{"read_log", T_LOG, true, "Lines of the app's log (psxrip.log) and the number of the next line.", {
 		{"from_line", A_FROM, false, "The first line (0 = the log's first); leave out for the last lines"},
 		{"max_lines", A_MAX, false, "How many lines, at most 500 (default 100)"}}},
+	{"list_games", T_GAMES, true, "The game list: every game image in the PSXISO folder of the hard disk and the USB drives (not only the app's rips), "
+		"read on its own without touching the screen. Gives the summary line's counts, the sources, and the games in alphabetical order, each with its "
+		"id, name, disc ID, format, tracks, status, errors, Redump name, place, marks (duplicate, .sbi missing, in the trash) and the discs of a "
+		"multi-disc game; and a game-list check's progress or last result. Page with offset and limit. Use this instead of press_button on the games screen.", {
+		{"source", A_SOURCE, false, SOURCE_DESC},
+		{"filter", A_FILTER, false, "The filter panel's criteria; all must match (each one left out: any)"},
+		{"offset", A_OFFSET, false, "The first game to give (0 = the first; default 0)"},
+		{"limit", A_LIMIT, false, "How many games, at most 200 (default 50)"}}},
+	{"get_game", T_GAME, true, "One game as its detail view shows it, per disc: status, format, disc ID, Redump name, when and on which drive it was ripped, "
+		"size, place, cover, last check, LibCrypt, duplicate, tracks with their MD5, sectors with errors and its files. Read on its own without touching the screen.", {ID_ARG}},
+	{"check_game", T_GACT, false, "Checks the game's discs against Redump from their files, as square in the game list does (Redump must be on; not a 2048 image, "
+		"a broken set or a game a drive works on). Answers at once with started: get_state shows the progress (screen game_check), list_games the progress "
+		"and then the result. Logged in the audit log. Use this instead of press_button.", {ID_ARG}},
+	{"check_games", T_GACT, false, "Checks every game of a source and filter that has no Redump result yet and can be checked, as START in the game list does. "
+		"Answers at once with started: get_state and list_games show the progress and the result. Use this instead of press_button.", {
+		{"source", A_SOURCE, false, SOURCE_DESC},
+		{"filter", A_FILTER, false, "The filter panel's criteria; all must match (each one left out: any)"}}},
+	{"cancel_check", T_GACT, false, "Stops the game list's running check, as circle on its progress screen does: the game being checked and those not "
+		"reached yet keep the result they had. Use this instead of press_button.", {}},
+	{"rename_game", T_GACT, false, "Renames every file of the game (all its discs, the .cue's FILE lines too) by a file name pattern, as START in the rename "
+		"view does, with its checks: refused when the name stays the same, a game of that name is there, or a drive or a check uses the game. Logged in the "
+		"audit log and undoable there. Returns the new names and ids. Use this instead of press_button.", {ID_ARG,
+		{"pattern", A_PATTERN, true, "The pattern: %T the title, %N Redump's name, %D the disc ID, %R the region, other characters as they are "
+			"(as the File name setting); empty = %T [%D]"}}},
+	{"trash_game", T_GACT, false, "Moves the game, every file of it, to the trash of its source (PSXISO/.trash), as triangle in the game list does. Logged in "
+		"the audit log and undoable there. Use this instead of press_button.", {ID_ARG}},
+	{"restore_game", T_GACT, false, "Moves a game in the trash back to its folder, as triangle in the trash does. Use this instead of press_button.", {ID_ARG}},
+	{"empty_trash", T_GACT, false, "Deletes every game in the trash of a source (all: of every source), as START and yes in the trash do. This is final: "
+		"the files cannot be restored, not even from the audit log. Refused unless confirm is true. Use this instead of press_button.", {
+		{"source", A_SOURCE, false, SOURCE_DESC},
+		{"confirm", A_CONFIRM, false, "Must be true: emptying the trash is final"}}},
 };
 static const int k_ntools = sizeof(k_tools) / sizeof(k_tools[0]);
 
@@ -349,7 +396,7 @@ static void w_tools_list(W *w)
 		w_esc(w, t.desc);
 		w_str(w, ",\"inputSchema\":{\"type\":\"object\",\"properties\":{");
 		int nreq = 0;
-		for (int a = 0; a < 3 && t.args[a].name; a++) {
+		for (int a = 0; a < NARGS && t.args[a].name; a++) {
 			const Arg &g = t.args[a];
 			if (a) w_str(w, ",");
 			w_fmt(w, "\"%s\":{", g.name);
@@ -361,6 +408,23 @@ static void w_tools_list(W *w)
 			case A_VALUE: w_str(w, "\"type\":[\"string\",\"number\",\"boolean\"]"); break;
 			case A_FROM: w_str(w, "\"type\":\"integer\",\"minimum\":0"); break;
 			case A_MAX: w_fmt(w, "\"type\":\"integer\",\"minimum\":1,\"maximum\":%d", MCP_MAX_LOG_LINES); break;
+			case A_SOURCE: w_str(w, "\"type\":\"string\",\"pattern\":\"^(all|hdd|usb[0-7])$\""); break;
+			case A_FILTER:   // (no additionalProperties of its own: the tool's arguments have the one)
+				w_str(w, "\"type\":\"object\",\"properties\":{");
+				for (size_t f = 0; f < sizeof(k_filter) / sizeof(k_filter[0]); f++) {
+					w_fmt(w, "%s\"%s\":{\"type\":\"string\",", f ? "," : "", k_filter[f].name);
+					w_enum(w, k_filter[f].values);
+					w_str(w, ",\"description\":");
+					w_esc(w, k_filter[f].desc);
+					w_str(w, "}");
+				}
+				w_str(w, "}");
+				break;
+			case A_OFFSET: w_str(w, "\"type\":\"integer\",\"minimum\":0"); break;
+			case A_LIMIT: w_fmt(w, "\"type\":\"integer\",\"minimum\":1,\"maximum\":%d", MCP_MAX_GAMES); break;
+			case A_ID: w_str(w, "\"type\":\"string\",\"minLength\":1"); break;
+			case A_PATTERN: w_str(w, "\"type\":\"string\",\"maxLength\":95"); break;
+			case A_CONFIRM: w_str(w, "\"type\":\"boolean\""); break;
 			}
 			w_str(w, ",\"description\":");
 			w_esc(w, g.desc);
@@ -370,7 +434,7 @@ static void w_tools_list(W *w)
 		w_str(w, "}");
 		if (nreq) {
 			w_str(w, ",\"required\":[");
-			for (int a = 0, k = 0; a < 3 && t.args[a].name; a++)
+			for (int a = 0, k = 0; a < NARGS && t.args[a].name; a++)
 				if (t.args[a].required) w_fmt(w, "%s\"%s\"", k++ ? "," : "", t.args[a].name);
 			w_str(w, "]");
 		}
@@ -414,21 +478,58 @@ static bool valid_drive(const char *s)
 }
 
 struct Args {
-	char str[3][MAX_VALUE];   // the string arguments, by their place in the tool's table
-	bool given[3];
-	int num[3];
+	char str[NARGS][MAX_VALUE];   // the string arguments, by their place in the tool's table
+	bool given[NARGS];
+	int num[NARGS];
+	McpGameQuery q;               // the game list's source, filter, offset and limit
 };
+
+static bool valid_source(const char *s)
+{
+	return !strcmp(s, "all") || !strcmp(s, "hdd") || (!strncmp(s, "usb", 3) && s[3] >= '0' && s[3] <= '7' && !s[4]);
+}
+
+// The filter object (at '{'), as the panel's criteria into q; -1 with the error.
+static int check_filter(const char *v, const char *e, McpGameQuery *q, Err *er)
+{
+	if (*v != '{') return set_err(er, -32602, "filter", "must be an object");
+	int *crit[] = {&q->fmt, &q->redump, &q->errors, &q->other, &q->trash};
+	unsigned seen = 0;
+	JIt it = j_members(v, e);
+	const char *k, *fv;
+	while (j_next(&it, &k, &fv)) {
+		char name[MAX_KEY], val[MAX_KEY];
+		int c = -1;
+		if (j_decode(k, e, name, sizeof(name)) >= 0)
+			for (size_t i = 0; i < sizeof(k_filter) / sizeof(k_filter[0]); i++) if (!strcmp(name, k_filter[i].name)) c = (int)i;
+		if (c < 0) return set_err(er, -32602, "filter", "unknown criterion (format, redump, errors, other, show)");
+		if (seen >> c & 1) return set_err(er, -32602, "filter", "%s given twice", k_filter[c].name);
+		seen |= 1u << c;
+		int x = -1;
+		if (*fv == '"' && j_decode(fv, e, val, sizeof(val)) >= 0)
+			for (int i = 0; k_filter[c].values[i]; i++) if (!strcmp(val, k_filter[c].values[i])) x = i;
+		if (x < 0) {
+			char al[120] = "";
+			for (int i = 0; k_filter[c].values[i]; i++) snprintf(al + strlen(al), sizeof(al) - strlen(al), "%s%s", i ? ", " : "", k_filter[c].values[i]);
+			return set_err(er, -32602, "filter", "%s must be one of %s", k_filter[c].name, al);
+		}
+		*crit[c] = x;
+	}
+	return 0;
+}
 
 static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Err *er)
 {
 	memset(a->given, 0, sizeof(a->given));
+	memset(&a->q, 0, sizeof(a->q));
+	a->q.limit = MCP_DEFAULT_GAMES;
 	if (obj) {
 		// every key must be one of the tool's, once
 		JIt it = j_members(obj, e);
 		const char *k, *v;
 		while (j_next(&it, &k, &v)) {
 			bool known = false;
-			for (int i = 0; i < 3 && t.args[i].name; i++) if (j_is(k, e, t.args[i].name)) known = true;
+			for (int i = 0; i < NARGS && t.args[i].name; i++) if (j_is(k, e, t.args[i].name)) known = true;
 			if (!known) {
 				char name[MAX_KEY];
 				if (j_decode(k, e, name, sizeof(name)) < 0) snprintf(name, sizeof(name), "(long name)");
@@ -436,7 +537,7 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			}
 		}
 	}
-	for (int i = 0; i < 3 && t.args[i].name; i++) {
+	for (int i = 0; i < NARGS && t.args[i].name; i++) {
 		const Arg &g = t.args[i];
 		bool dup = false;
 		const char *v = obj ? j_get(obj, e, g.name, &dup) : NULL;
@@ -446,19 +547,30 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			continue;
 		}
 		a->given[i] = true;
-		if (g.type == A_FROM || g.type == A_MAX) {
+		if (g.type == A_FROM || g.type == A_MAX || g.type == A_OFFSET || g.type == A_LIMIT) {
 			// a plain non-negative integer: no sign, fraction or exponent
 			const char *end = j_skip(v, e);
-			int n = 0;
-			bool ok = *v >= '0' && *v <= '9' && end - v <= 9;
+			int n = 0, top = g.type == A_MAX ? MCP_MAX_LOG_LINES : MCP_MAX_GAMES;
+			bool ok = *v >= '0' && *v <= '9' && end - v <= 9, ranged = g.type == A_MAX || g.type == A_LIMIT;
 			for (const char *p = v; ok && p < end; p++) {
 				if (*p < '0' || *p > '9') ok = false;
 				else n = n * 10 + (*p - '0');
 			}
-			if (g.type == A_MAX && ok && (n < 1 || n > MCP_MAX_LOG_LINES)) ok = false;
-			if (!ok) return g.type == A_MAX ? set_err(er, -32602, g.name, "must be an integer from 1 to %d", MCP_MAX_LOG_LINES)
-			                                 : set_err(er, -32602, g.name, "must be an integer of 0 or more");
+			if (ranged && ok && (n < 1 || n > top)) ok = false;
+			if (!ok) return ranged ? set_err(er, -32602, g.name, "must be an integer from 1 to %d", top)
+			                       : set_err(er, -32602, g.name, "must be an integer of 0 or more");
 			a->num[i] = n;
+			if (g.type == A_OFFSET) a->q.offset = n;
+			if (g.type == A_LIMIT) a->q.limit = n;
+			continue;
+		}
+		if (g.type == A_FILTER) {
+			if (check_filter(v, e, &a->q, er)) return -1;
+			continue;
+		}
+		if (g.type == A_CONFIRM) {
+			if (*v != 't' && *v != 'f') return set_err(er, -32602, g.name, "must be true or false");
+			a->num[i] = *v == 't';
 			continue;
 		}
 		if (g.type == A_VALUE && *v != '"') {
@@ -475,7 +587,7 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			continue;
 		}
 		if (*v != '"') return set_err(er, -32602, g.name, "must be a string");
-		int len = j_decode(v, e, a->str[i], g.type == A_VALUE ? MAX_VALUE : MAX_KEY);
+		int len = j_decode(v, e, a->str[i], g.type == A_VALUE || g.type == A_ID || g.type == A_PATTERN ? MAX_VALUE : MAX_KEY);
 		if (len < 0) return set_err(er, -32602, g.name, "too long");
 		if ((int)strlen(a->str[i]) != len || strpbrk(a->str[i], "\r\n"))
 			return set_err(er, -32602, g.name, "must not contain line breaks or NUL");
@@ -489,8 +601,12 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 		case A_BUTTON:
 			if (!in_list(a->str[i], k_buttons)) return set_err(er, -32602, g.name, "must be one of cross, circle, triangle, square, up, down, left, right, start, select, l1, r1, l2, r2");
 			break;
-		case A_KEY:
+		case A_KEY: case A_ID:
 			if (!len) return set_err(er, -32602, g.name, "must not be empty");
+			break;
+		case A_SOURCE:
+			if (!valid_source(a->str[i])) return set_err(er, -32602, g.name, "must be all, hdd or usbN (N the USB drive's port, 0 to 7)");
+			snprintf(a->q.source, sizeof(a->q.source), "%s", a->str[i]);
 			break;
 		default: break;
 		}
@@ -574,6 +690,26 @@ static int tools_call(const char *params, const char *e, W *w, Err *er)
 		if ((have = g_hooks.read_log))
 			r = g_hooks.read_log(a->given[0] ? a->num[0] : -1, a->given[1] ? a->num[1] : MCP_DEFAULT_LOG_LINES, buf, n);
 		break;
+	case T_GAMES: if ((have = g_hooks.list_games)) r = g_hooks.list_games(&a->q, buf, n); break;
+	case T_GAME: if ((have = g_hooks.get_game)) r = g_hooks.get_game(a->str[0], buf, n); break;
+	case T_GACT: {
+		if (!(have = g_hooks.game)) break;
+		const char *id = NULL, *pat = NULL;
+		bool confirmed = false;
+		for (int i = 0; i < NARGS && t->args[i].name; i++) {
+			if (t->args[i].type == A_ID) id = a->str[i];
+			if (t->args[i].type == A_PATTERN) pat = a->str[i];
+			if (t->args[i].type == A_CONFIRM) confirmed = a->given[i] && a->num[i];
+		}
+		if (!strcmp(t->name, "empty_trash") && !confirmed) {   // final: never on a call that did not say so
+			snprintf(buf, n, "Not emptied: emptying the trash deletes its games' files for good (they cannot be restored, not even from the audit log). "
+			         "Call empty_trash again with confirm: true to empty it.");
+			r = -1;
+			break;
+		}
+		r = g_hooks.game(t->name, id, pat, &a->q, buf, n);
+		break;
+	}
 	default: break;
 	}
 	buf[n - 1] = 0;
@@ -647,7 +783,8 @@ int mcp_handle(const char *body, int len, char *out, int n)
 		w_str(&w, "{\"protocolVersion\":\"" MCP_PROTOCOL_VERSION "\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"psx-ripper\",\"version\":");
 		w_esc(&w, g_version);
 		w_str(&w, "},\"instructions\":\"PSX RiPPER on a PS3. get_* tools, list_settings and read_log only read; "
-		          "the actions (rip, check, repair, cancel, skip_rereads, eject) and set_setting do the work directly; go_* and press_button "
+		          "the actions (rip, check, repair, cancel, skip_rereads, eject) and set_setting do the work directly; list_games and get_game read the game list, "
+		          "and check_game, check_games, cancel_check, rename_game, trash_game, restore_game and empty_trash change it as its screen would; go_* and press_button "
 		          "move around the screens and answer dialogs. Each tool that changes the screen returns the screen state.\"}");
 	} else if (!strcmp(method, "ping")) {
 		w_str(&w, "{}");

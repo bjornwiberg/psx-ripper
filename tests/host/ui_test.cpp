@@ -2168,7 +2168,7 @@ static void remote_scenarios()
 	g_boxes.clear(); remote_control_draw(2); shot("remote-control-status-off");
 	need(has_text(":8090/status.json"), "the status.json row says its address");
 	// the indicator on the other screens
-	g_boxes.clear(); settings_draw(0, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); shot("settings-mcp-indicator");
+	g_boxes.clear(); settings_draw(SR_SPEED, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); shot("settings-mcp-indicator");
 	need(has_text("[MCP]"), "no [MCP] on the settings while MCP is on");
 	reset_all(); usb(0, 0);
 	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577); ripped(0, 1, 0);
@@ -3176,6 +3176,327 @@ static void mcp_ui_scenarios()
 	if (bad) g_fail += bad; else printf("ok   MCP: screens, tabs, buttons, dialogs, actions with the pad's checks, busy, two clients\n");
 }
 
+// ---------------------------------------------------------------- MCP: the game list's tools
+// list_games and get_game read on MCP's thread (their own scan); the actions are requests the game
+// list screen carries out as the pad would, with source mcp in the audit log.
+static volatile int g_gc_hold;   // the check job waits after its first disc while this is set (a real thread then)
+static void gc_hold_hook(int) { while (g_gc_hold) usleep(1000); }
+static bool json_ok(const char *s)   // python's reader decides (not the app's own writer)
+{
+	FILE *f = fopen("out/mcp-games.json", "w");
+	if (!f) return false;
+	fputs(s, f);
+	fclose(f);
+	return !system("python3 -c 'import json,sys; json.load(open(sys.argv[1]))' out/mcp-games.json 2>&1");
+}
+static McpGameQuery gq(const char *src = "", int limit = 50)
+{
+	McpGameQuery q;
+	memset(&q, 0, sizeof q);
+	snprintf(q.source, sizeof q.source, "%s", src);
+	q.limit = limit;
+	return q;
+}
+static int src_rows(AuditDom dom, const char *what, AuditSrc src)   // job rows of a domain by kind and source
+{
+	static AuditRow r[200];
+	int n = audit_events(dom, NULL, r, 200), k = 0;
+	for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, "job") && !strcmp(r[i].what, what) && r[i].src == src) k++;
+	return k;
+}
+static void mcp_games_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp games: %s%s%.600s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	char keep_root[256];
+	snprintf(keep_root, sizeof keep_root, "%s", host_root);
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	audit_set_move_hooks(gm_moved_hook, gm_busy_hook);
+	reset_all();
+	gs_library();
+	g_redump = RD_OFF; host_rd_local = 0;
+	g_gc_last.set = 0;
+	snprintf(g_games_source, sizeof g_games_source, "hdd");
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	g_gl_stale = 1;
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();
+	const McpHooks &h = g_mcp_hooks;
+	mcp_init(&g_mcp_hooks, APP_VERSION);
+	static char outb[MCP_MAX_RESPONSE];
+	std::string out;
+	auto has = [&](const char *s) { return out.find(s) != std::string::npos; };
+	auto list = [&](McpGameQuery q) { int rc = h.list_games(&q, outb, sizeof outb); out = outb; return rc; };
+	auto get = [&](const char *id) { int rc = h.get_game(id, outb, sizeof outb); out = outb; return rc; };
+	auto act = [&](const char *tool, const char *id, const char *pat = NULL, McpGameQuery q = gq()) {
+		int rc = h.game(tool, id, pat, &q, outb, sizeof outb); out = outb; return rc; };
+	const char *o = NULL;
+	#define O (o = out.c_str())
+	const char *ALUNDRA = "hdd:/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35]";
+	const char *APE = "hdd:/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15]";
+	const char *APE_T = "hdd:/dev_hdd0/PSXISO/.trash/Ape Escape (Europe) [SCES_011.15]";
+	const char *FF9 = "hdd:/dev_hdd0/PSXISO/Final Fantasy IX (Europe) (Disc 1) [SLES_029.65]";
+
+	// list_games: every source, the summary, the rows with their ids and marks (no UI thread runs:
+	// it never needs the screen)
+	{
+		int rc = list(gq());
+		need(rc == 0 && json_ok(out.c_str()), "list_games: valid JSON", O);
+		need(has("\"source\":\"all\"") && has("\"matching\":22") && has("\"next_offset\":null"), "list_games: all 22 games, one page", O);
+		need(has("{\"key\":\"hdd\",\"label\":\"Hard disk\",\"discs\":24}") && has("{\"key\":\"usb1\",\"label\":\"USB 1 (RIPS)\",\"discs\":1}"), "list_games: the sources with their labels", O);
+		need(has("\"summary\":{\"text\":\"22 games · 1 verified · 2 with errors · 1 re-rip · 1 broken\",\"games\":22,\"verified\":1,\"errors\":2,\"rerip\":1,\"broken\":1}"),
+		     "list_games: the summary line's counts", O);
+		std::string al = std::string("{\"id\":\"") + ALUNDRA + "\",\"name\":\"Alundra (Europe)\",\"disc_id\":\"SLES_011.35\",\"format\":\"2352\",\"tracks\":1,\"status\":\"verified\"";
+		need(has(al.c_str()) && has("\"redump_name\":\"Alundra (Europe)\"") && has("\"place\":{\"source\":\"hdd\",\"label\":\"Hard disk\",\"folder\":\"/dev_hdd0/PSXISO\"}"),
+		     "list_games: a row's id, name, disc ID, format, status, Redump name, place", O);
+		need(has("\"id\":\"hdd:/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso\"") && has("\"format\":\"2048\",\"tracks\":1,\"status\":\"rerip\""),
+		     "list_games: an .iso's id names its type; a 2048 image is re-rip", O);
+		need(has("\"id\":\"usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]\"") && has("\"place\":{\"source\":\"usb1\",\"label\":\"USB 1 (RIPS)\""),
+		     "list_games: a game on a stick", O);
+		std::string ff = std::string("\"id\":\"") + FF9 + "\",\"name\":\"Final Fantasy IX";
+		need(has(ff.c_str()) && has("\"ndiscs\":4,\"discs\":[") && has("\"status\":\"errors\",\"status_text\":\"3 errors\",\"errors\":3"),
+		     "list_games: a game of four discs, its worst status and its discs", O);
+		need(has("\"name\":\"MediEvil (Europe)\"") && out.find("\"sbi_missing\":true") != std::string::npos && out.find("\"duplicate\":true") != std::string::npos &&
+		     has("\"in_trash\":false"), "list_games: the marks", O);
+		need(has("\"check\":{\"running\":false,\"last\":null}"), "list_games: no check has run", O);
+		// pages: ids are the same game in every page, no game twice
+		std::set<std::string> ids;
+		int pages = 0, total = 0;
+		for (int off = 0; off < 22; off += 5, pages++) {
+			McpGameQuery q = gq("", 5);
+			q.offset = off;
+			rc = list(q);
+			size_t p = 0;
+			int k = 0;
+			while ((p = out.find("{\"id\":\"", p)) != std::string::npos) {   // the rows (a group's discs have no name)
+				p += 7;
+				size_t e = out.find('"', p);
+				if (out.compare(e, 9, "\",\"name\":") == 0) { ids.insert(out.substr(p, e - p)); k++; }
+			}
+			total += k;
+			char want[48];
+			if (off + 5 < 22) snprintf(want, sizeof want, "\"next_offset\":%d", off + 5); else snprintf(want, sizeof want, "\"next_offset\":null");
+			need(rc == 0 && k == (off + 5 <= 22 ? 5 : 2) && has(want), "list_games: a page of 5", O);
+		}
+		need(pages == 5 && total == 22 && ids.size() == 22, "list_games: five pages, 22 different ids");
+		// the filter panel's criteria, the source
+		McpGameQuery q = gq();
+		q.fmt = 2;
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":1") && has("Castlevania") && has("\"filter\":{\"format\":\"2048\",\"redump\":\"any\",\"errors\":\"any\",\"other\":\"any\",\"show\":\"games\"}"),
+		     "list_games: format 2048", O);
+		q = gq(); q.redump = 1;
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":2") && has("Alundra") && has("Final Fantasy IX") && !has("Ape Escape"), "list_games: verified (a group with one verified disc)", O);
+		q = gq(); q.other = 2;
+		rc = list(q);
+		need(rc == 0 && has("Croc 2") && has("WipEout 3") && !has("Alundra"), "list_games: duplicates", O);
+		rc = list(gq("hdd"));
+		need(rc == 0 && has("\"source\":\"hdd\"") && has("\"matching\":21") && !has("usb1:"), "list_games: the hard disk only", O);
+		rc = list(gq("usb5"));
+		need(rc != 0 && has("not connected"), "list_games: a source that is not there", O);
+		q = gq(); q.trash = 1;
+		rc = list(q);
+		need(rc == 0 && has("\"trash\":true") && has("\"matching\":0") && has("\"games\":[]"), "list_games: the trash, empty", O);
+		// get_game: the detail view, every disc
+		rc = get(FF9);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"ndiscs\":4") && has("{\"label\":\"Status\",\"value\":\"3 errors\"}") &&
+		     has("\"value\":\"4f1c7d0b9e2a3c5d6e7f8091a2b3c4d5\"") && has("120344") && has("\"files\":[") &&
+		     has("Final Fantasy IX (Europe) (Disc 4) [SLES_329.65].cue"), "get_game: the detail view of four discs", O);
+		rc = get("hdd:/dev_hdd0/PSXISO/Nothing here");
+		need(rc != 0 && has("No game") && has("list_games"), "get_game: an id the list does not have", O);
+		rc = get("Alundra");
+		need(rc != 0 && has("No game"), "get_game: not an id", O);
+	}
+
+	bg_start();
+	// Redump off: check_game is refused with the pad's reason; the game list is shown on the way
+	{
+		int rc = act("check_game", APE);
+		need(rc != 0 && has(T_en(STR_GC_REDUMP_OFF)), "check_game with Redump off: the pad's reason", O);
+		UiState u; ui_snapshot(u);
+		need(u.scr == SCR_GAMES, "check_game went to the game list");
+		rc = act("check_games", NULL);
+		need(rc != 0 && has(T_en(STR_GC_REDUMP_OFF)), "check_games with Redump off", O);
+	}
+	// the trash: trash_game from the home screen, restore_game, refusals
+	{
+		h.ui("go_screen", "home", outb, sizeof outb);
+		int rc = act("trash_game", APE);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"trashed\":\"Ape Escape (Europe)\"") && has(APE_T) && has("\"state\":{\"screen\":\"games\""),
+		     "trash_game: moved, the new id, the state", O);
+		need(!vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin") && vf_exists("/dev_hdd0/PSXISO/.trash/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "trash_game: the files are in the trash");
+		need(src_rows(AU_FILES, "trash", AU_MCP) == 1, "trash_game: an audit job with source mcp");
+		rc = act("trash_game", APE);
+		need(rc != 0 && has("No game"), "trash_game: the old id is gone", O);
+		rc = act("trash_game", APE_T);
+		need(rc != 0 && has("already in the trash"), "trash_game: a game in the trash", O);
+		McpGameQuery q = gq(); q.trash = 1;
+		rc = list(q);
+		need(rc == 0 && has(APE_T) && has("\"in_trash\":true"), "list_games: the game in the trash", O);
+		rc = act("restore_game", ALUNDRA);
+		need(rc != 0 && has("not in the trash"), "restore_game: a game not in the trash", O);
+		rc = act("restore_game", APE_T);
+		need(rc == 0 && has("\"result\":{\"restored\":\"Ape Escape (Europe)\"") && vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "restore_game: back in its folder", O);
+		need(src_rows(AU_FILES, "restore", AU_MCP) == 1, "restore_game: an audit job with source mcp");
+		// a game on another source: the list shows that source on the way, as SELECT would (All
+		// shows every source: it stays)
+		rc = act("check_games", NULL, NULL, gq("hdd"));
+		need(rc != 0 && !strcmp(g_games_source, "hdd"), "check_games on the hard disk: the list shows it (remembered)", O);
+		rc = act("trash_game", "usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]");
+		need(rc == 0 && vf_exists("/dev_usb001/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin") && !strcmp(g_games_source, "usb1"),
+		     "trash_game on the stick: the list switched to it (remembered)", O);
+		rc = act("restore_game", "usb1:/dev_usb001/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88]");
+		need(rc == 0 && vf_exists("/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88].bin"), "restore_game on the stick", O);
+	}
+	// rename_game: the rename view's checks, the new names, get_game by the new id
+	{
+		const char *KL = "hdd:/dev_hdd0/PSXISO/Klonoa";
+		int rc = act("rename_game", KL, "%T (Fixed)");
+		need(rc == 0 && has("\"result\":{\"renamed\":\"Klonoa\"") && has("{\"id\":\"hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)\",\"name\":\"Klonoa (Fixed)\"}") &&
+		     vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).bin") && vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).cue"), "rename_game: renamed, the new name and id", O);
+		need(src_rows(AU_FILES, "rename", AU_MCP) == 1, "rename_game: an audit job with source mcp");
+		rc = get("hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)");
+		need(rc == 0 && has("Klonoa (Fixed).bin") && has("Klonoa (Fixed).cue"), "get_game: the new names", O);
+		rc = get(KL);
+		need(rc != 0 && has("No game"), "get_game: the old id is gone", O);
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", "%T (Fixed)");
+		need(rc != 0 && has(T_en(STR_GM_SAME)), "rename_game: the same name is refused with the view's reason", O);
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", "Spyro");
+		need(rc != 0 && has("Spyro is already there") && vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).bin"), "rename_game: a name that is taken", O);
+		std::string longp(96, 'x');
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", longp.c_str());
+		need(rc != 0 && has("95"), "rename_game: a pattern too long for the view", O);
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", "a\tb");
+		need(rc != 0 && has("control"), "rename_game: a control character", O);
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/.trash/Klonoa (Fixed)", "%T");
+		need(rc != 0, "rename_game: an id that is not there", O);
+	}
+	// empty_trash: never without confirm (the whole MCP path), then final, with source mcp
+	{
+		int rc = act("trash_game", "hdd:/dev_hdd0/PSXISO/Driver");
+		need(rc == 0 && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "Driver into the trash", O);
+		static char body[600];
+		snprintf(body, sizeof body, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"empty_trash\",\"arguments\":{\"source\":\"hdd\"}}}");
+		int st = mcp_handle(body, strlen(body), outb, sizeof outb);
+		out = outb;
+		need(st == 200 && has("\"isError\":true") && has("confirm: true") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash without confirm: refused, nothing deleted", O);
+		snprintf(body, sizeof body, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"empty_trash\",\"arguments\":{\"source\":\"hdd\",\"confirm\":true}}}");
+		st = mcp_handle(body, strlen(body), outb, sizeof outb);
+		out = outb;
+		need(st == 200 && has("\"isError\":false") && !vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin") && vf_exists("/dev_hdd0/PSXISO/Spyro.bin"),
+		     "empty_trash with confirm: the trash's files deleted, nothing else", O);
+		need(src_rows(AU_FILES, "empty", AU_MCP) == 1, "empty_trash: an audit job with source mcp");
+		rc = act("empty_trash", NULL, NULL, gq("hdd"));
+		need(rc != 0 && has("empty"), "empty_trash: an empty trash", O);
+	}
+	// checks over MCP: started at once; list_games shows the result
+	{
+		std::vector<uint8_t> zeros((size_t)3 * RAW_SIZE);
+		{ Md5 m; uint8_t d[16]; md5_init(&m); md5_update(&m, zeros.data(), zeros.size()); md5_final(&m, d); memcpy(host_rd_md5, d, 16); }
+		snprintf(host_rd_name, sizeof host_rd_name, "Spyro the Dragon (Europe)");
+		host_rd_local = 1;
+		g_redump = RD_LOCAL;
+		const char *SP = "hdd:/dev_hdd0/PSXISO/Spyro";
+		int rc = act("check_game", SP);
+		need(rc == 0 && has("\"result\":{\"started\":true,\"discs\":1}"), "check_game: started", O);
+		bg_frames(4);
+		rc = list(gq("hdd"));
+		std::string sp = std::string("\"id\":\"") + SP + "\",\"name\":\"Spyro\"";
+		size_t at = out.find(sp);
+		need(rc == 0 && at != std::string::npos && out.find("\"status\":\"verified\"", at) < out.find("\"id\":", at + 5) &&
+		     has("\"last\":{\"discs\":1,\"checked\":1,\"failed\":0,\"not_compared\":0,\"cancelled\":false,\"unreachable\":false}"),
+		     "list_games after check_game: verified, and the check's result", O);
+		need(src_rows(AU_RIPS, "check", AU_MCP) == 1, "check_game: an audit check job with source mcp");
+		McpGameQuery q = gq("hdd"); q.redump = 2;
+		rc = list(q);
+		int before = atoi(out.c_str() + out.find("\"matching\":") + 11);
+		rc = act("check_games", NULL, NULL, q);
+		need(rc == 0 && has("\"started\":true"), "check_games: the unchecked games of the hard disk", O);
+		bg_frames(4);
+		rc = list(q);
+		int after = atoi(out.c_str() + out.find("\"matching\":") + 11);
+		need(rc == 0 && before > 2 && after == 2 && has("Castlevania") && has("Tekken 3"), "check_games: only those that cannot be checked are left", O);
+		rc = act("check_games", NULL, NULL, q);
+		need(rc != 0 && has(T_en(STR_GC_NOTHING)), "check_games: nothing left to check", O);
+		rc = act("check_game", "hdd:/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso");
+		need(rc != 0 && has(T_en(STR_GC_NO_2048)), "check_game: a 2048 image, the pad's reason", O);
+		rc = act("cancel_check", NULL);
+		need(rc != 0 && has("No game list check"), "cancel_check with no check running", O);
+	}
+	// while the game list checks (its progress screen), nothing but cancel_check and the reading tools
+	// works; cancel_check stops it as circle does
+	{
+		host_thread_gc = 1;
+		g_gc_hold = 1;
+		g_gc_after = gc_hold_hook;
+		int rc = act("check_game", ALUNDRA);
+		need(rc == 0 && has("\"started\":true"), "check_game on a thread of its own: started", O);
+		bg_frames(4);
+		UiState u; ui_snapshot(u);
+		need(u.scr == SCR_GAME_CHECK && g_gc.running, "the progress screen shows while it checks");
+		uint64_t t0 = now_ms();
+		rc = act("trash_game", APE);
+		need(rc != 0 && has("being checked") && now_ms() - t0 < 1000 && vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "trash_game while checking: refused at once", O);
+		rc = act("rename_game", APE, "x");
+		need(rc != 0 && has("being checked"), "rename_game while checking: refused", O);
+		rc = act("check_games", NULL);
+		need(rc != 0 && has("being checked"), "check_games while checking: refused", O);
+		rc = h.ui("go_screen", "home", outb, sizeof outb); out = outb;
+		need(rc != 0 && has("being checked"), "go_screen while checking: refused", O);
+		rc = list(gq("hdd"));
+		need(rc == 0 && has("\"check\":{\"running\":true,\"disc\":1,\"of\":1"), "list_games while checking: works, with the progress", O);
+		rc = act("cancel_check", NULL);
+		need(rc == 0 && has("\"result\":{\"cancelled\":true}") && g_gc.abort, "cancel_check: the check stops as circle does", O);
+		g_gc_hold = 0;
+		for (int i = 0; i < 200 && g_gc.running; i++) usleep(5000);
+		bg_frames(4);
+		ui_snapshot(u);
+		need(!g_gc.running && u.scr == SCR_GAMES, "the check ended: the list again");
+		rc = list(gq("hdd"));
+		need(rc == 0 && has("\"cancelled\":true"), "list_games: the last check was cancelled", O);
+		g_gc_after = NULL;
+		host_thread_gc = 0;
+	}
+	h.ui("go_screen", "home", outb, sizeof outb);
+	bg_stop();
+	#undef O
+	// a game-list check holding a card's rip: the pad's and MCP's rip, check and repair say so (the
+	// card's tab too), as the job starts do
+	{
+		GcItem it;
+		memset(&it, 0, sizeof it);
+		snprintf(it.base, sizeof it.base, "/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35]");
+		Card &k = g_cards[0];
+		k.state = DISC_READY; k.job = 0; k.prev_rip = 1; k.repair_n = 1; k.rd_state = -1;
+		snprintf(k.exist, sizeof k.exist, "%s", it.base);
+		snprintf(k.base, sizeof k.base, "%s", it.base);
+		g_gc.items = &it; g_gc.n = 1; g_gc.i = 0; g_gc.running = 1;
+		char why[200];
+		int r1 = can_rip(0, T_en, why, sizeof why);
+		need(r1 != CAN_OK && !strcmp(why, T_en(STR_GC_CARD_BUSY)) && !strcmp(k.res, T(STR_GC_CARD_BUSY)), "can_rip: the game list checks this rip");
+		int r2 = can_check(0, T_en, why, sizeof why);
+		need(r2 != CAN_OK && !strcmp(why, T_en(STR_GC_CARD_BUSY)), "can_check: the game list checks this rip");
+		int r3 = can_repair(0, T_en, why, sizeof why);
+		need(r3 != CAN_OK && !strcmp(why, T_en(STR_GC_CARD_BUSY)), "can_repair: the game list checks this rip");
+		g_gc.running = 0; g_gc.items = NULL; g_gc.n = 0;
+	}
+	g_redump = RD_OFF; host_rd_local = 0;
+	snprintf(host_root, sizeof host_root, "%s", keep_root);
+	ui_at(SCR_HOME);
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   MCP: the game list's tools (list, details, check, rename, trash, restore, empty, busy while checking)\n");
+}
+
 int main()
 {
 	setvbuf(stdout, NULL, _IONBF, 0);   // every line out before a crash
@@ -3821,6 +4142,7 @@ int main()
 	mcp_scenarios();
 	mcp_settings_scenarios();
 	mcp_ui_scenarios();
+	mcp_games_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

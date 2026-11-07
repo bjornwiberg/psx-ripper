@@ -85,11 +85,19 @@ int sysThreadCreate(sys_ppu_thread_t *id, void (*entry)(void *), void *arg, int,
 }
 void sysThreadExit(u64) { pthread_exit(NULL); }   // only the server's threads call it here
 #else
+#include <pthread.h>
 int host_webman_calls = 0;   // webMAN requests the app started (a popup, ...): counted, not sent
-int sysThreadCreate(sys_ppu_thread_t *id, void (*)(void *), void *, int, u64, u64, char *name)
+int host_thread_gc = 0;
+int sysThreadCreate(sys_ppu_thread_t *id, void (*entry)(void *), void *arg, int, u64, u64, char *name)
 {
 	*id = 0;
 	if (name && !strcmp(name, "psxwebman")) __sync_fetch_and_add(&host_webman_calls, 1);
+	if (host_thread_gc && name && !strcmp(name, "psxgcheck")) {
+		pthread_t t;
+		if (pthread_create(&t, NULL, (void *(*)(void *))entry, arg)) return -1;
+		pthread_detach(t);
+		return 0;
+	}
 	return -1;
 }
 void sysThreadExit(u64) {}
