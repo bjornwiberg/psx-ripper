@@ -85,21 +85,25 @@ Example payload:
 ### `/status.json`
 
 One object for the app and a `drives` array with every drive (the internal one first, then the
-USB drives by port). `busy` is true while any drive is in use or the lv1 patch is on.
+USB drives by port). `busy` is true while any drive is in use or the lv1 patch is on. It answers
+only while the status.json switch (Settings → Remote control → status.json) is on; otherwise the
+web server answers 404, or nothing when all three switches are off.
 
 ```json
 {"app":"PSX RiPPER","version":"1.0.0","busy":true,"state":"ripping","drives":[
- {"drive":"internal","model":"PS3 Blu-ray drive","state":"ripping",
+ {"drive":"internal","id":"internal","model":"PS3 Blu-ray drive","state":"ripping",
   "title":"Mega Man X4","serial":"SLUS_005.61","size_mb":564,"redump_name":"Mega Man X4 (USA)",
   "redump":"unchecked","already_ripped":false,"known_errors":0,
   "destination":"/dev_hdd0/PSXISO","file":"Mega Man X4 [SLUS_005.61]",
   "job":{"phase":"verifying","percent":29,"sectors_done":251793,"sectors_total":251793,
          "pass_done":12000,"pass_total":41237,"unreadable":0,"fixed":1,"bad":0}},
- {"drive":"usb","port":0,"model":"Apple SuperDrive","state":"empty",
+ {"drive":"usb","id":"usb0","port":0,"model":"Apple SuperDrive","state":"empty",
   "last":{"result":"done","disc":"Alundra (Europe) (SLES_011.35)","summary":"klar på 14:02",
           "redump":"verified","needs_repair":false}}]}
 ```
 
+- `drive`: `internal` or `usb` (with its `port`); `id`: `internal` or `usbN` (N is the port), the
+  name the [MCP](mcp.md) tools take for the drive.
 - `state`: `empty`, `reading` (identifying), `ready`, `not_psx`, `no_answer` (a USB drive that
   stopped answering), `ripping`, `repairing`.
 - `redump` (the disc here, and the last rip): `verified`, `no_match`, `unchecked`.

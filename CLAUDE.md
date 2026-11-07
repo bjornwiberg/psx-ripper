@@ -12,7 +12,8 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) first; everything there applies. In addi
 - **Build:** `docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src ps3dev-psl1ght make pkg`
   (see the README for building the image).
 - **Never install on a console while it rips.** `tools/deploy.sh` checks `/status.json` (`busy`)
-  and refuses; do not work around it. Do not press the console's buttons (webMAN `pad.ps3` or the
+  and refuses, also when it cannot tell: the app's status.json switch (Settings → Remote control →
+  status.json) must be on, or the app not running. Do not work around it. Do not press the console's buttons (webMAN `pad.ps3` or the
   remote view's pad) while someone is using it.
 - **UI:** the app's own UI only, plain words, right increases, ✕ opens, ○ goes back, L2/R2 page
   with arrows at the right edge, details in the small font, no overlapping text (the tests check).

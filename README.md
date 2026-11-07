@@ -44,8 +44,9 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
 - **Audit log with undo**: every rip, repair and setting change is logged with what started it;
   settings, a repair's sectors and the game list's file changes can be undone. See the user guide.
 - **Automatic mode**: rip (or repair) when a disc is inserted, eject when done.
-- **Remote view**: the screen as a web page on port 8090 with a pad whose buttons press the
-  console's, `/status.json`, and **webhooks** (for example to Home Assistant) for every event.
+- **Remote control**: the screen as a web page on port 8090 with a pad whose buttons press the
+  console's, `/status.json` for scripts (its own switch), and **webhooks** (for example to Home
+  Assistant) for every event.
 - **MCP**: an AI agent such as Claude Code can read the screen, the drives and the log, start and
   cancel rips, change settings and check, rename or trash games, with the pad's own checks and
   every change in the audit log. Off by default, home network only. See [MCP](docs/mcp.md).

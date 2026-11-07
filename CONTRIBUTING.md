@@ -23,7 +23,8 @@ docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src ps3dev-psl1ght mak
 make -C tests/host
 ```
 
-To install on a console with webMAN MOD (FTP and its web server on, the app's remote view on):
+To install on a console with webMAN MOD (FTP and its web server on, and the app's status.json on:
+Settings → Remote control → status.json; or the app not running):
 
 ```sh
 PS3=192.168.1.50 tools/deploy.sh     # or write the address into .ps3host
@@ -31,7 +32,8 @@ PS3=192.168.1.50 tools/deploy.sh     # or write the address into .ps3host
 
 `deploy.sh` builds the package itself, with the build time after the version (`1.0.2-20261103.0835`),
 so the app shows that a local build is installed and when it was made. It refuses while the app
-is ripping: closing it then can leave the lv1 patch on.
+is ripping, and when it cannot tell (status.json off and the app running): closing it mid-rip can
+leave the lv1 patch on.
 
 ## Tests
 

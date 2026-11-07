@@ -30,8 +30,11 @@ turn the selected one on or off:
 
 The line at the bottom shows the console's address for the selected row. MCP is off until you turn
 it on. While it is on, **[MCP]** is shown in yellow at the left of the title on every screen, so
-you can always see that an agent may be at work. Every change an agent makes is in the
-[audit log](user-guide.md#audit-log) with the source *MCP*, and can be undone there like any other.
+you can always see that an agent may be at work. Every setting change, rip, repair, check and
+game-list change an agent makes is in the [audit log](user-guide.md#audit-log) with the source
+*MCP*; settings, renames and moves to and from the trash can be undone there, as when you make
+them. Emptying the trash cannot be undone, and a rip is logged as a job, not undone. `cancel`,
+`skip_rereads` and `eject` are only in the app's log (`psxrip.log`), as they are from the pad.
 
 ## Connecting an agent
 
@@ -132,8 +135,10 @@ Lines of the app's log, `/dev_hdd0/tmp/psxrip.log`.
  "from":0,"next":6,"total":6}
 ```
 
-`next` is the `from_line` for the next call. Where the webhook address, its path or a header
-appears in a line, the line shows `[secret]` instead. A line is cut after 1023 bytes, and when
+`next` is the `from_line` for the next call. Where the current webhook address, its path or a
+header value appears in a line, the line shows `[secret]` instead. The webhook's host is not secret
+and is shown as is (the app logs *webhook address set (host)*). Only the current values are known:
+a line written with an earlier address is not changed (the app never logs the whole address). A line is cut after 1023 bytes, and when
 the lines do not fit in one answer it ends early with `"truncated":true`.
 
 ### list_settings
@@ -468,9 +473,10 @@ or by the app itself.
   it with `press_button` first. While the console's on-screen keyboard is open, these and
   `press_button` are refused: it is answered on the console. The reading tools and `set_setting`
   work all the time.
-- **Busy after 5 s.** An action waits at most 5 seconds for the app to take it. If the app is in
-  the middle of something long, or the console's own menu is open, the answer is *Busy: …* with
-  the screen it is on: look at `get_state` and try again.
+- **Busy after 5 s.** An action waits at most 5 seconds for the app to take it and finish it. If
+  the app is in the middle of something long, or the console's own menu is open, the answer is
+  *Busy: …* with the screen it is on; a request the app took but did not finish in time answers
+  *The app took the request but did not finish it within 5 s*. Look at `get_state` and try again.
 - **One request at a time.** Two agents (or two calls) are served one after the other.
 - **The game list's source is not saved.** A game tool may switch the list on the screen to
   another source, but the source the list opens with next time stays the one you chose with SELECT.
@@ -481,9 +487,10 @@ or by the app itself.
   the console can use it while it is on. Never forward port 8090 to the internet. Turn MCP off when
   you do not use it.
 - **Web pages cannot use it.** A request from a web browser carries an `Origin`; the app answers
-  only requests with no `Origin` (programs such as MCP clients) or from its own pages
-  (`http://<the console's address>:8090`). Anything else gets *Origin not allowed*, so a web page
-  you visit cannot use your browser to control the console.
+  only requests with no `Origin` (programs such as MCP clients) or from its own pages, exactly
+  `http://<the console's address>:8090` (not a host name for it, not `localhost`). Anything else
+  gets *Origin not allowed*, so a web page you visit cannot use your browser to control the
+  console. The remote view's pad has the same check: open its page by the console's address.
 - **Secrets are never shown.** The webhook address and the headers can be set over MCP but never
   read: `list_settings` and `set_setting` say only whether they are set, `read_log` shows
   `[secret]` in their place, and the audit log notes only *set* or *cleared*.
@@ -504,6 +511,8 @@ or by the app itself.
   source, so trying again works.
 - A page of `list_games` with many large games can be cut (`cut`); a smaller `limit` helps. If not
   even one game fits: *The answer is too large: use a smaller limit.*
-- `empty_trash`'s `expect` with ids compares them exactly: an id whose file name is not valid UTF-8
-  never matches, so that trash can be emptied with a count (or on the console) instead.
+- A game whose file name is not valid UTF-8 can be listed but not acted on by id: its id shows
+  `?` for the invalid bytes and matches no file, so `get_game`, `check_game`, `rename_game`,
+  `trash_game` and `restore_game` answer that no such game is there, and `empty_trash`'s `expect`
+  with ids never matches it. Use the console for it, and empty such a trash with a count.
 - `get_screenshot` does not show the console's own dialogs or keyboard.
