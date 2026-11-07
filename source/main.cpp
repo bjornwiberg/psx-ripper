@@ -5376,7 +5376,10 @@ static int prepare_disc(int *err, int *code)
 	char *name = g_name;
 	g_ntracks = 0; g_leadout = 0; g_nlc = 0; g_qzero = 0; g_qchecked = 0; g_readerrs = 0;
 	g_qoff = 0; g_qcal_done = 0; memset(g_qhist, 0, sizeof(g_qhist));
-	if (!g_mounttest && g_use == SRC_BD) webman_unmount();
+	// headless runs unmount here; the app unmounts once at start (see main): an unmount that works
+	// makes the system report the disc as ejected and inserted again, so doing it on every identify
+	// left the internal card empty right after it found the disc
+	if (g_headless && !g_mounttest && g_use == SRC_BD) webman_unmount();
 
 	int ret;
 	if (g_use == SRC_USB) {   // no lv2 device and no lv1 patch: our own driver talks to the drive
@@ -6694,6 +6697,7 @@ int main(int argc, char *argv[])
 	usbodd_init();   // USB SuperDrives
 	{ sys_ppu_thread_t t; sysThreadCreate(&t, usb_presence_thread, NULL, 1500, 0x4000, 0, (char *)"psxusbpoll"); }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
+	webman_unmount();   // a game image webMAN mounted earlier would hide the internal drive's disc
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
 	while (!exit_requested) {
 		int a = home_screen();   // rips run on their cards, from the home screen
