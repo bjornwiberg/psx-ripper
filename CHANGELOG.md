@@ -5,6 +5,18 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0](https://github.com/bjornwiberg/psx-ripper/compare/v1.2.0...v1.3.0) (2026-11-07)
+
+
+### Features
+
+* game list with Redump checks, renaming and trash, undoable in the audit log ([#29](https://github.com/bjornwiberg/psx-ripper/issues/29)) ([c0fb692](https://github.com/bjornwiberg/psx-ripper/commit/c0fb69249338ca0440918af5bdd99e60658ba90b))
+
+
+### Bug fixes
+
+* the internal drive reads the real disc when webMAN has an image mounted ([#28](https://github.com/bjornwiberg/psx-ripper/issues/28)) ([ed23515](https://github.com/bjornwiberg/psx-ripper/commit/ed235151cde4fd6748bc07948a26e96c795a1373))
+
 ## [1.2.0](https://github.com/bjornwiberg/psx-ripper/compare/v1.1.0...v1.2.0) (2026-11-04)
 
 
