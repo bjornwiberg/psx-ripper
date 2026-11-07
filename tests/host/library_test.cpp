@@ -670,6 +670,37 @@ static void own_names(int &bad)
 	CHECK(lib_own_find(b, ".bin", "log", IO.exists, out, sizeof out) && strstr(out, "/Z.log"));   // still read, as before
 }
 
+// Discs named "CD1".."CD4" (another tool's .iso files) are one game, and the row's name has no "CD1".
+static void cd_numbers_group(int &bad)
+{
+	fresh();
+	for (int i = 1; i <= 4; i++) {
+		char nm[80];
+		snprintf(nm, sizeof nm, "The Legend Of Dragoon CD%d [SCES_%d30.43].iso", i, i - 1);
+		put_size(nm, 2048ull * 4);
+	}
+	put_size("Chrono Cross CD 1 [SLES_033.98].iso", 2048ull * 4);
+	put_size("Chrono Cross CD 2 [SLES_133.98].iso", 2048ull * 4);
+	put_size("Ridge Racer Type 4 [SCES_016.46].iso", 2048ull * 4);   // one disc, no number: unchanged
+	put_size("ABCD1 [SLUS_000.01].iso", 2048ull * 4);                  // "CD1" inside a word is not a disc number
+	int n = scan();
+	CHECK(n == 8);
+	int rows = lib_group(g_d, n, g_g, 600);
+	CHECK(rows == 4);
+	int lod = -1, cc = -1;
+	for (int r = 0; r < rows; r++) {
+		if (!strcmp(g_g[r].name, "The Legend Of Dragoon")) lod = r;
+		if (!strcmp(g_g[r].name, "Chrono Cross")) cc = r;
+	}
+	CHECK(lod >= 0 && g_g[lod].ndiscs == 4);
+	CHECK(cc >= 0 && g_g[cc].ndiscs == 2);
+	if (lod >= 0) CHECK(strstr(g_d[g_g[lod].first + 3].base, "CD4") != NULL);   // in disc order
+	int one = 0;
+	for (int r = 0; r < rows; r++) if (!strcmp(g_g[r].name, "ABCD1") && g_g[r].ndiscs == 1) one = 1;
+	CHECK(one);
+	for (int r = 0; r < rows; r++) if (strstr(g_g[r].name, "CD1") && strcmp(g_g[r].name, "ABCD1")) { CHECK(0); printf("  row %s\n", g_g[r].name); }
+}
+
 int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
@@ -681,7 +712,7 @@ int main()
 		{"many_sets_bounded", many_sets_bounded}, {"long_names_cut", long_names_cut},
 		{"folder_gone_midway", folder_gone_midway}, {"regions_stay_apart", regions_stay_apart},
 		{"same_set_two_folders", same_set_two_folders}, {"empty_image_broken", empty_image_broken},
-		{"typed_companions", typed_companions}, {"own_names", own_names},
+		{"typed_companions", typed_companions}, {"own_names", own_names}, {"cd_numbers_group", cd_numbers_group},
 	};
 	if (system("mkdir -p out")) {}
 	for (auto &t : tests) {
