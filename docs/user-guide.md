@@ -14,7 +14,7 @@ and file see [configuration](configuration.md); for questions see the [FAQ](faq.
 - [Several drives at once](#several-drives-at-once)
 - [Where the rips go](#where-the-rips-go)
 - [Settings](#settings)
-- [Remote view and webhooks](#remote-view-and-webhooks)
+- [Remote control and webhooks](#remote-control-and-webhooks)
 - [Playing your rips](#playing-your-rips)
 - [Logs](#logs)
 
@@ -338,7 +338,7 @@ everything, ○ goes back.
 | File name | ← → picks a pattern, ✕ edits your own with `%T` title, `%R` region, `%D` disc ID, `%N` Redump's full name |
 | Check against Redump | *Off*, *Online* (looks the disc up on redump.org) or *Local copy* (no internet needed) |
 | Local Redump copy | ✕ downloads Redump's PlayStation list (about 4 MB) for the local mode |
-| Remote view | The web page on port 8090 (see below) |
+| Remote control | ✕ opens the switches for the remote view, MCP and status.json (see below) |
 | Webhooks | ✕ opens the address, headers, events and a test |
 | Audit log | ✕ opens the audit log (see below) |
 | Audit log sector data | How much disk space the log may use for undoing repairs: 1 to 256 MB, default 256 |
@@ -359,8 +359,8 @@ started it, and undo it. Open it from the settings (*Audit log*; *Ändringslogg*
 - **Files**: every rename, move to the trash, restore and emptying of the trash from the
   [game list](#game-list), and the renaming of logs from earlier versions, with each file's old
   and new place.
-- **Source**: each entry says what did it: the console's pad, the remote view's pad, the app
-  itself (automatic mode), or an undo.
+- **Source**: each entry says what did it: the console's pad, the remote view's pad, an AI agent
+  over [MCP](mcp.md), the app itself (automatic mode), or an undo.
 
 Secrets are never stored. Of a webhook address or header the log only says that it was set or
 cleared, never the value.
@@ -409,12 +409,20 @@ The sector copies are the only large part. They are limited by *Audit log sector
 the limit is passed the oldest copies are removed. Their rows stay in the log, but can no longer
 be undone.
 
-## Remote view and webhooks
+## Remote control and webhooks
 
-With **Remote view** on, open `http://<the PS3's address>:8090/` on a computer or phone on the
-same network. It shows the app's screen and, under it, a pad: its buttons press the console's,
-so you can switch tabs or start a rip from the sofa. `/status.json` gives the state of every
-drive for scripts. The page has no password: keep it on your home network.
+**Remote control** in the settings: **✕** opens a menu with three switches. ↑↓ select one, ← → (or
+✕) turn it on or off, ○ goes back. The line at the bottom shows the address of the selected one.
+
+| Row | What it does |
+|---|---|
+| Remote view | Open `http://<the PS3's address>:8090/` on a computer or phone on the same network. It shows the app's screen and, under it, a pad: its buttons press the console's, so you can switch tabs or start a rip from the sofa |
+| MCP | An AI agent (an MCP client such as Claude Code) can read and control the app at `http://<the PS3's address>:8090/mcp`. While it is on, *[MCP]* is shown at the left of the title. See [MCP](mcp.md) |
+| status.json | `http://<the PS3's address>:8090/status.json` gives the state of every drive for scripts |
+
+All three are off until you turn them on; after an update from a version without these switches,
+*Remote view* on keeps the remote view and status.json on. The settings row shows *On* and the address while any of them is
+on. None has a password: keep them on your home network.
 
 **Webhooks** send an HTTP POST with a JSON body when something happens (a disc identified, a rip
 started, progress, finished, failed, a repair finished, the disc ejected, the app started), for

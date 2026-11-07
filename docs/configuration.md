@@ -18,7 +18,9 @@ app writes the whole file again.
 | `redump` | 0 = off, 1 = online, 2 = local copy | Check against Redump |
 | `check` | 0 = off, 1 = check and re-read, 2 = bit-perfect | Sector check |
 | `drive_bd`, `drive_usb0` … `7` | `retries,speed,eject,autostart,check` | One drive's own settings instead of the standard (SELECT on its tab); `-1` = the standard |
-| `remote` | 0 / 1 | Remote view (port 8090) |
+| `remote` | 0 / 1 | Remote control → Remote view: the screen and the pad page on port 8090 |
+| `mcp` | 0 / 1 | Remote control → MCP: an AI agent can read and control the app at `/mcp` (see [MCP](mcp.md)); default 0 |
+| `status_json` | 0 / 1 | Remote control → status.json: `/status.json` on port 8090 |
 | `webhook_on` | 0 / 1 | Webhooks |
 | `webhook` | `http://host:port/path` | Webhook address |
 | `webhook_headers_on` | 0 / 1 | Send the extra headers |
@@ -28,6 +30,11 @@ app writes the whole file again.
 | `games_source` | `hdd`, `usb0` … `7`, `all` | The game list's source (SELECT in the list); default `all` |
 | `games_filter` | `format,redump,errors,other`, e.g. `0,2,0,0` | The game list's filter: format 0 any, 1 2352, 2 2048; Redump 0 any, 1 verified, 2 not checked, 3 does not match, 4 not verified; errors 0 any, 1 with, 2 without; other 0 any, 1 broken sets, 2 duplicates, 3 LibCrypt .sbi missing |
 | `audit_mb` | 1, 2, 4, 8, 16, 32, 64, 128, 256 | Size limit in MB of the audit log's sector copies (default 256) |
+
+The web server on port 8090 runs while any of `remote`, `mcp` and `status_json` is on, and each
+path answers only while its own switch is on. A config file from before these switches (with
+`remote` but no `status_json` line) keeps what it had: `status_json` gets the value of `remote`,
+and `mcp` stays 0.
 
 Webhook event bits: 0 `disc_identified`, 1 `rip_started`, 2 `rip_progress`, 3 `rip_finished`,
 4 `rip_cancelled`, 5 `rip_failed`, 6 `repair_finished`, 7 `disc_ejected`,
@@ -52,9 +59,11 @@ one of a running job), and their rows can no longer be undone.
 
 ## Remote view and webhooks
 
-- **Remote view** (setting): a small web server on port 8090. `http://<ps3>:8090/` shows the
-  app's screen as an MJPEG stream (about 2 frames per second), `/shot.jpg` a single frame and
-  `/status.json` the state of every drive (see below). System dialogs are drawn by the PS3 on top of the app and are not in the stream.
+- **Remote control** (setting): a small web server on port 8090 with three switches. **Remote
+  view**: `http://<ps3>:8090/` shows the app's screen as an MJPEG stream (about 2 frames per
+  second) with a pad, and `/shot.jpg` a single frame. **status.json**: `/status.json`, the state of
+  every drive (see below). **MCP**: `/mcp`, for an AI agent (see [MCP](mcp.md)). System dialogs are
+  drawn by the PS3 on top of the app and are not in the stream.
   JPEG encoding uses [stb_image_write](https://github.com/nothings/stb) (public domain / MIT).
 - **Webhooks** (setting): the events above are sent as an HTTP POST with a JSON body, for
   example to a Home Assistant webhook (`http://homeassistant.local:8123/api/webhook/<id>`).

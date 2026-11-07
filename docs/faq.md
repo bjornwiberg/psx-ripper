@@ -89,8 +89,14 @@ No Redump data ships with the app.
 
 ### Can I use it from my phone?
 
-Turn on **Remote view** and open `http://<the PS3's address>:8090/`: you see the screen and get a
-pad that presses the console's buttons. It has no password, so keep it on your home network.
+Turn on **Remote view** (Settings → Remote control) and open `http://<the PS3's address>:8090/`:
+you see the screen and get a pad that presses the console's buttons. It has no password, so keep
+it on your home network.
+
+### Can an AI agent use it?
+
+Yes: turn on **MCP** (Settings → Remote control) and connect an MCP client such as Claude Code to
+`http://<the PS3's address>:8090/mcp`. See [MCP](mcp.md).
 
 ### Can I get a notification when a rip is done?
 
