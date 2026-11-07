@@ -5,3 +5,5 @@ struct HostUsb { int attached, port; char name[40]; };
 extern HostPad host_pad;
 extern HostUsb host_usb[];
 extern int host_lang;
+// called once per frame (the screens' flip): a test can look at a screen and press its buttons
+extern void (*host_frame)();

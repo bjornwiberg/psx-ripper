@@ -22,14 +22,14 @@
 #include "remote.h"
 #include "mcp.h"
 
-#define MCP_MAX_RESPONSE (512 * 1024)   // a screenshot (base64) is the largest answer
-
 static RemoteHooks g_hooks;
 #ifdef HOST_REMOTE
 volatile int g_remote_stop_delay_ms = 0;   // tests: the server thread lingers once it decided to stop
+volatile int g_remote_sndbuf = 0;          // tests: a small send buffer, so an unread answer blocks (a computer's grows to MBs)
 #endif
 static volatile int g_paths = 0, g_listen = -1, g_running = 0;
-static volatile int g_clients = 0;    // client threads running (at most REMOTE_MAX_CLIENTS)
+static volatile int g_clients = 0;    // client threads serving a request (at most REMOTE_MAX_CLIENTS)
+static volatile int g_streams = 0;    // client threads sending the stream (at most REMOTE_MAX_STREAMS)
 static volatile int g_mcp_busy = 0;   // one MCP request at a time (two clients: one waits)
 
 int remote_ip(char *out, int n)
@@ -71,6 +71,21 @@ static int encode_frame(JpgBuf *out, uint8_t *rgb)
 	}
 	out->n = 0;
 	return stbi_write_jpg_to_func(jpg_sink, out, w, h, 3, rgb, 70) ? out->n : 0;
+}
+
+int remote_jpeg(unsigned char **jpg, int *len)
+{
+	*jpg = NULL;
+	*len = 0;
+	JpgBuf jb = {NULL, 0, 0};
+	uint8_t *rgb = (uint8_t *)malloc(ui_w() / 2 * (ui_h() / 2) * 3);
+	if (!rgb) return -1;
+	int n = encode_frame(&jb, rgb);
+	free(rgb);
+	if (n <= 0) { free(jb.p); return -1; }
+	*jpg = jb.p;
+	*len = n;
+	return 0;
 }
 
 static int send_all(int s, const void *p, int n)
@@ -213,6 +228,14 @@ static void mcp_request(int s, const char *got, int have, int want, time_t deadl
 static void client_thread(void *arg)
 {
 	int s = (int)(long)arg;
+	int counted = 1;   // in g_clients (a stream moves to g_streams)
+	// a client that stops reading (a phone asleep, a tab put away, a stuck agent) must not hold the
+	// thread and its slot either: a send that cannot go on for this long gives up
+	struct timeval st = {REMOTE_SEND_SECONDS, 0};
+	setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &st, sizeof(st));
+#ifdef HOST_REMOTE
+	if (g_remote_sndbuf) setsockopt(s, SOL_SOCKET, SO_SNDBUF, (const void *)&g_remote_sndbuf, sizeof(int));
+#endif
 	// a client that stops sending, or sends a byte now and then, must not hold the thread: the
 	// whole request (headers and body) must have come within REMOTE_READ_SECONDS
 	const time_t deadline = time(NULL) + REMOTE_READ_SECONDS;
@@ -248,12 +271,18 @@ static void client_thread(void *arg)
 		send_str(s, not_found);
 	} else if (!strncmp(req, "GET /stream", 11) || !strncmp(req, "GET /shot.jpg", 13)) {
 		JpgBuf jb = {NULL, 0, 0};
-		uint8_t *rgb = (uint8_t *)malloc(ui_w() / 2 * (ui_h() / 2) * 3);
-		if (rgb && !strncmp(req, "GET /stream", 11)) {
-			// a phone that sleeps or puts the tab away keeps the connection open without reading;
-			// give up on a stuck send so the thread and socket are freed (the page reconnects)
-			struct timeval tv = {10, 0};
-			setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+		const int stream = !strncmp(req, "GET /stream", 11);
+		// a stream lasts as long as its tab is open: it leaves the requests' slots to the requests
+		// and counts against its own limit (a phone that sleeps keeps it until the send timeout)
+		if (stream && __sync_fetch_and_add(&g_streams, 1) >= REMOTE_MAX_STREAMS) {
+			__sync_fetch_and_sub(&g_streams, 1);
+			send_str(s, "HTTP/1.0 503 Service Unavailable\r\nRetry-After: 5\r\nContent-Length: 0\r\n\r\n");
+		} else if (stream) {
+			__sync_fetch_and_sub(&g_clients, 1);
+			counted = 0;
+		}
+		uint8_t *rgb = stream && counted ? NULL : (uint8_t *)malloc(ui_w() / 2 * (ui_h() / 2) * 3);
+		if (rgb && stream) {
 			if (!send_str(s, "HTTP/1.0 200 OK\r\nCache-Control: no-cache\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\n\r\n")) {
 				while (g_paths & REMOTE_VIEW) {
 					int len = encode_frame(&jb, rgb);
@@ -271,6 +300,7 @@ static void client_thread(void *arg)
 		}
 		free(jb.p);
 		free(rgb);
+		if (stream && !counted) __sync_fetch_and_sub(&g_streams, 1);
 	} else if (!strncmp(req, "GET /dbg?", 9) && g_hooks.debug) {
 		char q[600];
 		size_t k = strcspn(req + 9, " \r\n");
@@ -358,7 +388,7 @@ static void client_thread(void *arg)
 			"</script></html>\n");
 	}
 	close(s);
-	__sync_fetch_and_sub(&g_clients, 1);
+	if (counted) __sync_fetch_and_sub(&g_clients, 1);
 	sysThreadExit(0);
 }
 

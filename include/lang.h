@@ -336,5 +336,8 @@ enum StrId {
 
 void lang_init();
 const char *T(StrId id);
+// A text in English or Swedish whatever the console's language (MCP gives both).
+const char *T_en(StrId id);
+const char *T_sv(StrId id);
 
 #endif

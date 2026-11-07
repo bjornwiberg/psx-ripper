@@ -8,7 +8,11 @@
 #ifndef REMOTE_READ_SECONDS
 #define REMOTE_READ_SECONDS 10   // a request (headers and body) must have come whole by then
 #endif
-#define REMOTE_MAX_CLIENTS 4     // connections served at once; one more gets 503
+#ifndef REMOTE_SEND_SECONDS
+#define REMOTE_SEND_SECONDS 10   // a client that reads nothing for this long is dropped
+#endif
+#define REMOTE_MAX_CLIENTS 4     // requests served at once; one more gets 503
+#define REMOTE_MAX_STREAMS 3     // remote view streams (/stream), counted apart: open tabs never block the requests
 
 struct RemoteHooks {
 	int (*status_json)(char *out, int n);         // current state as JSON
@@ -20,5 +24,7 @@ void remote_init(const RemoteHooks *hooks);
 enum { REMOTE_VIEW = 1, REMOTE_MCP = 2, REMOTE_STATUS = 4 };
 void remote_set(int paths);                       // the paths that answer (REMOTE_*); the server runs while any does
 int remote_ip(char *out, int n);                  // the console's IP address, 0 on success
+// The screen as the remote view shows it (half size, JPEG). 0 on success; free *jpg with free().
+int remote_jpeg(unsigned char **jpg, int *len);
 
 #endif

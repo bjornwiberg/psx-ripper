@@ -6,6 +6,7 @@
 // Run: make -C tests/host   (exit status 1 when a check fails)
 #include "host.h"
 #define CFG_PATH "out/psxrip.cfg"   // not the console's path
+#define LOG_PATH "out/psxrip.log"
 #define main psx_main
 #include "../../source/main.cpp"
 #undef main
@@ -13,6 +14,7 @@
 #include "stb_image_write.h"
 #include <vector>
 #include <string>
+#include <functional>
 
 struct Box { int kind, x, y, w, h, extra; std::string text; };
 static std::vector<Box> g_boxes;
@@ -438,8 +440,296 @@ static void remote_scenarios()
 	reset_all();
 }
 
+// ---------------------------------------------------------------- MCP: state, settings, log
+// Valid UTF-8 (what every hook writes must be)
+static bool utf8_valid(const char *s)
+{
+	const unsigned char *p = (const unsigned char *)s;
+	while (*p) {
+		int n = *p < 0x80 ? 0 : (*p & 0xE0) == 0xC0 && *p >= 0xC2 ? 1 : (*p & 0xF0) == 0xE0 ? 2 : (*p & 0xF8) == 0xF0 && *p <= 0xF4 ? 3 : -1;
+		if (n < 0) return false;
+		p++;
+		for (int i = 0; i < n; i++, p++) if ((*p & 0xC0) != 0x80) return false;
+	}
+	return true;
+}
+static int setting_rows(const char *key, AuditSrc src)   // setting rows of the audit log for key from src
+{
+	static AuditRow r[200];
+	int n = audit_events(AU_SETTINGS, NULL, r, 200), k = 0;
+	for (int i = 0; i < n; i++) if (!strcmp(r[i].what, key) && r[i].src == src) k++;
+	return k;
+}
+static std::string read_file(const char *p)
+{
+	std::string s;
+	FILE *f = fopen(p, "rb");
+	if (!f) return s;
+	char b[4096];
+	size_t k;
+	while ((k = fread(b, 1, sizeof b, f)) > 0) s.append(b, k);
+	fclose(f);
+	return s;
+}
+// A screen loop run by a script: each frame (the screen's flip) calls the step with the frame's
+// number and what it drew; the step returns the buttons to press next (as the remote view's pad).
+static std::function<int(int)> g_step;
+static int g_step_frame;
+static void step_frame()
+{
+	int b = g_step ? g_step(++g_step_frame) : B_CIRCLE;
+	if (g_step_frame > 400) b = B_CIRCLE;   // a script that never ends: leave
+	g_boxes.clear();
+	if (b) __sync_fetch_and_or(&g_remote_btn, b);
+}
+static void run_screen(std::function<void()> screen, std::function<int(int)> step)
+{
+	static uint32_t fb[1920 * 1080];   // the screen's buffers: present() copies the canvas there
+	color_buffer[0] = color_buffer[1] = fb;
+	g_step = step; g_step_frame = 0;
+	host_frame = step_frame;
+	g_boxes.clear();
+	screen();
+	host_frame = NULL;
+	g_step = nullptr;
+}
+
+static void mcp_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp: %s%s%.300s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
+	reset_all(); usb(0, 0); usb(1, 2);   // the PS3's drive, USB drives on ports 0 and 2
+	for (int c = 0; c < 3; c++) g_cards[c].tried = 1;   // identified already (no identify thread here)
+	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
+	g_webhook[0] = 0; g_webhook_hdr[0][0] = 0; g_webhook_on = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5;
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	g_remote = g_mcp = g_status_json = 0; g_audit_mb = 256;
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();   // primes
+	const McpHooks &h = g_mcp_hooks;
+	mcp_init(&g_mcp_hooks, APP_VERSION);   // as the app does at start
+	static char out[MCP_MAX_RESPONSE];
+	const char *SECRET_URL = "http://10.0.0.9:8123/api/webhook/SECRETWEBHOOKID", *SECRET_HDR = "Authorization: Bearer TOPSECRETTOKEN";
+	std::vector<std::string> said;   // every hook answer: none may hold a secret
+
+	// list_settings: every setting with its scope, labels (en/sv), value and allowed values
+	{
+		int rc = h.list_settings(out, sizeof out);
+		said.push_back(out);
+		FILE *f = fopen("out/mcp-settings.json", "w"); if (f) { fputs(out, f); fclose(f); }
+		need(rc == 0, "list_settings answers", out);
+		need(!system("python3 check_settings.py out/mcp-settings.json internal usb0 usb2"), "list_settings covers every setting (check_settings.py)");
+		need(strstr(out, "\"key\":\"speed\",\"scope\":\"standard\",\"label\":{\"en\":\"Read speed\",\"sv\":\"Läshastighet\"}") != NULL, "speed with its labels", out);
+		need(strstr(out, "{\"value\":\"0\",\"label\":{\"en\":\"Max\",\"sv\":\"Max\"}}") != NULL, "speed's value 0 is Max", out);
+		need(strstr(out, "{\"value\":\"2\",\"label\":{\"en\":\"Bit-perfect\",\"sv\":\"Bitperfekt\"}}") != NULL, "check's value 2 is Bit-perfect");
+		need(strstr(out, "{\"value\":\"-1\",\"label\":{\"en\":\"Standard (4)\",\"sv\":\"Standard (4)\"}}") != NULL, "a drive's -1 says the standard's value");
+		need(strstr(out, "\"key\":\"webhook\",\"scope\":\"standard\"") && strstr(out, "\"is_set\":false"), "the webhook address: is_set false");
+		need(utf8_valid(out), "list_settings is valid UTF-8");
+	}
+	// set_setting: the screens' values only, applied, saved, logged with source mcp
+	{
+		int rc = h.set_setting("speed", "3", NULL, out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && g_std.speed == 3, "speed 3 (2x) is set", out);
+		need(strstr(out, "\"key\":\"speed\"") && strstr(out, "\"value\":\"3\""), "set_setting answers with the new value", out);
+		need(setting_rows("speed", AU_MCP) == 1, "the change is an audit row with source mcp");
+		need(read_file("out/psxrip.cfg").find("\nspeed=3\n") != std::string::npos, "the change is saved");
+		rc = h.set_setting("speed", "9", NULL, out, sizeof out);
+		need(rc != 0 && g_std.speed == 3 && strstr(out, "Allowed"), "speed 9 is refused with the allowed values", out);
+		rc = h.set_setting("retries", "64", NULL, out, sizeof out);
+		need(rc != 0 && g_std.retries == 4, "retries 64 is refused (the screens offer up to 32)", out);
+		rc = h.set_setting("retries", "8", NULL, out, sizeof out);
+		need(rc == 0 && g_std.retries == 8, "retries 8", out);
+		rc = h.set_setting("nope", "1", NULL, out, sizeof out);
+		need(rc != 0 && strstr(out, "list_settings"), "an unknown key is refused", out);
+		rc = h.set_setting("speed", "-1", NULL, out, sizeof out);
+		need(rc != 0, "the standard itself cannot be \"standard\"", out);
+		rc = h.set_setting("redump", "1", NULL, out, sizeof out);
+		need(rc == 0 && g_redump == RD_ONLINE, "redump online", out);
+		rc = h.set_setting("redump", "1", "usb0", out, sizeof out);
+		need(rc != 0, "redump has no per-drive value", out);
+		rc = h.set_setting("destination", "/dev_hdd0/PSXISO", NULL, out, sizeof out);
+		need(rc != 0, "destination needs a drive", out);
+		// a drive's own values, like the drive's settings (SELECT)
+		rc = h.set_setting("speed", "1", "usb2", out, sizeof out);
+		need(rc == 0 && g_cards[2].speed == 1 && g_usbcfg[2].set && g_usbcfg[2].speed == 1, "usb2's own speed", out);
+		need(setting_rows("drive_usb2", AU_MCP) == 1, "usb2's change is an audit row drive_usb2 with source mcp");
+		rc = h.set_setting("speed", "-1", "usb2", out, sizeof out);
+		need(rc == 0 && g_cards[2].speed == -1, "usb2 back to the standard speed", out);
+		rc = h.set_setting("speed", "1", "usb5", out, sizeof out);
+		need(rc != 0, "a drive that is not there is refused", out);
+		g_cards[1].job = 1;
+		rc = h.set_setting("speed", "1", "usb0", out, sizeof out);
+		need(rc != 0 && g_cards[1].speed == -1 && strstr(out, "busy"), "a busy drive's settings are refused", out);
+		rc = h.set_setting("destination", "/dev_hdd0/PSXISO", "usb0", out, sizeof out);
+		need(rc != 0, "a busy drive's destination is refused", out);
+		g_cards[1].job = 0;
+		rc = h.set_setting("destination", "/dev_hdd0/PSXISO", "internal", out, sizeof out);
+		need(rc == 0 && !strcmp(g_cards[0].outdir, "/dev_hdd0/PSXISO"), "the internal drive's destination", out);
+		rc = h.set_setting("destination", "/dev_hdd0/ELSEWHERE", "internal", out, sizeof out);
+		need(rc != 0, "a destination that is not offered is refused", out);
+		// switches, webhook events and progress, the file name, the audit size
+		rc = h.set_setting("status_json", "1", NULL, out, sizeof out);
+		need(rc == 0 && g_status_json == 1, "status_json on", out);
+		rc = h.set_setting("webhook_event_rip_started", "1", NULL, out, sizeof out);
+		need(rc == 0 && (g_webhook_mask >> WH_RIP_STARTED & 1), "the rip_started event on", out);
+		need(setting_rows("webhook_events", AU_MCP) == 1, "the event is an audit row webhook_events");
+		rc = h.set_setting("webhook_progress", "10", NULL, out, sizeof out);
+		need(rc == 0 && (g_webhook_mask >> WH_RIP_PROGRESS & 1) && g_webhook_step == 10, "progress every 10 %", out);
+		rc = h.set_setting("webhook_progress", "0", NULL, out, sizeof out);
+		need(rc == 0 && !(g_webhook_mask >> WH_RIP_PROGRESS & 1), "progress off", out);
+		rc = h.set_setting("webhook_progress", "3", NULL, out, sizeof out);
+		need(rc != 0, "progress every 3 % is not offered", out);
+		rc = h.set_setting("name_pattern", "%T (%R)", NULL, out, sizeof out);
+		need(rc == 0 && !strcmp(g_name_pat, "%T (%R)") && strstr(out, "\"value\":\"%T (%R)\""), "an own file name pattern", out);
+		rc = h.set_setting("name_pattern", "", NULL, out, sizeof out);
+		need(rc == 0 && !strcmp(g_name_pat, FN_PRESETS[0]), "an empty pattern is the first ready-made one", out);
+		rc = h.set_setting("audit_mb", "64", NULL, out, sizeof out);
+		need(rc == 0 && g_audit_mb == 64, "audit_mb 64", out);
+		rc = h.set_setting("audit_mb", "100", NULL, out, sizeof out);
+		need(rc != 0 && g_audit_mb == 64, "audit_mb 100 is not offered", out);
+		// secrets: set, never shown; the audit says set
+		rc = h.set_setting("webhook", SECRET_URL, NULL, out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && !strcmp(g_webhook, SECRET_URL) && strstr(out, "\"is_set\":true"), "the webhook address is set", out);
+		rc = h.set_setting("webhook_header1", SECRET_HDR, NULL, out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && !strcmp(g_webhook_hdr[0], SECRET_HDR) && strstr(out, "\"is_set\":true"), "header 1 is set", out);
+		rc = h.set_setting("webhook_header2", "no colon here", NULL, out, sizeof out);
+		need(rc != 0 && !g_webhook_hdr[1][0], "a header without \"Name: value\" is refused", out);
+		{
+			static AuditRow r[200];
+			int n = audit_events(AU_SETTINGS, NULL, r, 200), ok = 0;
+			for (int i = 0; i < n; i++) if (!strcmp(r[i].what, "webhook_header1") && r[i].src == AU_MCP && !strcmp(r[i].after, "set")) ok = 1;
+			need(ok, "the header is an audit row \"set\" with source mcp");
+		}
+		g_cards[0].pend_cfg = 0;
+		// through the request handling: a number as the value (agents send 4, not "4")
+		const char *req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"set_setting\",\"arguments\":{\"key\":\"retries\",\"value\":16}}}";
+		mcp_handle(req, (int)strlen(req), out, sizeof out);
+		need(strstr(out, "\"isError\":false") && g_std.retries == 16, "set_setting over JSON-RPC with a number", out);
+		req = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"list_settings\"}}";
+		mcp_handle(req, (int)strlen(req), out, sizeof out);
+		need(strstr(out, "\"isError\":false") && strstr(out, "audit_mb"), "list_settings over JSON-RPC fits the response", out);
+		said.push_back(out);
+	}
+	// the open settings screen shows a value changed over MCP, and its own changes do not undo it
+	{
+		int seen_new = 0, row1 = 0;
+		std::string st0, st_dlg;
+		run_screen(settings_screen, [&](int f) -> int {
+			if (f == 1) {
+				h.state(out, sizeof out); st0 = out;
+				h.set_setting("speed", "1", NULL, out, sizeof out);   // 8x
+				return 0;
+			}
+			if (f < 6) { if (has_text("8×")) seen_new = 1; return 0; }
+			if (f == 6) return B_DOWN;
+			if (f == 8) { h.state(out, sizeof out); row1 = strstr(out, "\"row\":1") != NULL; return B_RIGHT; }   // retries 16 -> 32
+			if (f == 10) return B_TRIANGLE;   // "reset?" dialog
+			if (f == 12) { h.state(out, sizeof out); st_dlg = out; return B_CIRCLE; }   // no
+			if (f == 14) return B_CIRCLE;
+			return 0;
+		});
+		need(strstr(st0.c_str(), "\"screen\":\"settings\"") && strstr(st0.c_str(), "\"row\":0"), "get_state on the settings: screen and row", st0.c_str());
+		need(seen_new, "the open settings screen shows the speed MCP set");
+		need(row1, "get_state follows the row");
+		need(strstr(st_dlg.c_str(), "\"screen\":\"dialog\"") && strstr(st_dlg.c_str(), "\"question\":true") && strstr(st_dlg.c_str(), "\"over\":\"settings\""),
+		     "get_state shows the open question", st_dlg.c_str());
+		need(g_std.speed == 1 && g_std.retries == 32, "the screen's own change kept MCP's speed");
+		need(setting_rows("speed", AU_MCP) == 2 && setting_rows("speed", AU_REMOTE) == 0, "MCP's speed saved once, never again by the screen");
+		need(setting_rows("retries", AU_REMOTE) == 1, "the screen's change is its own row");
+	}
+	// get_state on the home screen and a drive's settings: the tab, the drive, the buttons
+	{
+		std::string a, b;
+		run_screen([]() { home_screen(); }, [&](int f) -> int {
+			if (f == 2) { h.state(out, sizeof out); a = out; return B_R1; }
+			if (f == 4) { h.state(out, sizeof out); b = out; return B_CIRCLE; }
+			return 0;
+		});
+		need(strstr(a.c_str(), "\"screen\":\"home\"") && strstr(a.c_str(), "\"tab\":\"internal\""), "get_state on the home screen", a.c_str());
+		need(strstr(a.c_str(), "\"buttons\":[") && strstr(a.c_str(), "\"button\":\"select\""), "get_state lists the hint bar's buttons", a.c_str());
+		need(strstr(b.c_str(), "\"tab\":\"usb0\""), "get_state: the next tab is usb0", b.c_str());
+		run_screen([]() { drive_settings_screen(2); }, [&](int f) -> int {
+			if (f == 2) { h.state(out, sizeof out); a = out; return B_CIRCLE; }
+			return 0;
+		});
+		need(strstr(a.c_str(), "\"screen\":\"drive_settings\"") && strstr(a.c_str(), "\"drive\":\"usb2\""), "get_state on usb2's settings", a.c_str());
+		said.push_back(a);
+	}
+	// get_drives: status.json's drives, each with the id the tools take
+	{
+		snprintf(g_cards[0].title, sizeof g_cards[0].title, "Bad \xff\xfe bytes \xc3");   // not UTF-8 (a disc's own text)
+		int rc = h.drives(out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && strstr(out, "\"id\":\"internal\"") && strstr(out, "\"id\":\"usb0\"") && strstr(out, "\"id\":\"usb2\""), "get_drives with each drive's id", out);
+		need(utf8_valid(out), "get_drives is valid UTF-8 with a title that is not");
+		rc = h.state(out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && utf8_valid(out), "get_state is valid UTF-8 with a title that is not");
+		disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+	}
+	// read_log: pages of psxrip.log, the next line number, secrets taken out
+	{
+		FILE *f = fopen(LOG_PATH, "w");
+		for (int i = 0; i < 10; i++) fprintf(f, "line %d\n", i);
+		fprintf(f, "posting to %s now\n", SECRET_URL);
+		fprintf(f, "header %s sent\n", SECRET_HDR);
+		fprintf(f, "bad \xff bytes\n");
+		fclose(f);
+		int rc = h.read_log(0, 3, out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && strstr(out, "\"from\":0") && strstr(out, "\"next\":3") && strstr(out, "\"total\":13") && strstr(out, "[\"line 0\",\"line 1\",\"line 2\"]"), "read_log from 0, 3 lines", out);
+		rc = h.read_log(3, 2, out, sizeof out);
+		need(rc == 0 && strstr(out, "[\"line 3\",\"line 4\"]") && strstr(out, "\"next\":5"), "read_log from 3", out);
+		rc = h.read_log(-1, 3, out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && strstr(out, "\"from\":10") && strstr(out, "\"next\":13") && strstr(out, "[secret]"), "read_log: the last 3 lines, secrets taken out", out);
+		need(utf8_valid(out), "read_log is valid UTF-8 with a line that is not", out);
+		rc = h.read_log(50, 3, out, sizeof out);
+		need(rc == 0 && strstr(out, "\"lines\":[]") && strstr(out, "\"next\":13"), "read_log past the end: nothing, next is the end", out);
+		f = fopen(LOG_PATH, "w");   // a log larger than one answer: it stops at the room it has
+		std::string longl(3000, 'x');
+		for (int i = 0; i < 500; i++) fprintf(f, "%d %s\n", i, longl.c_str());
+		fclose(f);
+		rc = h.read_log(0, 500, out, 100000);
+		need(rc == 0 && strlen(out) <= (100000 - 200) / 2 && strstr(out, "\"truncated\":true"), "read_log stays within half its buffer", out);
+		remove(LOG_PATH);
+		rc = h.read_log(-1, 10, out, sizeof out);
+		need(rc == 0 && strstr(out, "\"lines\":[]") && strstr(out, "\"total\":0"), "read_log without a log", out);
+	}
+	// no answer ever holds a secret
+	for (auto &s : said)
+		need(s.find("SECRETWEBHOOKID") == std::string::npos && s.find("TOPSECRETTOKEN") == std::string::npos, "a secret in a tool's answer", s.c_str());
+	{
+		int rc = h.list_settings(out, sizeof out);
+		need(rc == 0 && !strstr(out, "SECRETWEBHOOKID") && !strstr(out, "TOPSECRETTOKEN") && strstr(out, "\"key\":\"webhook\",\"scope\":\"standard\""), "list_settings after the secrets were set", out);
+		std::string lg = read_file(LOG_PATH);
+		need(lg.find("SECRETWEBHOOKID") == std::string::npos && lg.find("TOPSECRETTOKEN") == std::string::npos, "a secret in psxrip.log");
+	}
+	need(h.screenshot_jpeg != NULL, "get_screenshot has its hook (the encoder is tested in remote_test)");
+
+	g_webhook[0] = 0; g_webhook_hdr[0][0] = 0; g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; g_audit_mb = 256; audit_apply_cap();
+	g_remote = g_mcp = g_status_json = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5;
+	for (int c = 0; c < NCARDS; c++) card_defaults(g_cards[c]);
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	system("rm -rf out/audit out/psxrip.cfg");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   MCP: state, drives, settings (list, set, the open screen), log, no secrets\n");
+}
+
 int main()
 {
+	setvbuf(stdout, NULL, _IONBF, 0);   // every line out before a crash
 	system("mkdir -p out");
 	ui_init();
 	lang_init();
@@ -1053,6 +1343,7 @@ int main()
 		audit_set_hooks(set_setting_hook, NULL);
 		if (bad) g_fail += bad; else printf("ok   undoing an audit_mb row applies the cap at once\n");
 	}
+	mcp_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

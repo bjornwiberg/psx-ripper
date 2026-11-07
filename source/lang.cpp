@@ -685,3 +685,6 @@ const char *T(StrId id)
 	const char *s = table[id];
 	return s ? s : en[id];
 }
+
+const char *T_en(StrId id) { return en[id]; }
+const char *T_sv(StrId id) { return sv[id] ? sv[id] : en[id]; }

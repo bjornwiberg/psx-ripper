@@ -11,10 +11,10 @@ audit_test: audit_test.cpp ../../include/audit.h $(SRC)/audit.cpp
 MCP_SAN ?= $(if $(filter Darwin,$(shell uname -s)),-fsanitize=undefined,-fsanitize=address,undefined)
 mcp_test: mcp_test.cpp ../../include/mcp.h $(SRC)/mcp.cpp
 	$(CXX) $(CXXFLAGS) $(MCP_SAN) -fno-sanitize-recover=all -fno-omit-frame-pointer mcp_test.cpp $(SRC)/mcp.cpp -o mcp_test
-# the web server's paths and switches, over loopback on port 8090 (a 2 s request deadline, so the
+# the web server's paths and switches, over loopback on port 8090 (2 s request and send deadlines, so the
 # slow-client checks are quick)
 remote_test: remote_test.cpp ../../include/remote.h ../../include/mcp.h $(SRC)/remote.cpp $(SRC)/mcp.cpp
-	$(CXX) $(CXXFLAGS) -DHOST_REMOTE -DREMOTE_READ_SECONDS=2 -pthread remote_test.cpp $(SRC)/remote.cpp $(SRC)/mcp.cpp -o remote_test
+	$(CXX) $(CXXFLAGS) -DHOST_REMOTE -DREMOTE_READ_SECONDS=2 -DREMOTE_SEND_SECONDS=2 -pthread remote_test.cpp $(SRC)/remote.cpp $(SRC)/mcp.cpp -o remote_test
 run: ui_test audit_test mcp_test remote_test
 	./ui_test
 	./audit_test

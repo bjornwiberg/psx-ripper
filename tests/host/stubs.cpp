@@ -37,7 +37,8 @@ u32 display_width = 1920, display_height = 1080, color_pitch = 1920 * 4, curr_fb
 u32 *color_buffer[2];
 int flip_timeouts = 0;
 gcmContextData *context = 0;
-void flip_sync() {}
+void (*host_frame)() = 0;
+void flip_sync() { if (host_frame) host_frame(); }
 void flip() {}
 #ifdef HOST_REMOTE
 void waitflip() { usleep(16 * 1000); }   // about 60 frames per second, as on the console
@@ -176,6 +177,7 @@ int netCtlGetInfo(int, union net_ctl_info *info)   // this computer's first LAN 
 void remote_init(const RemoteHooks *) {}
 void remote_set(int) {}
 int remote_ip(char *out, int n) { snprintf(out, n, "192.168.1.50"); return 0; }
+int remote_jpeg(unsigned char **jpg, int *len) { *jpg = NULL; *len = 0; return -1; }   // the encoder is remote.cpp's (remote_test)
 #endif
 void json_str(char *out, size_t n, const char *s) { size_t o = strlen(out); snprintf(out + o, n - o, "\"%s\"", s); }
 int webhook_event_index(const char *) { return -1; }

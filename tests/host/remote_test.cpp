@@ -41,8 +41,19 @@ void sysThreadExit(u64) { pthread_exit(NULL); }
 // remote.cpp (HOST_REMOTE): how long the server thread waits once it has decided to stop, so a
 // test can switch on again in exactly that moment
 extern volatile int g_remote_stop_delay_ms;
+// and the send buffer of its client sockets (0: the system's, which grows to megabytes here)
+extern volatile int g_remote_sndbuf;
 
 static int status_hook(char *out, int n) { snprintf(out, n, "{\"drives\":[]}"); return 0; }
+// get_state answers with a large text: a client that never reads it fills the socket buffers
+static int big_state(char *out, int n)
+{
+	int k = n / 2 - 300;
+	if (k > 250000) k = 250000;
+	memset(out, '"', k);   // each one escaped: twice as long in the answer
+	out[k] = 0;
+	return 0;
+}
 static int press_hook(const char *b) { return strcmp(b, "cross") != 0; }
 
 struct Resp { int status; std::string head, body; };
@@ -150,7 +161,7 @@ int main()
 	signal(SIGPIPE, SIG_IGN);
 	setvbuf(stdout, NULL, _IONBF, 0);
 	static const RemoteHooks hooks = {status_hook, NULL, press_hook};
-	static const McpHooks mh = {};
+	static const McpHooks mh = {big_state, remote_jpeg};
 	remote_init(&hooks);
 	mcp_init(&mh, "test");
 	const std::string init = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}";
@@ -247,6 +258,65 @@ int main()
 		usleep(300 * 1000);
 		r = http(post("/mcp", init));
 		expect(r.status == 200, "after they closed: served again", r);
+	}
+
+	{   // a client that asks and then never reads the answer is dropped after REMOTE_SEND_SECONDS:
+		// it cannot hold a slot (and its buffers) for ever
+		const std::string ask = "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"get_state\"}}";
+		const std::string req = post("/mcp", ask);
+		g_remote_sndbuf = 8192;
+		int hold[REMOTE_MAX_CLIENTS];
+		for (int i = 0; i < REMOTE_MAX_CLIENTS; i++) {
+			hold[i] = socket(AF_INET, SOCK_STREAM, 0);
+			int small = 2048;
+			setsockopt(hold[i], SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));   // a small window: the answer cannot all be sent
+			struct sockaddr_in a;
+			memset(&a, 0, sizeof(a));
+			a.sin_family = AF_INET; a.sin_port = htons(REMOTE_PORT); a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+			if (connect(hold[i], (struct sockaddr *)&a, sizeof(a))) { close(hold[i]); hold[i] = -1; continue; }
+			send(hold[i], req.data(), req.size(), 0);
+		}
+		usleep(500 * 1000);
+		r = http(post("/mcp", init));
+		expect(r.status == 503, "clients that do not read their answers hold every slot for now", r);
+		usleep((REMOTE_SEND_SECONDS + 2) * 1000 * 1000);
+		r = http(post("/mcp", init));
+		expect(r.status == 200, "after the send timeout their slots are free again", r);
+		g_remote_sndbuf = 0;
+		for (int i = 0; i < REMOTE_MAX_CLIENTS; i++) if (hold[i] >= 0) close(hold[i]);
+		usleep(200 * 1000);
+	}
+	{   // remote view streams have their own limit: open tabs never make the requests answer 503
+		int st[REMOTE_MAX_STREAMS + 1], idle[REMOTE_MAX_CLIENTS - 1];
+		const char *get = "GET /stream HTTP/1.1\r\nHost: x\r\n\r\n";
+		for (int i = 0; i < REMOTE_MAX_STREAMS; i++) { st[i] = dial(); if (st[i] >= 0) send(st[i], get, strlen(get), 0); }
+		usleep(400 * 1000);   // each is a stream now
+		st[REMOTE_MAX_STREAMS] = dial();
+		send(st[REMOTE_MAX_STREAMS], get, strlen(get), 0);
+		Resp over = answer(st[REMOTE_MAX_STREAMS], 2);
+		expect(over.status == 503, "a stream over the streams' limit: 503", over);
+		for (int i = 0; i < REMOTE_MAX_CLIENTS - 1; i++) idle[i] = dial();   // and the requests' slots all but one taken
+		usleep(300 * 1000);
+		r = http(post("/mcp", init));
+		expect(r.status == 200, "with the streams open and other clients waiting, /mcp still answers", r);
+		for (int i = 0; i < REMOTE_MAX_CLIENTS - 1; i++) if (idle[i] >= 0) close(idle[i]);
+		for (int i = 0; i < REMOTE_MAX_STREAMS; i++) if (st[i] >= 0) close(st[i]);
+		usleep(REMOTE_SEND_SECONDS * 1000 * 1000 + 700 * 1000);   // a closed stream ends at its next frame
+		int s2 = dial();
+		send(s2, get, strlen(get), 0);
+		Resp again = answer(s2, 1);
+		expect(again.status == 200 && again.head.find("multipart/x-mixed-replace") != std::string::npos, "after they closed a stream is served again", again);
+	}
+	{   // get_screenshot: the remote view's encoder, as image content
+		unsigned char *jpg = NULL;
+		int len = 0;
+		Resp none = {0, "", ""};
+		int rc = remote_jpeg(&jpg, &len);
+		expect(rc == 0 && len > 4 && jpg[0] == 0xFF && jpg[1] == 0xD8 && jpg[len - 2] == 0xFF && jpg[len - 1] == 0xD9, "remote_jpeg: a whole JPEG", none);
+		free(jpg);
+		r = http(post("/mcp", "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/call\",\"params\":{\"name\":\"get_screenshot\"}}"));
+		expect(r.status == 200 && r.body.find("\"type\":\"image\"") != std::string::npos && r.body.find("\"data\":\"/9j/") != std::string::npos &&
+		       r.body.find("image/jpeg") != std::string::npos, "get_screenshot over MCP: image content", r);
 	}
 
 	{   // switched off and on again at once (or nearly): the server still answers

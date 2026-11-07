@@ -8,6 +8,7 @@
 #define MCP_PROTOCOL_VERSION "2025-06-18"
 #define MCP_MAX_LOG_LINES 500          // read_log's max_lines may not be larger
 #define MCP_DEFAULT_LOG_LINES 100
+#define MCP_MAX_RESPONSE (512 * 1024)   // the response buffer: a screenshot (base64) is the largest answer
 
 // Every hook returns 0 and writes a JSON value (NUL-terminated, at most n bytes with the NUL)
 // into out, or returns non-zero and writes a plain English message (why it was refused, "busy",
