@@ -1013,6 +1013,273 @@ static void mcp_settings_scenarios()
 	if (bad) g_fail += bad; else printf("ok   MCP: control characters, the screens' values, switches, destinations, threads, log secrets\n");
 }
 
+// ---------------------------------------------------------------- MCP: the screen and the jobs (requests the UI thread takes)
+// The app's UI runs on a thread of its own here (home_screen, as on the console) and this thread is
+// MCP's: it calls the hooks as the web server does. Each frame runs what the test hands the UI
+// thread (on_ui) and takes the pad presses (g_remote_btn, as the remote view's pad).
+static volatile int g_bg_quit, g_bg_frames, g_bg_job_set;
+static std::function<void()> g_bg_job;
+static pthread_t g_bg_t;
+static void bg_frame()
+{
+	usleep(1000);
+	g_boxes.clear();
+	if (g_bg_job_set) { g_bg_job(); __sync_synchronize(); g_bg_job_set = 0; }
+	if (g_bg_quit) __sync_fetch_and_or(&g_remote_btn, B_CIRCLE);
+	__sync_fetch_and_add(&g_bg_frames, 1);
+}
+static void bg_frames(int n)
+{
+	int f0 = g_bg_frames;
+	uint64_t t0 = now_ms();
+	while (g_bg_frames - f0 < n && now_ms() - t0 < 5000) usleep(500);
+}
+static void on_ui(std::function<void()> fn)   // runs fn on the UI thread, in a frame (inside flip_frame)
+{
+	g_bg_job = fn;
+	__sync_synchronize();
+	g_bg_job_set = 1;
+	uint64_t t0 = now_ms();
+	while (g_bg_job_set && now_ms() - t0 < 5000) usleep(500);
+}
+static void pad(int bits) { __sync_fetch_and_or(&g_remote_btn, bits); bg_frames(4); }
+static void bg_start()
+{
+	static uint32_t fb[1920 * 1080];
+	color_buffer[0] = color_buffer[1] = fb;
+	g_bg_quit = 0;
+	host_frame = bg_frame;
+	pthread_create(&g_bg_t, NULL, [](void *) -> void * { while (!g_bg_quit) home_screen(); return NULL; }, NULL);
+	bg_frames(3);
+}
+static void bg_stop()
+{
+	g_bg_quit = 1;
+	pthread_join(g_bg_t, NULL);
+	host_frame = NULL;
+	g_remote_btn = 0;
+}
+static int cx_of(int c, int which)   // card c's context: 0 g_skip, 1 g_abort, 2 g_speed
+{
+	OnCard oc(c);
+	return which == 0 ? g_skip : which == 1 ? g_abort : g_speed;
+}
+static int job_rows(const char *what, AuditSrc src)   // job rows (rip, check, repair) of the audit log
+{
+	static AuditRow r[200];
+	int n = audit_events(AU_RIPS, NULL, r, 200), k = 0;
+	for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, "job") && !strcmp(r[i].what, what) && r[i].src == src) k++;
+	return k;
+}
+
+static void mcp_ui_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp ui: %s%s%.400s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
+	reset_all(); usb(0, 0); usb(1, 2);   // the PS3's drive, USB drives on ports 0 (usb0) and 2 (usb2, empty)
+	for (int c = 0; c < 3; c++) g_cards[c].tried = 1;
+	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
+	g_webhook[0] = 0; g_webhook_on = 0; g_webhook_mask = WH_DEFAULT_MASK;
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	g_remote = g_mcp = g_status_json = 0;
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();
+	const McpHooks &h = g_mcp_hooks;
+	mcp_init(&g_mcp_hooks, APP_VERSION);
+	static char outb[MCP_MAX_RESPONSE];
+	std::string out;
+	auto call = [&](const char *tool, const char *arg) { int rc = h.ui(tool, arg, outb, sizeof outb); out = outb; return rc; };
+	auto has = [&](const char *s) { return out.find(s) != std::string::npos; };
+	const char *o = NULL;
+	#define O (o = out.c_str())
+
+	bg_start();
+	// go_tab: the home screen's tab
+	{
+		int rc = call("go_tab", "usb0");
+		need(rc == 0 && has("\"screen\":\"home\"") && has("\"tab\":\"usb0\""), "go_tab usb0", O);
+		rc = call("go_tab", "usb5");
+		need(rc != 0 && has("usb5"), "go_tab to a drive that is not there is refused", O);
+		rc = call("go_tab", "internal");
+		need(rc == 0 && has("\"tab\":\"internal\""), "go_tab internal", O);
+	}
+	// go_screen: any screen from any screen, the way the pad goes (back, then in)
+	{
+		int rc = call("go_screen", "settings");
+		need(rc == 0 && has("\"screen\":\"settings\"") && has("\"row\":0"), "go_screen settings", O);
+		rc = call("press_button", "down");
+		need(rc == 0 && has("\"screen\":\"settings\"") && has("\"row\":1"), "press_button down on the settings", O);
+		rc = call("go_screen", "remote_control");
+		need(rc == 0 && has("\"screen\":\"remote_control\""), "go_screen remote_control", O);
+		rc = call("go_screen", "webhooks");
+		need(rc == 0 && has("\"screen\":\"webhooks\""), "go_screen webhooks from remote_control", O);
+		rc = call("go_screen", "drive_settings:usb2");
+		need(rc == 0 && has("\"screen\":\"drive_settings\"") && has("\"drive\":\"usb2\"") && has("\"tab\":\"usb2\""), "go_screen drive_settings usb2 from webhooks", O);
+		rc = call("go_screen", "drive_settings:usb0");
+		need(rc == 0 && has("\"screen\":\"drive_settings\"") && has("\"drive\":\"usb0\""), "go_screen drive_settings usb0 from usb2's", O);
+		const char *screens[] = {"audit_log", "filename", "about", "settings", "home"};
+		for (const char *s : screens) {
+			rc = call("go_screen", s);
+			char want[64], what[80];
+			snprintf(want, sizeof want, "\"screen\":\"%s\"", s);
+			snprintf(what, sizeof what, "go_screen %s", s);
+			need(rc == 0 && has(want), what, O);
+		}
+		rc = call("go_screen", "drive_settings:usb7");
+		need(rc != 0 && has("usb7"), "go_screen drive_settings of a drive that is not there", O);
+	}
+	// a dialog: only press_button answers it; everything else is refused at once with its text
+	{
+		call("go_screen", "settings");
+		int rc = call("press_button", "triangle");   // "reset the settings?"
+		need(rc == 0 && has("\"screen\":\"dialog\"") && has("\"question\":true"), "press_button triangle opens the question", O);
+		uint64_t t0 = now_ms();
+		rc = call("go_screen", "home");
+		need(rc != 0 && has("dialog") && has("press_button") && now_ms() - t0 < 1000, "go_screen with a dialog open is refused at once", O);
+		rc = call("rip", "internal");
+		need(rc != 0 && has("dialog"), "an action with a dialog open is refused", O);
+		rc = call("press_button", "circle");   // no
+		need(rc == 0 && has("\"screen\":\"settings\"") && has("\"dialog\":null"), "press_button circle answers no", O);
+		need(g_std.retries == 4, "the settings were not reset");
+		rc = call("go_screen", "home");
+		need(rc == 0 && has("\"screen\":\"home\""), "home again", O);
+	}
+	// the actions: the pad's checks, the reasons in the app's words, the tab shown
+	{
+		int rc = call("rip", "usb2");
+		need(rc != 0 && has("no disc"), "rip on an empty drive is refused: no disc", O);
+		rc = call("rip", "usb0");
+		need(rc == 0 && has("\"tab\":\"usb0\"") && job_rows("rip", AU_MCP) == 1, "rip usb0 starts a rip (source mcp) on its tab", O);
+		on_ui([]() { g_cards[1].job = 1; });   // usb0 rips
+		rc = call("eject", "usb0");
+		need(rc != 0 && has("cannot be ejected") && g_cards[1].state == DISC_READY, "eject while ripping is refused", O);
+		pad(B_TRIANGLE);
+		need(g_cards[1].state == DISC_READY, "the pad's eject while ripping does nothing either");
+		rc = call("rip", "usb0");
+		need(rc != 0 && job_rows("rip", AU_MCP) == 1, "rip on a ripping drive is refused", O);
+		rc = call("go_screen", "drive_settings:usb0");
+		need(rc != 0 && has("\"screen\"") == false, "a ripping drive's settings do not open", O);
+		rc = call("skip_rereads", "usb0");
+		need(rc != 0 && has("not re-reading"), "skip_rereads while not re-reading is refused", O);
+		on_ui([]() { OnCard oc(1); g_phase = 1; });
+		rc = call("skip_rereads", "usb0");
+		need(rc == 0 && cx_of(1, 0) == 1, "skip_rereads while re-reading", O);
+		rc = call("cancel", "usb0");
+		need(rc == 0 && has("\"screen\":\"home\"") && cx_of(1, 1) == 1, "cancel: the call is the confirmation (no dialog)", O);
+		need(read_file(LOG_PATH).find("cancel") != std::string::npos, "the cancel is logged");
+		on_ui([]() { g_cards[1].job = 0; OnCard oc(1); g_abort = 0; g_skip = 0; g_phase = 0; });
+		rc = call("cancel", "usb0");
+		need(rc != 0 && has("Nothing runs"), "cancel with nothing running is refused", O);
+		rc = call("check", "usb2");
+		need(rc != 0, "check on an empty drive is refused", O);
+		on_ui([]() { ripped(0, -1, 0); });
+		rc = call("check", "internal");
+		need(rc == 0 && has("\"tab\":\"internal\"") && job_rows("check", AU_MCP) == 1, "check internal starts a check (source mcp)", O);
+		rc = call("repair", "usb0");
+		need(rc != 0 && job_rows("repair", AU_MCP) == 0, "repair without a rip to repair is refused", O);
+		rc = call("eject", "usb0");
+		need(rc == 0 && g_cards[1].state == DISC_NONE, "eject usb0", O);
+		// the pad goes through the same checks: X on the internal drive rips (source: the remote pad)
+		on_ui([]() { g_cards[0].prev_rip = 0; g_cards[0].exist[0] = 0; g_cards[0].state = DISC_READY; });
+		call("go_tab", "internal");
+		pad(B_CROSS);
+		need(job_rows("rip", AU_REMOTE) == 1, "the pad's X rips through the same check");
+	}
+	// set_setting, then rip in the same frame: the rip uses the new value (the card takes it first)
+	{
+		on_ui([]() { g_cards[0].state = DISC_READY; g_cards[0].prev_rip = 0; OnCard oc(0); g_speed = 0; });
+		call("go_tab", "internal");
+		on_ui([]() {
+			static char o2[4096];
+			g_mcp_hooks.set_setting("speed", "1", "internal", o2, sizeof o2);   // after this frame's take
+			__sync_fetch_and_or(&g_remote_btn, B_CROSS);
+		});
+		bg_frames(4);
+		need(job_rows("rip", AU_REMOTE) == 2 && cx_of(0, 2) == 1, "a rip right after set_setting uses the new speed");
+		// the drive's settings screen: a change in the same frame keeps what MCP saved
+		call("go_screen", "drive_settings:usb2");
+		on_ui([]() {
+			static char o2[4096];
+			g_mcp_hooks.set_setting("retries", "8", "usb2", o2, sizeof o2);
+			__sync_fetch_and_or(&g_remote_btn, B_RIGHT);   // row 0: speed
+		});
+		bg_frames(4);
+		need(g_usbcfg[2].retries == 8 && g_usbcfg[2].speed != -1, "the drive screen's change keeps the retries MCP saved");
+		call("go_screen", "home");
+	}
+	// two clients at once: each answer is the state after its own request
+	{
+		struct Cl { const char *drive; int ok, n; };
+		static Cl cl[2] = {{"usb2", 0, 0}, {"internal", 0, 0}};
+		pthread_t t[2];
+		for (int i = 0; i < 2; i++) {
+			cl[i].ok = cl[i].n = 0;
+			pthread_create(&t[i], NULL, [](void *p) -> void * {
+				Cl *c = (Cl *)p;
+				std::vector<char> b(MCP_MAX_RESPONSE);
+				char want[32];
+				snprintf(want, sizeof want, "\"tab\":\"%s\"", c->drive);
+				for (int k = 0; k < 15; k++, c->n++)
+					if (!g_mcp_hooks.ui("go_tab", c->drive, b.data(), (int)b.size()) && strstr(b.data(), want)) c->ok++;
+				return NULL;
+			}, &cl[i]);
+		}
+		for (int i = 0; i < 2; i++) pthread_join(t[i], NULL);
+		need(cl[0].ok == cl[0].n && cl[1].ok == cl[1].n, "two clients: every answer shows its own tab");
+	}
+	bg_stop();
+	// nobody takes the request (the UI thread is elsewhere): busy after 5 s, nothing left behind
+	{
+		uint64_t t0 = now_ms();
+		int rc = call("go_tab", "internal");
+		uint64_t dt = now_ms() - t0;
+		need(rc != 0 && has("Busy") && dt >= 4500 && dt < 6500, "a request the UI does not take: busy after 5 s", O);
+		{ UiLock lock; g_ui.osk = 1; }
+		t0 = now_ms();
+		rc = call("press_button", "cross");
+		need(rc != 0 && has("keyboard") && now_ms() - t0 < 1000, "the on-screen keyboard: busy at once, nothing pressed", O);
+		{ UiLock lock; g_ui.osk = 0; }
+		need(g_remote_btn == 0, "nothing was pressed");
+	}
+	// a config value outside a setting's list (retries 3, a drive's 64): kept, listed, taken back
+	{
+		g_std.retries = 3; g_usbcfg[0] = DriveCfg{1, 64, -1, -1, -1, -1};
+		char b[MCP_MAX_RESPONSE];
+		int rc = h.list_settings(b, sizeof b);
+		FILE *f = fopen("out/mcp-settings-odd.json", "w"); if (f) { fputs(b, f); fclose(f); }
+		need(rc == 0 && !system("python3 check_settings.py out/mcp-settings-odd.json internal usb0 usb2"), "a value outside the list is among the values (check_settings.py)");
+		const char *r = strstr(b, "\"key\":\"retries\",\"scope\":\"standard\"");
+		need(r && strstr(r, "\"value\":\"3\",\"values\":[") && strstr(r, "{\"value\":\"3\",\"label\":{\"en\":\"3\""), "retries 3 is listed as the value", r);
+		rc = h.set_setting("retries", "3", NULL, b, sizeof b);
+		need(rc == 0 && g_std.retries == 3, "retries 3 is taken back (the current value)", b);
+		rc = h.set_setting("retries", "64", NULL, b, sizeof b);
+		need(rc != 0 && g_std.retries == 3, "retries 64 is still refused for the standard", b);
+		rc = h.set_setting("retries", "64", "usb0", b, sizeof b);
+		need(rc == 0 && g_usbcfg[0].retries == 64, "usb0's retries 64 is taken back", b);
+		rc = h.set_setting("retries", "16", "usb0", b, sizeof b);
+		rc = h.set_setting("retries", "64", "usb0", b, sizeof b);
+		need(rc != 0 && g_usbcfg[0].retries == 16, "once changed, 64 is not offered any more", b);
+	}
+	#undef O
+
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF;
+	for (int c = 0; c < NCARDS; c++) { card_defaults(g_cards[c]); g_cards[c].pend_cfg = 0; }
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	ui_at(SCR_HOME);
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   MCP: screens, tabs, buttons, dialogs, actions with the pad's checks, busy, two clients\n");
+}
+
 int main()
 {
 	setvbuf(stdout, NULL, _IONBF, 0);   // every line out before a crash
@@ -1632,6 +1899,7 @@ int main()
 	}
 	mcp_scenarios();
 	mcp_settings_scenarios();
+	mcp_ui_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

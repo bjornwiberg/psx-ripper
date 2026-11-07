@@ -144,6 +144,19 @@ static void tools_list(int &bad)
 	CHECK(has("\"enum\":[\"cross\",\"circle\",\"triangle\",\"square\",\"up\",\"down\",\"left\",\"right\",\"start\",\"select\",\"l1\",\"r1\",\"l2\",\"r2\"]"));
 	CHECK(has("\"enum\":[\"home\",\"settings\",\"drive_settings\",\"filename\",\"webhooks\",\"about\",\"audit_log\",\"remote_control\"]"));
 	CHECK(has("\"max_lines\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":500"));
+	// the descriptions steer agents to the action tools first; press_button and go_* are the fallback
+	CHECK(has("{\"name\":\"press_button\",\"description\":\"Fallback:"));
+	CHECK(has("only to answer a dialog"));
+	for (const char *a : {"rip", "repair", "check", "cancel", "skip_rereads", "eject"}) {
+		char want[64];
+		snprintf(want, sizeof(want), "{\"name\":\"%s\",\"description\":\"", a);
+		const char *d = strstr(g_out, want);
+		const char *end = d ? strstr(d + strlen(want), "\",\"inputSchema\"") : NULL;
+		bool steer = d && end;
+		if (steer) { std::string s(d, end - d); steer = s.find("instead of press_button") != std::string::npos; }
+		if (!steer) printf("  %s does not steer away from press_button\n", a);
+		CHECK(steer);
+	}
 	// a params object with a cursor is fine
 	CHECK(call("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\",\"params\":{\"cursor\":\"x\"}}") == 200);
 	CHECK(has("\"tools\":["));

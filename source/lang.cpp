@@ -337,6 +337,19 @@ static const char *en[STR_COUNT] = {
 	"The drives' state as JSON, for other programs: http://%s:%d/status.json",
 	"not connected",
 	"%s cannot have a control character (a tab, a line break or the like): the on-screen keyboard cannot type one.",
+	"A rip, repair or check runs on this drive.",
+	"There is no disc in this drive.",
+	"The disc is still being read: wait until it is identified.",
+	"The disc in this drive could not be read.",
+	"There is no rip of this disc at the drive's destination.",
+	"The rip has sectors to repair: repair it first.",
+	"The rip has already been checked against Redump.",
+	"The rip has no sectors to repair.",
+	"The drive's page was out of date and shows what is there now: look at it and try again.",
+	"Nothing runs on this drive.",
+	"The rip is not re-reading bad sectors now.",
+	"The disc cannot be ejected while a rip, repair or check runs on the drive: cancel it first.",
+	"A job runs on this drive: its settings can be opened when it has ended.",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -670,6 +683,19 @@ static const char *sv[STR_COUNT] = {
 	"Läsarnas läge som JSON, för andra program: http://%s:%d/status.json",
 	"inte ansluten",
 	"%s kan inte ha ett styrtecken (tabb, radbrytning eller liknande): skärmtangentbordet kan inte skriva något sådant.",
+	"En rippning, lagning eller kontroll pågår på den här läsaren.",
+	"Det finns ingen skiva i läsaren.",
+	"Skivan läses fortfarande: vänta tills den är identifierad.",
+	"Skivan i läsaren kunde inte läsas.",
+	"Det finns ingen rippning av skivan på läsarens mål.",
+	"Rippningen har sektorer att laga: laga den först.",
+	"Rippningen är redan kontrollerad mot Redump.",
+	"Rippningen har inga sektorer att laga.",
+	"Läsarens sida var inaktuell och visar nu hur det står till: titta på den och försök igen.",
+	"Inget pågår på den här läsaren.",
+	"Rippningen läser inte om dåliga sektorer just nu.",
+	"Skivan kan inte matas ut medan en rippning, lagning eller kontroll pågår på läsaren: avbryt den först.",
+	"Ett jobb pågår på läsaren: dess inställningar kan öppnas när det är klart.",
 };
 
 static const char **table = en;

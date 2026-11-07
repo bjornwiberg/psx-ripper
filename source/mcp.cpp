@@ -314,18 +314,18 @@ static const Tool k_tools[] = {
 		{"key", A_KEY, true, "The setting's key, as list_settings gives it"},
 		{"value", A_VALUE, true, "The new value, one of the setting's allowed values (any text for free-text settings); numbers and true/false are taken as their text (true = 1)"},
 		{"drive", A_DRIVE, false, "The drive for a per-drive setting; leave out for the standard settings"}}},
-	{"go_screen", T_SCREEN, false, "Opens one of the app's screens and returns the screen state.", {
+	{"go_screen", T_SCREEN, false, "Opens one of the app's screens, the way the pad goes there, and returns the screen state. To change a setting use set_setting; to rip, check and so on use the action tools.", {
 		{"screen", A_SCREEN, true, "The screen to open"},
 		{"drive", A_DRIVE, false, "The drive, only with drive_settings (and required there)"}}},
-	{"go_tab", T_UI, false, "Selects a drive's tab on the home screen and returns the screen state.", {DRIVE_ARG}},
-	{"press_button", T_UI, false, "Presses one pad button in the app, as the pad would, and returns the screen state.", {
+	{"go_tab", T_UI, false, "Shows a drive's tab on the home screen (going there first) and returns the screen state.", {DRIVE_ARG}},
+	{"press_button", T_UI, false, "Fallback: presses one pad button in the app, as the pad would, and returns the screen state. Use it only to answer a dialog (cross = yes/OK, circle = no) or to move around a screen; rip, check, repair, cancel, skip_rereads, eject and set_setting do their work directly. It never presses into the console's own on-screen keyboard.", {
 		{"button", A_BUTTON, true, "The button"}}},
-	{"rip", T_UI, false, "Starts ripping the disc in the drive (same checks as the pad); returns the screen state or why not.", {DRIVE_ARG}},
-	{"repair", T_UI, false, "Repairs the drive's disc image from the disc (same checks as the pad); returns the screen state or why not.", {DRIVE_ARG}},
-	{"check", T_UI, false, "Checks the drive's disc image against the disc and Redump; returns the screen state or why not.", {DRIVE_ARG}},
-	{"cancel", T_UI, false, "Cancels the drive's running job (this call is the confirmation); returns the screen state or why not.", {DRIVE_ARG}},
-	{"skip_rereads", T_UI, false, "Stops re-reading the drive's bad sectors and finishes the rip; returns the screen state or why not.", {DRIVE_ARG}},
-	{"eject", T_UI, false, "Ejects the drive's disc (same checks as the pad); returns the screen state or why not.", {DRIVE_ARG}},
+	{"rip", T_UI, false, "Starts ripping the disc in the drive (same checks as the pad, on its tab); returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
+	{"repair", T_UI, false, "Re-reads the sectors the drive's rip lists as bad (same checks as the pad, on its tab); returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
+	{"check", T_UI, false, "Checks the drive's rip against Redump (same checks as the pad, on its tab); returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
+	{"cancel", T_UI, false, "Cancels the drive's running job: this call is the confirmation the pad asks for, and it is logged. Returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
+	{"skip_rereads", T_UI, false, "Stops re-reading the drive's bad sectors and finishes the rip with what it has; returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
+	{"eject", T_UI, false, "Ejects the drive's disc (same checks as the pad: not while a job runs on it); returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
 	{"read_log", T_LOG, true, "Lines of the app's log (psxrip.log) and the number of the next line.", {
 		{"from_line", A_FROM, false, "The first line (0 = the log's first); leave out for the last lines"},
 		{"max_lines", A_MAX, false, "How many lines, at most 500 (default 100)"}}},
@@ -647,7 +647,8 @@ int mcp_handle(const char *body, int len, char *out, int n)
 		w_str(&w, "{\"protocolVersion\":\"" MCP_PROTOCOL_VERSION "\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"psx-ripper\",\"version\":");
 		w_esc(&w, g_version);
 		w_str(&w, "},\"instructions\":\"PSX RiPPER on a PS3. get_* tools, list_settings and read_log only read; "
-		          "go_*, press_button and the actions change the screen as the pad would and return the screen state.\"}");
+		          "the actions (rip, check, repair, cancel, skip_rereads, eject) and set_setting do the work directly; go_* and press_button "
+		          "move around the screens and answer dialogs. Each tool that changes the screen returns the screen state.\"}");
 	} else if (!strcmp(method, "ping")) {
 		w_str(&w, "{}");
 	} else if (!strcmp(method, "tools/list")) {
