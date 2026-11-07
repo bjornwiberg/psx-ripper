@@ -192,15 +192,16 @@ back to the list.
 needed) and compares them with Redump, also for a game that was checked before. **START** does
 this for every game shown that has no Redump result yet, so a filter picks what is checked. A
 progress screen shows *Game n of m*, the file and the percentage; **○** cancels the
-check: the game being checked and those not reached yet keep the result they had. At the end a line says how many were checked and
-how many could not be.
+check: the game being checked and those not reached yet keep the result they had. At the end a
+line says how many were checked and how many could not be.
 
 The result goes into the game's log next to the image: `<name>.bin.log` and `<name>.bin.md5` for a
 rip, `<name>.iso.log` and `<name>.iso.md5` (or `.img.log`/`.img.md5`) for an image from another
 tool. The row then shows its status like any other.
 
 Not checked, with the reason on the screen: a 2048 image, a broken set, an image in several `.bin`
-files, and a game a drive is ripping or repairing right now. With *Online* a disc without a disc ID
+files, a game whose file names were too long for the list to read in full, and a game a drive is
+working on right now. With *Online* a disc without a disc ID
 is left out. If Redump cannot be reached, the check stops and the stored results stay as they
 were.
 
@@ -278,8 +279,8 @@ their `.md5`, to the new names, for the image they belong to: the `.bin` when a 
 otherwise the single image. It is one job per folder in the audit log, listed under the folder
 (*Files* → the folder → *Rename logs*), and can be undone there. The list does not rename it again
 after an undo, but checking, ripping or repairing that game later writes its new name, and so
-does the list once the game is renamed (its log then has the game's new name). A log another program wrote, a name that is
-already taken, and a game a drive is working on are left as they are.
+does the list once the game is renamed (its log then has the game's new name). A log another
+program wrote, a name that is already taken, and a game a drive is working on are left as they are.
 
 ## Several drives at once
 
