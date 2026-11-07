@@ -5,6 +5,10 @@
 #define PSXRIP_REMOTE_H
 
 #define REMOTE_PORT 8090
+#ifndef REMOTE_READ_SECONDS
+#define REMOTE_READ_SECONDS 10   // a request (headers and body) must have come whole by then
+#endif
+#define REMOTE_MAX_CLIENTS 4     // connections served at once; one more gets 503
 
 struct RemoteHooks {
 	int (*status_json)(char *out, int n);         // current state as JSON
