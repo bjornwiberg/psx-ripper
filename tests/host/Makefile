@@ -3,7 +3,7 @@ SRC = ../../source
 CXXFLAGS = -std=gnu++14 -O1 -w -Iinclude -I../../include -I../../fatfs -I../../third_party/../include
 all: run
 ui_test: ui_test.cpp stubs.cpp ../../include/audit.h $(SRC)/audit.cpp $(wildcard include/*.h include/*/*.h) ../../include/lang.h ../../include/ui.h $(SRC)/main.cpp $(SRC)/ui.cpp $(SRC)/lang.cpp $(SRC)/md5.cpp ../../include/mcp.h $(SRC)/mcp.cpp
-	$(CXX) $(CXXFLAGS) ui_test.cpp stubs.cpp $(SRC)/ui.cpp $(SRC)/lang.cpp $(SRC)/md5.cpp $(SRC)/audit.cpp $(SRC)/mcp.cpp -o ui_test
+	$(CXX) $(CXXFLAGS) -pthread ui_test.cpp stubs.cpp $(SRC)/ui.cpp $(SRC)/lang.cpp $(SRC)/md5.cpp $(SRC)/audit.cpp $(SRC)/mcp.cpp -o ui_test
 audit_test: audit_test.cpp ../../include/audit.h $(SRC)/audit.cpp
 	$(CXX) $(CXXFLAGS) -pthread audit_test.cpp $(SRC)/audit.cpp -o audit_test
 # the MCP request handling, with the sanitizers: it reads whatever a client sends (AddressSanitizer

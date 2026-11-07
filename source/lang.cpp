@@ -335,6 +335,8 @@ static const char *en[STR_COUNT] = {
 	"The screen and a pad in a web browser: http://%s:%d/",
 	"An AI agent (MCP client) can read and control the app: http://%s:%d/mcp",
 	"The drives' state as JSON, for other programs: http://%s:%d/status.json",
+	"not connected",
+	"%s cannot have a control character (a tab, a line break or the like): the on-screen keyboard cannot type one.",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -666,6 +668,8 @@ static const char *sv[STR_COUNT] = {
 	"Skärmen och en handkontroll i webbläsaren: http://%s:%d/",
 	"En AI-agent (MCP-klient) kan läsa av och styra appen: http://%s:%d/mcp",
 	"Läsarnas läge som JSON, för andra program: http://%s:%d/status.json",
+	"inte ansluten",
+	"%s kan inte ha ett styrtecken (tabb, radbrytning eller liknande): skärmtangentbordet kan inte skriva något sådant.",
 };
 
 static const char **table = en;

@@ -30,6 +30,7 @@ int main(int argc, char **argv)
 	color_buffer[0] = color_buffer[1] = fb;
 	ui_init();
 	lang_init();
+	locks_init();   // the web server's threads and the screens share the config, as on the console
 	for (int c = 0; c < NCARDS; c++) { ctx_init(c); card_defaults(g_cards[c]); g_cards[c].rd_state = -1; }
 	host_usb[0] = HostUsb{1, 0, "Apple SuperDrive"};
 	disc(0, "Final Fantasy IX (Disc 1)", "Final Fantasy IX (Europe) (Disc 1)", "SLES_029.65", 706);

@@ -60,6 +60,66 @@ static int g_mcp = 0;              // MCP (POST /mcp): an agent reads and contro
 static int g_status_json = 0;      // /status.json
 static int g_cfg_status_seen;      // cfg_load: the file had status_json= (else it is migrated)
 enum { CHECK_OFF, CHECK_ON, CHECK_BITPERFECT };
+
+// ---- the values the settings offer, in the order right/left steps through them, with their labels:
+// the screens step through and show these, and MCP's list_settings / set_setting offer and take
+// exactly these (the SETTINGS table further down). A value and its label: literal text, or a text
+// id (its %d is the value), or else the number.
+struct SetOpt { int v; StrId id; const char *lit; };
+static const SetOpt o_speed[] = {{3, STR_COUNT, "2\xC3\x97"}, {2, STR_COUNT, "4\xC3\x97"}, {1, STR_COUNT, "8\xC3\x97"}, {0, STR_SPEED_MAX, NULL}};   // right = faster
+static const SetOpt o_retries[] = {{1, STR_COUNT, NULL}, {2, STR_COUNT, NULL}, {4, STR_COUNT, NULL}, {8, STR_COUNT, NULL}, {16, STR_COUNT, NULL}, {32, STR_COUNT, NULL}};
+static const SetOpt o_check[] = {{CHECK_OFF, STR_OFF, NULL}, {CHECK_ON, STR_CHECK_ON, NULL}, {CHECK_BITPERFECT, STR_CHECK_BITPERFECT, NULL}};
+static const SetOpt o_onoff[] = {{0, STR_OFF, NULL}, {1, STR_ON, NULL}};
+static const SetOpt o_redump[] = {{RD_OFF, STR_OFF, NULL}, {RD_ONLINE, STR_RD_ONLINE, NULL}, {RD_LOCAL, STR_RD_LOCAL, NULL}};
+static const SetOpt o_progress[] = {{0, STR_OFF, NULL}, {1, STR_WH_PROGRESS_N, NULL}, {2, STR_WH_PROGRESS_N, NULL}, {5, STR_WH_PROGRESS_N, NULL},
+                                    {10, STR_WH_PROGRESS_N, NULL}, {15, STR_WH_PROGRESS_N, NULL}, {25, STR_WH_PROGRESS_N, NULL}, {50, STR_WH_PROGRESS_N, NULL}};
+static const SetOpt o_audit_mb[] = {{1, STR_AUDIT_MB_VAL, NULL}, {2, STR_AUDIT_MB_VAL, NULL}, {4, STR_AUDIT_MB_VAL, NULL}, {8, STR_AUDIT_MB_VAL, NULL},
+                                    {16, STR_AUDIT_MB_VAL, NULL}, {32, STR_AUDIT_MB_VAL, NULL}, {64, STR_AUDIT_MB_VAL, NULL}, {128, STR_AUDIT_MB_VAL, NULL},
+                                    {256, STR_AUDIT_MB_VAL, NULL}};
+#define OPTS(a) a, (int)(sizeof(a) / sizeof(a[0]))
+typedef const char *(*Tr)(StrId);   // a text in a language: T (the console's), T_en, T_sv
+static void opt_label(const SetOpt &o, Tr tr, char *out, size_t n)
+{
+	if (o.lit) snprintf(out, n, "%s", o.lit);
+	else if (o.id != STR_COUNT) snprintf(out, n, tr(o.id), o.v);
+	else snprintf(out, n, "%d", o.v);
+}
+static int opt_index(const SetOpt *o, int n, int v)   // -1: not one of them
+{
+	for (int i = 0; i < n; i++) if (o[i].v == v) return i;
+	return -1;
+}
+// v's label in the console's language (the number when it is not one of them)
+static const char *opt_text(const SetOpt *o, int n, int v, char *out, size_t sz)
+{
+	int i = opt_index(o, n, v);
+	if (i >= 0) opt_label(o[i], T, out, sz); else snprintf(out, sz, "%d", v);
+	return out;
+}
+// The value d steps (right +1, left -1) from cur, round: the last's next is the first. A value that
+// is not one of them goes to the first (right) or the last (left).
+static int opt_wrap(const SetOpt *o, int n, int cur, int d)
+{
+	int i = opt_index(o, n, cur);
+	if (i < 0) i = n;
+	return o[(i + (d > 0 ? 1 : n - 1)) % n].v;
+}
+// The same without going round: it stops at the first and the last (a value that is not one of
+// them counts as the last).
+static int opt_clamp(const SetOpt *o, int n, int cur, int d)
+{
+	int i = opt_index(o, n, cur);
+	if (i < 0) i = n - 1;
+	i += d > 0 ? 1 : -1;
+	return o[i < 0 ? 0 : i >= n ? n - 1 : i].v;
+}
+// A drive's own value: -1 ("standard") before the values, round (another value goes to "standard").
+static int opt_std(const SetOpt *o, int n, int cur, int d)
+{
+	int i = cur == -1 ? 0 : opt_index(o, n, cur) + 1;   // not one of them: 0, the standard
+	i = (i + (d > 0 ? 1 : n)) % (n + 1);
+	return i ? o[i - 1].v : -1;
+}
 static int g_webhook_on = 0;       // send webhooks
 static char g_webhook[512] = "";   // webhook address (http://...); may contain a secret id, never logged
 static int g_webhook_mask = WH_DEFAULT_MASK;   // which WEBHOOK_EVENTS are sent
@@ -95,7 +155,6 @@ static void webhook_headers(char *out, size_t n)
 	for (int i = 0; i < WH_HEADERS; i++)
 		if (g_webhook_hdr[i][0]) snprintf(out + strlen(out), n - strlen(out), "%s\r\n", g_webhook_hdr[i]);
 }
-static const int wh_steps[] = {1, 2, 5, 10, 15, 25, 50};
 static int g_webhook_step = 5;                 // rip_progress every this many percent
 static const int speed_x[4] = {0, 8, 4, 2};
 
@@ -169,7 +228,6 @@ static const AuditIo vf_io = {au_open, au_read, au_write, au_seek, au_close};
 // Where the last button press came from (set by pad_pressed): the source of the changes made after it.
 static AuditSrc g_input_src = AU_PAD;
 static int g_audit_mb = 256;   // size cap of the audit's sector files, in MB
-static const int audit_mb_steps[] = {1, 2, 4, 8, 16, 32, 64, 128, 256};
 static void audit_apply_cap() { audit_set_cap((uint64_t)g_audit_mb << 20); }
 
 // One config line ("key=value") into the settings. Returns 1 when it was a known key with a usable
@@ -213,14 +271,13 @@ static int cfg_apply_line(const char *line)
 	}
 	else if (!strncmp(line, "name_pattern=", 13) && line[13]) snprintf(g_name_pat, sizeof(g_name_pat), "%s", line + 13);
 	else if (!strncmp(line, "webhook_step=", 13)) {
-		int v = atoi(line + 13), ok = 0;
-		for (int i = 0; i < 7; i++) if (wh_steps[i] == v) { g_webhook_step = v; ok = 1; }
-		if (!ok) return 0;
+		int v = atoi(line + 13);   // a step of the progress row (its 0 is "off", not a step)
+		if (v <= 0 || opt_index(OPTS(o_progress), v) < 0) return 0;
+		g_webhook_step = v;
 	}
 	else if (!strncmp(line, "audit_mb=", 9)) {
-		int v = atoi(line + 9), mb = 256;   // anything but a listed size is the default
-		for (size_t i = 0; i < sizeof(audit_mb_steps) / sizeof(audit_mb_steps[0]); i++) if (audit_mb_steps[i] == v) mb = v;
-		g_audit_mb = mb;
+		int v = atoi(line + 9);   // anything but a listed size is the default
+		g_audit_mb = opt_index(OPTS(o_audit_mb), v) >= 0 ? v : 256;
 		audit_apply_cap();
 	}
 	else return 0;
@@ -2544,15 +2601,14 @@ static void space_check(uint32_t disc_mb)
 
 // The destination as "Hard disk · PSXISO" (drive and folder) and its free space in GB.
 // tr: the texts' language (T = the console's; MCP asks for English and Swedish)
-typedef const char *(*Tr)(StrId);
-static void dest_parts(const char *dir, char *out, size_t n, unsigned *gb, Tr tr = T)
+static void dest_parts(const char *dir, char *out, size_t n, unsigned *gb, Tr tr = T, int io = 1)   // io 0: no free-space query
 {
 	int port;
 	uint64_t mb = 0;
 	char label[48];
 	const char *folder = strchr(dir + 1, '/');
 	if (sscanf(dir, "exfat%1d:", &port) == 1) {
-		vf_free_mb(dir, &mb);
+		if (io) vf_free_mb(dir, &mb);
 		snprintf(label, sizeof(label), tr(STR_DEST_EXFAT), port);
 		folder = strchr(dir, '/');
 	} else {
@@ -2560,7 +2616,7 @@ static void dest_parts(const char *dir, char *out, size_t n, unsigned *gb, Tr tr
 		snprintf(dev, sizeof(dev), "%.12s", dir);
 		char *sl = strchr(dev + 1, '/');
 		if (sl) *sl = 0;
-		if (disk_free(dev, &mb)) mb = 0;
+		if (!io || disk_free(dev, &mb)) mb = 0;
 		if (sscanf(dir, "/dev_usb%3d", &port) == 1) snprintf(label, sizeof(label), tr(STR_DEST_USB), port);
 		else snprintf(label, sizeof(label), "%s", tr(STR_DEST_HDD));
 	}
@@ -3064,15 +3120,23 @@ enum { SCR_HOME, SCR_SETTINGS, SCR_DRIVE_SETTINGS, SCR_FILENAME, SCR_WEBHOOKS, S
        SCR_REMOTE_CONTROL, SCR_REDUMP_DOWNLOAD, SCR_RESULT };
 static const char *const SCR_NAMES[] = {"home", "settings", "drive_settings", "filename", "webhooks", "webhook_headers", "about", "audit_log",
                                         "remote_control", "redump_download", "result"};
-static volatile int g_scr = SCR_HOME, g_scr_row = -1, g_scr_card = -1;   // the screen, its focused row (-1 none), its drive (card)
-static volatile int g_tab_card = 0;   // the home screen's tab (card)
-static void ui_at(int scr, int row = -1, int card = -1) { g_scr = scr; g_scr_row = row; g_scr_card = card; }
-static volatile int g_dlg_open = 0, g_dlg_q = 0;   // the app's own dialog is up (a question: yes/no)
-static char g_dlg_text[400];
-static volatile int g_osk_open = 0;    // the system's on-screen keyboard is up
 #define HINTS 8
-static char g_hint_b[HINTS][12], g_hint_l[HINTS][64];   // the hint bar last drawn: button and what it does
-static volatile int g_hint_n = 0;
+struct UiState {
+	int scr, row, card;          // the screen, its focused row (-1 none), its drive (card, -1 none)
+	int tab;                     // the home screen's tab (card)
+	int dlg_open, dlg_q;         // the app's own dialog is up (a question: yes/no)
+	char dlg_text[400];
+	int osk;                     // the system's on-screen keyboard is up
+	int hint_n;                  // the hint bar last drawn: button and what it does
+	char hint_b[HINTS][12], hint_l[HINTS][64];
+};
+// Written by the UI thread, read whole by MCP's get_state under a short lock (never a screen with
+// another screen's row). The lock is a leaf: nothing else is taken while it is held.
+static UiState g_ui = {SCR_HOME, -1, -1, 0, 0, 0, "", 0, 0, {}, {}};
+static sys_mutex_t g_ui_mx;
+struct UiLock { UiLock() { sysMutexLock(g_ui_mx, 0); } ~UiLock() { sysMutexUnlock(g_ui_mx); } };
+static void ui_at(int scr, int row = -1, int card = -1) { UiLock lock; g_ui.scr = scr; g_ui.row = row; g_ui.card = card; }
+static void ui_snapshot(UiState &s) { UiLock lock; s = g_ui; }
 
 static int remote_press(const char *b)
 {
@@ -3155,12 +3219,14 @@ static void hint_bar_pg(const char *const *buttons, const char *const *labels, i
 }
 static void hint_bar(const char *const *buttons, const char *const *labels, int n)
 {
-	g_hint_n = 0;
-	for (int i = 0; i < n && i < HINTS; i++) {
-		snprintf(g_hint_b[i], sizeof(g_hint_b[0]), "%s", buttons[i]);
-		snprintf(g_hint_l[i], sizeof(g_hint_l[0]), "%s", labels[i]);
+	{
+		UiLock lock;
+		for (int i = 0; i < n && i < HINTS; i++) {
+			snprintf(g_ui.hint_b[i], sizeof(g_ui.hint_b[0]), "%s", buttons[i]);
+			snprintf(g_ui.hint_l[i], sizeof(g_ui.hint_l[0]), "%s", labels[i]);
+		}
+		g_ui.hint_n = n < HINTS ? n : HINTS;
 	}
-	g_hint_n = n < HINTS ? n : HINTS;
 	int total = 0, gap = ui_w() / 24, sum = 0;
 	for (int i = 0; i < n; i++) sum += ui_hint_width(buttons[i], labels[i]);
 	// a long row: the gaps shrink so it stays on the screen
@@ -3171,9 +3237,11 @@ static void hint_bar(const char *const *buttons, const char *const *labels, int 
 	for (int i = 0; i < n; i++) x += ui_hint(x, y, buttons[i], labels[i]) + gap;
 }
 
+static void cards_take_pending();
 static void flip_frame()
 {
 	sysUtilCheckCallback();
+	cards_take_pending();   // a drive's settings changed over MCP
 	static int seen_gen = -1;   // a setting changed elsewhere (MCP): the screen shows it
 	if (g_cfg_gen != seen_gen) { seen_gen = g_cfg_gen; g_redraw = 2; }
 	present();
@@ -3403,7 +3471,7 @@ static int osk_input(const char *title, char *text, size_t n)
 	oskSetKeyLayoutOption(OSK_FULLKEY_PANEL);
 	g_osk_event = 0;
 	if (oskLoadAsync(cont, &prm, &fld)) { sysMemContainerDestroy(cont); return 0; }
-	g_osk_open = 1;
+	{ UiLock lock; g_ui.osk = 1; }
 	oskCallbackReturnParam ret;
 	memset(&ret, 0, sizeof(ret));
 	ret.str = result; ret.len = 500;
@@ -3416,7 +3484,7 @@ static int osk_input(const char *title, char *text, size_t n)
 		}
 		if (g_osk_event == SYSUTIL_OSK_UNLOADED) break;
 	}
-	g_osk_open = 0;
+	{ UiLock lock; g_ui.osk = 0; }
 	sysMemContainerDestroy(cont);
 	g_redraw = 2;
 	g_backdrop_shown = 0;
@@ -3524,15 +3592,14 @@ static void webhook_settings_screen()
 					int nh = 0;
 					for (int i = 0; i < WH_HEADERS; i++) nh += g_webhook_hdr[i][0] != 0;
 					snprintf(label, sizeof(label), "%s", T(STR_WH_HEADERS));
-					if (g_webhook_hdr_on) snprintf(val, sizeof(val), T(STR_WH_HEADERS_ON), nh); else snprintf(val, sizeof(val), "%s", T(STR_OFF));
+					if (g_webhook_hdr_on) snprintf(val, sizeof(val), T(STR_WH_HEADERS_ON), nh); else opt_text(OPTS(o_onoff), 0, val, sizeof(val));
 				} else if (r < R_PROG) {
 					int i = ev[r - R_EV];
 					snprintf(label, sizeof(label), "%s", T(wh_label(i)));
-					snprintf(val, sizeof(val), "%s", (g_webhook_mask >> i) & 1 ? T(STR_ON) : T(STR_OFF));
+					opt_text(OPTS(o_onoff), (g_webhook_mask >> i) & 1, val, sizeof(val));
 				} else if (r == R_PROG) {
 					snprintf(label, sizeof(label), "%s", T(STR_WH_PROGRESS));
-					if ((g_webhook_mask >> WH_RIP_PROGRESS) & 1) snprintf(val, sizeof(val), T(STR_WH_PROGRESS_N), g_webhook_step);
-					else snprintf(val, sizeof(val), "%s", T(STR_OFF));
+					opt_text(OPTS(o_progress), (g_webhook_mask >> WH_RIP_PROGRESS) & 1 ? g_webhook_step : 0, val, sizeof(val));
 				} else {
 					snprintf(label, sizeof(label), "%s", T(STR_WH_TEST));
 					if (test_status) snprintf(val, sizeof(val), "HTTP %d", test_status); else val[0] = 0;
@@ -3583,16 +3650,14 @@ static void webhook_settings_screen()
 		if (!d) continue;
 		CfgLock lock;
 		if (row == R_HDR) {
-			g_webhook_hdr_on = !g_webhook_hdr_on;
+			g_webhook_hdr_on = opt_wrap(OPTS(o_onoff), g_webhook_hdr_on, d);
 		} else if (row >= R_EV && row < R_PROG) {
-			g_webhook_mask ^= 1 << ev[row - R_EV];
-		} else if (row == R_PROG) {
-			// Off, 1, 2, 5, 10, 15, 25, 50 %
-			int k = (g_webhook_mask >> WH_RIP_PROGRESS) & 1 ? 1 : 0;
-			if (k) { int j = 0; while (j < 7 && wh_steps[j] != g_webhook_step) j++; k = j + 1; }
-			k = (k + (d > 0 ? 1 : 7)) % 8;
+			int b = ev[row - R_EV];
+			if (opt_wrap(OPTS(o_onoff), (g_webhook_mask >> b) & 1, d)) g_webhook_mask |= 1 << b; else g_webhook_mask &= ~(1 << b);
+		} else if (row == R_PROG) {   // off, or on every this many percent
+			int k = opt_wrap(OPTS(o_progress), (g_webhook_mask >> WH_RIP_PROGRESS) & 1 ? g_webhook_step : 0, d);
 			if (k == 0) g_webhook_mask &= ~(1 << WH_RIP_PROGRESS);
-			else { g_webhook_mask |= 1 << WH_RIP_PROGRESS; g_webhook_step = wh_steps[k - 1]; }
+			else { g_webhook_mask |= 1 << WH_RIP_PROGRESS; g_webhook_step = k; }
 		} else continue;
 		cfg_save();
 	}
@@ -3634,22 +3699,10 @@ static void drive_val(char *out, size_t n, int own, int std, const char *(*fmt)(
 	char sv[64];
 	snprintf(out, n, T(STR_STD_VALUE), fmt(std, sv, sizeof(sv)));
 }
-static const char *fmt_speed(int v, char *b, size_t n) { if (v) snprintf(b, n, "%d\xC3\x97", speed_x[v]); else snprintf(b, n, "%s", T(STR_SPEED_MAX)); return b; }
+static const char *fmt_speed(int v, char *b, size_t n) { return opt_text(OPTS(o_speed), v, b, n); }
 static const char *fmt_int(int v, char *b, size_t n) { snprintf(b, n, "%d", v); return b; }
-static const char *fmt_onoff(int v, char *b, size_t n) { snprintf(b, n, "%s", v ? T(STR_ON) : T(STR_OFF)); return b; }
-static const char *fmt_check(int v, char *b, size_t n)
-{
-	snprintf(b, n, "%s", v == CHECK_OFF ? T(STR_OFF) : v == CHECK_ON ? T(STR_CHECK_ON) : T(STR_CHECK_BITPERFECT));
-	return b;
-}
-// Steps through "standard" and a setting's values: opts[0] = -1 (standard), then the values in order.
-static int step_opt(int cur, const int *opts, int n, int d)
-{
-	int i = 0;
-	while (i < n && opts[i] != cur) i++;
-	if (i == n) i = 0;
-	return opts[(i + (d > 0 ? 1 : n - 1)) % n];
-}
+static const char *fmt_onoff(int v, char *b, size_t n) { return opt_text(OPTS(o_onoff), v ? 1 : 0, b, n); }
+static const char *fmt_check(int v, char *b, size_t n) { return opt_text(OPTS(o_check), v, b, n); }
 
 
 static int card_list(int *out);
@@ -4409,7 +4462,8 @@ static void remote_control_draw(int row)
 	for (int r = 0; r < 3; r++) {
 		int y = top + r * lh;
 		char v[64];
-		snprintf(v, sizeof(v), r == row ? "‹ %s ›" : "%s", T(on[r] ? STR_ON : STR_OFF));
+		char t[48];
+		snprintf(v, sizeof(v), r == row ? "‹ %s ›" : "%s", opt_text(OPTS(o_onoff), on[r] ? 1 : 0, t, sizeof(t)));
 		if (r == row) ui_rect(left - ui_w() / 60, y - lh / 4, right - left + ui_w() / 30, lh, 0x703D6FD9);
 		ui_text(UI_BODY, left, y, 0xFFFFFF, T(labels[r]));
 		ui_text(UI_BODY, right, y, r == row ? 0xFFFFFF : 0xC8D0E0, v, UI_RIGHT);
@@ -4448,7 +4502,7 @@ static void remote_control_screen()
 		if (!(p & (B_LEFT | B_RIGHT | B_CROSS))) continue;   // X switches too
 		CfgLock lock;
 		int &v = row == 0 ? g_remote : row == 1 ? g_mcp : g_status_json;
-		v = !v;
+		v = opt_wrap(OPTS(o_onoff), v, (p & B_LEFT) ? -1 : 1);
 		remote_apply();
 		cfg_save();   // the audit log gets the change
 		logf("remote control: view=%d mcp=%d status_json=%d", g_remote, g_mcp, g_status_json);
@@ -4471,7 +4525,7 @@ static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, i
 	fmt_check(sd.check, vals[2], sizeof(vals[2]));
 	fmt_onoff(sd.eject, vals[3], sizeof(vals[3]));
 	fmt_onoff(sd.autostart, vals[4], sizeof(vals[4]));
-	snprintf(vals[6], sizeof(vals[0]), "%s", redump == RD_ONLINE ? T(STR_RD_ONLINE) : redump == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
+	opt_text(OPTS(o_redump), redump, vals[6], sizeof(vals[6]));
 	if (rdcount > 0) {
 		// Redump's version (date) and when this copy was downloaded (date and time)
 		char date[16], ver[24], when[32];
@@ -4496,7 +4550,7 @@ static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, i
 		snprintf(vals[9], sizeof(vals[9]), T(STR_WEBHOOK_ON_N), host, ne);
 	}
 	vals[10][0] = 0;   // the audit log: X opens it
-	snprintf(vals[11], sizeof(vals[11]), T(STR_AUDIT_MB_VAL), g_audit_mb);
+	opt_text(OPTS(o_audit_mb), g_audit_mb, vals[11], sizeof(vals[11]));
 	snprintf(vals[12], sizeof(vals[12]), "v%s", APP_VERSION);
 	const char *labels[13] = {T(STR_L_SPEED), T(STR_L_RETRIES), T(STR_L_CHECK), T(STR_L_EJECT), T(STR_L_AUTOSTART), T(STR_L_FILENAME),
 	                         T(STR_L_REDUMP), T(STR_L_RDCOPY), T(STR_L_REMOTE), T(STR_L_WEBHOOK), T(STR_L_AUDIT), T(STR_L_AUDIT_MB), T(STR_L_ABOUT)};
@@ -4521,7 +4575,6 @@ static void settings_screen()
 	// the values shown are the settings themselves (no copies): a change over MCP shows at once
 	int row = 0;
 	const int NROWS = 13;   // the last row opens About
-	static const int steps[] = {1, 2, 4, 8, 16, 32};
 	char rdver[64] = "";
 	time_t rdwhen = 0;
 	int rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
@@ -4599,32 +4652,24 @@ static void settings_screen()
 				remote_apply();
 				g_webhook_on = 0; g_webhook_step = 5;
 				g_audit_mb = 256;
-			} else if (row == 0) {
-				// right = faster: 2x, 4x, 8x, max (index 3 ... 0)
-				if (d > 0 && sd.speed > 0) sd.speed--;
-				if (d < 0 && sd.speed < 3) sd.speed++;
+			} else if (row == 0) {   // right = faster (2x, 4x, 8x, max), no wrap-around
+				sd.speed = opt_clamp(OPTS(o_speed), sd.speed, d);
 			} else if (row == 1) {
-				int k = 0; while (k < 6 && steps[k] != sd.retries) k++;
-				sd.retries = steps[(k + (d > 0 ? 1 : 5)) % 6];
+				sd.retries = opt_wrap(OPTS(o_retries), sd.retries, d);
 			} else if (row == 2) {
-				sd.check = (sd.check + (d > 0 ? 1 : 2)) % 3;
+				sd.check = opt_wrap(OPTS(o_check), sd.check, d);
 			} else if (row == 3) {
-				sd.eject = !sd.eject;
+				sd.eject = opt_wrap(OPTS(o_onoff), sd.eject, d);
 			} else if (row == 4) {
-				sd.autostart = !sd.autostart;
+				sd.autostart = opt_wrap(OPTS(o_onoff), sd.autostart, d);
 			} else if (row == 5) {   // the ready-made patterns, and the own one
 				fn_step(d);
 			} else if (row == 6) {
-				g_redump = (g_redump + (d > 0 ? 1 : 2)) % 3;
+				g_redump = opt_wrap(OPTS(o_redump), g_redump, d);
 			} else if (row == 9) {
-				g_webhook_on = !g_webhook_on;
+				g_webhook_on = opt_wrap(OPTS(o_onoff), g_webhook_on, d);
 			} else if (row == 11) {   // right = more; no wrap-around: 256 to 1 MB would drop the kept sectors
-				int k = 0, ns = (int)(sizeof(audit_mb_steps) / sizeof(audit_mb_steps[0]));
-				while (k < ns - 1 && audit_mb_steps[k] != g_audit_mb) k++;
-				k += d;
-				if (k < 0) k = 0;
-				if (k > ns - 1) k = ns - 1;
-				g_audit_mb = audit_mb_steps[k];
+				g_audit_mb = opt_clamp(OPTS(o_audit_mb), g_audit_mb, d);
 			}
 			for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
 			cfg_save();
@@ -4644,8 +4689,6 @@ static void drive_settings_screen(int c)
 	Card &k = g_cards[c];
 	int row = 0;
 	const int NROWS = 5;
-	static const int o_speed[] = {-1, 3, 2, 1, 0}, o_retries[] = {-1, 1, 2, 4, 8, 16, 32}, o_check[] = {-1, CHECK_OFF, CHECK_ON, CHECK_BITPERFECT},
-	                 o_onoff[] = {-1, 0, 1};
 	pad_pressed();
 	g_redraw = 2;
 	while (!exit_requested) {
@@ -4680,11 +4723,11 @@ static void drive_settings_screen(int c)
 		CfgLock lock;
 		if (p & B_TRIANGLE) { card_defaults(k); reset = 1; }   // all back to the standard
 		if (d) {
-			if (row == 0) k.speed = step_opt(k.speed, o_speed, 5, d);   // right = faster
-			else if (row == 1) k.retries = step_opt(k.retries, o_retries, 7, d);
-			else if (row == 2) k.check = step_opt(k.check, o_check, 4, d);
-			else if (row == 3) k.eject = step_opt(k.eject, o_onoff, 3, d);
-			else if (row == 4) k.autostart = step_opt(k.autostart, o_onoff, 3, d);
+			if (row == 0) k.speed = opt_std(OPTS(o_speed), k.speed, d);   // right = faster
+			else if (row == 1) k.retries = opt_std(OPTS(o_retries), k.retries, d);
+			else if (row == 2) k.check = opt_std(OPTS(o_check), k.check, d);
+			else if (row == 3) k.eject = opt_std(OPTS(o_onoff), k.eject, d);
+			else if (row == 4) k.autostart = opt_std(OPTS(o_onoff), k.autostart, d);
 		}
 		if (d || reset) {
 			card_store(c);
@@ -4780,11 +4823,12 @@ static void card_take_cfg(int c, int what)
 	if (what & CF_OUTDIR) card_apply_outdir(c, !c ? g_outdir : g_outdir_usb[port][0] ? g_outdir_usb[port] : HDD_DIR);
 }
 
-// The cards whose job ended take what changed meanwhile (home screen, each round).
+// The cards whose job ended take what changed meanwhile, and every card what MCP changed (each
+// frame, on the UI thread: a job starts only there, so it never sees a half-written card).
 static void cards_take_pending()
 {
 	for (int c = 0; c < NCARDS; c++)
-		if (g_cards[c].pend_cfg && !card_busy(c)) card_take_cfg(c, g_cards[c].pend_cfg);
+		if (g_cards[c].pend_cfg && !card_busy(c)) { CfgLock lock; card_take_cfg(c, g_cards[c].pend_cfg); }
 }
 
 // After the audit's undo changed a setting: the same follow-ups as the settings screens (the web
@@ -5388,7 +5432,7 @@ static int home_screen()
 			g_drawn = 2;
 			home_draw(list, nc, sel);
 		}
-		g_tab_card = sel;
+		{ UiLock lock; g_ui.tab = sel; }
 		ui_at(SCR_HOME, -1, sel);
 		flip_frame();
 		int p = pad_pressed();
@@ -5844,25 +5888,27 @@ static int mcp_na_ui(const char *, const char *, char *out, int n) { return mcp_
 static int mcp_state(char *out, int n)
 {
 	Js j = js_begin(out, n);
-	int scr = g_scr, row = g_scr_row, card = g_scr_card, dlg = g_dlg_open;
+	UiState u;   // one picture of the screen
+	ui_snapshot(u);
+	int scr = u.scr, row = u.row, card = u.card, dlg = u.dlg_open;
 	if (scr < 0 || scr >= (int)(sizeof(SCR_NAMES) / sizeof(SCR_NAMES[0]))) scr = SCR_HOME;
 	char id[16];
 	js_put(j, "{\"screen\":\"%s\"", dlg ? "dialog" : SCR_NAMES[scr]);
 	if (row >= 0) js_put(j, ",\"row\":%d", row); else js_put(j, ",\"row\":null");
-	drive_id(g_tab_card, id, sizeof(id));
+	drive_id(u.tab, id, sizeof(id));
 	js_put(j, ",\"tab\":\"%s\"", id);
 	if (scr == SCR_DRIVE_SETTINGS && card >= 0) { drive_id(card, id, sizeof(id)); js_put(j, ",\"drive\":\"%s\"", id); }
 	if (dlg) {
 		js_put(j, ",\"dialog\":{\"text\":");
-		js_str(j, g_dlg_text);
-		js_put(j, ",\"question\":%s,\"over\":\"%s\"}", g_dlg_q ? "true" : "false", SCR_NAMES[scr]);
+		js_str(j, u.dlg_text);
+		js_put(j, ",\"question\":%s,\"over\":\"%s\"}", u.dlg_q ? "true" : "false", SCR_NAMES[scr]);
 	} else js_put(j, ",\"dialog\":null");
-	js_put(j, ",\"keyboard\":%s,\"buttons\":[", g_osk_open ? "true" : "false");
-	for (int i = 0, hn = g_hint_n; i < hn && i < HINTS; i++) {
+	js_put(j, ",\"keyboard\":%s,\"buttons\":[", u.osk ? "true" : "false");
+	for (int i = 0; i < u.hint_n && i < HINTS; i++) {
 		js_put(j, "%s{\"button\":", i ? "," : "");
-		js_str(j, g_hint_b[i]);
+		js_str(j, u.hint_b[i]);
 		js_put(j, ",\"label\":");
-		js_str(j, g_hint_l[i]);
+		js_str(j, u.hint_l[i]);
 		js_put(j, "}");
 	}
 	js_put(j, "],\"busy\":%s,", g_state_busy() ? "true" : "false");
@@ -5881,9 +5927,8 @@ static int mcp_drives(char *out, int n)
 	return js_end(j, out, n);
 }
 
-// ---- the settings table: what the screens offer, for list_settings and set_setting
-// A value and its label: literal text, or a text id (its %d is the value), or else the number.
-struct SetOpt { int v; StrId id; const char *lit; };
+// ---- the settings table for list_settings and set_setting: its values are the option arrays the
+// screens step through (o_speed, ... at the top), so MCP offers and takes exactly what the pad can
 enum { SK_LIST, SK_TEXT, SK_SECRET, SK_DEST };   // one of a list, free text, a secret (never shown), a destination there is
 enum { SC_STD, SC_BOTH, SC_DRIVE };              // the standard only, the standard and each drive, each drive only
 enum { F_SPEED, F_RETRIES, F_CHECK, F_EJECT, F_AUTOSTART, F_DEST, F_NAME, F_REDUMP, F_REMOTE, F_MCP, F_STATUS, F_WH_ON, F_WH_URL,
@@ -5896,21 +5941,11 @@ struct SettingDef {
 	int nopts;
 	int max;                // free text: at most this many bytes
 };
-static const SetOpt o_speed[] = {{3, STR_COUNT, "2\xC3\x97"}, {2, STR_COUNT, "4\xC3\x97"}, {1, STR_COUNT, "8\xC3\x97"}, {0, STR_SPEED_MAX, NULL}};   // right = faster
-static const SetOpt o_retries[] = {{1, STR_COUNT, NULL}, {2, STR_COUNT, NULL}, {4, STR_COUNT, NULL}, {8, STR_COUNT, NULL}, {16, STR_COUNT, NULL}, {32, STR_COUNT, NULL}};
-static const SetOpt o_check[] = {{CHECK_OFF, STR_OFF, NULL}, {CHECK_ON, STR_CHECK_ON, NULL}, {CHECK_BITPERFECT, STR_CHECK_BITPERFECT, NULL}};
-static const SetOpt o_onoff[] = {{0, STR_OFF, NULL}, {1, STR_ON, NULL}};
-static const SetOpt o_redump[] = {{RD_OFF, STR_OFF, NULL}, {RD_ONLINE, STR_RD_ONLINE, NULL}, {RD_LOCAL, STR_RD_LOCAL, NULL}};
-static const SetOpt o_progress[] = {{0, STR_OFF, NULL}, {1, STR_WH_PROGRESS_N, NULL}, {2, STR_WH_PROGRESS_N, NULL}, {5, STR_WH_PROGRESS_N, NULL},
-                                    {10, STR_WH_PROGRESS_N, NULL}, {15, STR_WH_PROGRESS_N, NULL}, {25, STR_WH_PROGRESS_N, NULL}, {50, STR_WH_PROGRESS_N, NULL}};
-static const SetOpt o_audit_mb[] = {{1, STR_AUDIT_MB_VAL, NULL}, {2, STR_AUDIT_MB_VAL, NULL}, {4, STR_AUDIT_MB_VAL, NULL}, {8, STR_AUDIT_MB_VAL, NULL},
-                                    {16, STR_AUDIT_MB_VAL, NULL}, {32, STR_AUDIT_MB_VAL, NULL}, {64, STR_AUDIT_MB_VAL, NULL}, {128, STR_AUDIT_MB_VAL, NULL},
-                                    {256, STR_AUDIT_MB_VAL, NULL}};
-#define OPTS(a) a, (int)(sizeof(a) / sizeof(a[0]))
 #define NO_OPTS NULL, 0
 // In the order of the screens: Settings (with the drives' own values), Remote control, Webhooks.
 // A new setting is a row here (and a case in setting_int / setting_apply when it is not a plain
-// config key with a number).
+// config key with a number); its screen steps through the same option array, and ui_test's parity
+// check needs its screen row.
 static const SettingDef SETTINGS[] = {
 	{"speed", STR_COUNT, STR_L_SPEED, SK_LIST, SC_BOTH, F_SPEED, 0, OPTS(o_speed), 0},
 	{"retries", STR_COUNT, STR_L_RETRIES, SK_LIST, SC_BOTH, F_RETRIES, 0, OPTS(o_retries), 0},
@@ -5951,22 +5986,45 @@ static void setting_label(const SettingDef &d, Tr tr, char *out, size_t n)
 	if (d.group != STR_COUNT) snprintf(out, n, "%s · %s", tr(d.group), l);
 	else snprintf(out, n, "%s", l);
 }
-static void opt_label(const SetOpt &o, Tr tr, char *out, size_t n)
+// A drive's own settings and destination as saved: what its card takes (on the UI thread) and its
+// next job uses. NULL: a USB drive without a port.
+static DriveCfg *card_cfg(int c)
 {
-	if (o.lit) snprintf(out, n, "%s", o.lit);
-	else if (o.id != STR_COUNT) snprintf(out, n, tr(o.id), o.v);
-	else snprintf(out, n, "%d", o.v);
+	if (!c) return &g_bdcfg;
+	int port = usbodd_port(c - 1);
+	return port >= 0 && port < 8 ? &g_usbcfg[port] : NULL;
 }
-// A list setting's value: the standard's (card -1) or a drive's own (-1 = the standard).
+static const char *card_dest_cfg(int c)
+{
+	if (!c) return g_outdir;
+	int port = usbodd_port(c - 1);
+	return port >= 0 && port < 8 && g_outdir_usb[port][0] ? g_outdir_usb[port] : HDD_DIR;
+}
+static int *drive_field(DriveCfg &d, int field)
+{
+	switch (field) {
+	case F_SPEED: return &d.speed;
+	case F_RETRIES: return &d.retries;
+	case F_CHECK: return &d.check;
+	case F_EJECT: return &d.eject;
+	case F_AUTOSTART: return &d.autostart;
+	}
+	return NULL;
+}
+// A list setting's value: the standard's (card -1) or a drive's own as saved (-1 = the standard).
 static int setting_int(const SettingDef &d, int card)
 {
-	const Card *k = card >= 0 ? &g_cards[card] : NULL;
+	if (card >= 0) {
+		DriveCfg *cf = card_cfg(card), none = {0, -1, -1, -1, -1, -1};
+		int *v = drive_field(cf && cf->set ? *cf : none, d.field);
+		return v ? *v : -1;
+	}
 	switch (d.field) {
-	case F_SPEED: return k ? k->speed : g_std.speed;
-	case F_RETRIES: return k ? k->retries : g_std.retries;
-	case F_CHECK: return k ? k->check : g_std.check;
-	case F_EJECT: return k ? k->eject : g_std.eject;
-	case F_AUTOSTART: return k ? k->autostart : g_std.autostart;
+	case F_SPEED: return g_std.speed;
+	case F_RETRIES: return g_std.retries;
+	case F_CHECK: return g_std.check;
+	case F_EJECT: return g_std.eject;
+	case F_AUTOSTART: return g_std.autostart;
 	case F_REDUMP: return g_redump;
 	case F_REMOTE: return g_remote;
 	case F_MCP: return g_mcp;
@@ -5979,14 +6037,34 @@ static int setting_int(const SettingDef &d, int card)
 	}
 	return 0;
 }
-static const char *card_outdir(int c) { return g_cards[c].outdir[0] ? g_cards[c].outdir : HDD_DIR; }
-static void dest_label(const char *dir, Tr tr, char *out, size_t n)
+// A destination's label: with its free space when it is there (a free-space query), else "not connected"
+static void dest_label(const char *dir, Tr tr, char *out, size_t n, int there = 1)
 {
 	char parts[96], fr[48];
-	unsigned gb;
-	dest_parts(dir, parts, sizeof(parts), &gb, tr);
-	snprintf(fr, sizeof(fr), tr(STR_DEST_FREE), gb);
+	unsigned gb = 0;
+	dest_parts(dir, parts, sizeof(parts), &gb, tr, there);
+	if (there) snprintf(fr, sizeof(fr), tr(STR_DEST_FREE), gb);
+	else snprintf(fr, sizeof(fr), "%s", tr(STR_DEST_NOT_CONNECTED));
 	snprintf(out, n, "%s · %s", parts, fr);
+}
+// The destinations there are with their labels in English and Swedish: found before the config
+// lock is taken (a drive scan and a free-space query per destination). NULL: no memory.
+struct DestOpts { int n; char dir[9][32], en[9][160], sv[9][160]; };
+static DestOpts *dest_opts()
+{
+	DestOpts *o = (DestOpts *)malloc(sizeof(DestOpts));
+	if (!o) return NULL;
+	o->n = dest_list(o->dir);
+	for (int i = 0; i < o->n; i++) {
+		dest_label(o->dir[i], T_en, o->en[i], sizeof(o->en[0]));
+		dest_label(o->dir[i], T_sv, o->sv[i], sizeof(o->sv[0]));
+	}
+	return o;
+}
+static int dest_offered(const DestOpts *o, const char *dir)
+{
+	for (int i = 0; o && i < o->n; i++) if (!strcmp(o->dir[i], dir)) return 1;
+	return 0;
 }
 // A value's label in both languages: "label":{"en":...,"sv":...}
 static void js_labels(Js &j, const char *en, const char *sv)
@@ -5997,8 +6075,9 @@ static void js_labels(Js &j, const char *en, const char *sv)
 	js_str(j, sv);
 	js_put(j, "}");
 }
-// One setting as list_settings shows it, in the standard (card -1) or for a drive.
-static void setting_json(Js &j, const SettingDef &d, int card)
+// One setting as list_settings shows it, in the standard (card -1) or for a drive. Holds no lock of
+// its own and does no I/O: the destinations come from dest_opts.
+static void setting_json(Js &j, const SettingDef &d, int card, const DestOpts *dests)
 {
 	char sc[16], a[200], b[200];
 	if (card < 0) snprintf(sc, sizeof(sc), "standard"); else drive_id(card, sc, sizeof(sc));
@@ -6023,17 +6102,24 @@ static void setting_json(Js &j, const SettingDef &d, int card)
 		return;
 	}
 	if (d.kind == SK_DEST) {
+		const char *cur = card_dest_cfg(card);
 		js_put(j, ",\"value\":");
-		js_str(j, card_outdir(card));
+		js_str(j, cur);
 		js_put(j, ",\"values\":[");
-		char cands[9][32];
-		int nc = dest_list(cands);
-		for (int i = 0; i < nc; i++) {
+		int nd = dests ? dests->n : 0;
+		for (int i = 0; i < nd; i++) {
 			js_put(j, "%s{\"value\":", i ? "," : "");
-			js_str(j, cands[i]);
+			js_str(j, dests->dir[i]);
 			js_put(j, ",");
-			dest_label(cands[i], T_en, a, sizeof(a));
-			dest_label(cands[i], T_sv, b, sizeof(b));
+			js_labels(j, dests->en[i], dests->sv[i]);
+			js_put(j, "}");
+		}
+		if (!dest_offered(dests, cur)) {   // chosen before, not plugged in now: still the value
+			js_put(j, "%s{\"value\":", nd ? "," : "");
+			js_str(j, cur);
+			js_put(j, ",");
+			dest_label(cur, T_en, a, sizeof(a), 0);
+			dest_label(cur, T_sv, b, sizeof(b), 0);
 			js_labels(j, a, b);
 			js_put(j, "}");
 		}
@@ -6065,15 +6151,17 @@ static void setting_json(Js &j, const SettingDef &d, int card)
 // list_settings: the standard's settings, then each drive's own.
 static int mcp_list_settings(char *out, int n)
 {
+	DestOpts *dests = dest_opts();   // the drives are scanned before the lock: a rip's writes need the file layer
+	if (!dests) { snprintf(out, n, "Out of memory."); return -1; }
 	Js j = js_begin(out, n);
-	CfgLock lock;   // one consistent picture
+	CfgLock lock;   // one consistent picture of the values
 	js_put(j, "{\"settings\":[");
 	int first = 1;
 	for (int i = 0; i < NSETTINGS; i++) {
 		if (SETTINGS[i].scope == SC_DRIVE) continue;
 		js_put(j, first ? "" : ",");
 		first = 0;
-		setting_json(j, SETTINGS[i], -1);
+		setting_json(j, SETTINGS[i], -1, dests);
 	}
 	int list[NCARDS], nc = card_list(list);
 	for (int c = 0; c < nc; c++) {
@@ -6083,10 +6171,11 @@ static int mcp_list_settings(char *out, int n)
 		for (int i = 0; i < NSETTINGS; i++) {
 			if (SETTINGS[i].scope == SC_STD) continue;
 			js_put(j, ",");
-			setting_json(j, SETTINGS[i], list[c]);
+			setting_json(j, SETTINGS[i], list[c], dests);
 		}
 	}
 	js_put(j, "]}");
+	free(dests);
 	return js_end(j, out, n);
 }
 
@@ -6103,7 +6192,8 @@ static void allowed_text(const SettingDef &d, int card, char *out, size_t n)
 
 // Changes setting d (of a drive: card >= 0) to value, as its screen would: the same values, the
 // same follow-ups, saved with source mcp. Holds the config lock. Non-zero with the reason in why.
-static int setting_apply(const SettingDef &d, int card, const char *value, char *why, size_t wn)
+// A drive's card takes its new values on the UI thread (flip_frame), never here: a job may start there.
+static int setting_apply(const SettingDef &d, int card, const char *value, const DestOpts *dests, char *why, size_t wn)
 {
 	int v = 0;
 	if (d.kind == SK_LIST) {
@@ -6120,42 +6210,52 @@ static int setting_apply(const SettingDef &d, int card, const char *value, char 
 			snprintf(why, wn, "Not an allowed value for %s: \"%.40s\". Allowed: %s.", d.key, value, al);
 			return -1;
 		}
-	} else if (d.kind == SK_DEST) {
-		char cands[9][32], al[400] = "";
-		int nc = dest_list(cands), ok = 0;
-		for (int i = 0; i < nc; i++) {
-			if (!strcmp(cands[i], value)) ok = 1;
-			snprintf(al + strlen(al), sizeof(al) - strlen(al), "%s%s", i ? ", " : "", cands[i]);
+	} else if (d.kind == SK_TEXT || d.kind == SK_SECRET) {
+		if ((int)strlen(value) > d.max) {
+			snprintf(why, wn, "Too long: %s takes at most %d bytes.", d.key, d.max);
+			return -1;
 		}
-		if (!ok) { snprintf(why, wn, "Not a destination that is there now: \"%.60s\". Allowed: %s.", value, al); return -1; }
-	} else if ((int)strlen(value) > d.max) {
-		snprintf(why, wn, "Too long: %s takes at most %d bytes.", d.key, d.max);
-		return -1;
+		for (const unsigned char *p = (const unsigned char *)value; *p; p++)
+			if (*p < 0x20 || *p == 0x7F) {   // the on-screen keyboard cannot type one (never the value: it may be a secret)
+				snprintf(why, wn, T_en(STR_SET_CTRL_CHAR), d.key);
+				return -1;
+			}
 	}
 	CfgLock lock;
+	if (d.kind == SK_DEST && !dest_offered(dests, value) && strcmp(value, card_dest_cfg(card))) {
+		char al[400] = "";
+		for (int i = 0; dests && i < dests->n; i++) snprintf(al + strlen(al), sizeof(al) - strlen(al), "%s%s", i ? ", " : "", dests->dir[i]);
+		snprintf(why, wn, "Not a destination that is there now: \"%.60s\". Allowed: %s.", value, al);
+		return -1;
+	}
 	if (card >= 0) {   // as the drive's settings (SELECT) and the home screen's left/right do
 		Card &k = g_cards[card];
 		char id[16];
 		drive_id(card, id, sizeof(id));
+		DriveCfg *cf = card_cfg(card);
 		if (card_busy(card)) {
 			snprintf(why, wn, "The drive %s is busy: a rip, repair or check runs on it. Its settings can change when the job has ended.", id);
 			return -1;
 		}
-		if (d.kind == SK_DEST) card_apply_outdir(card, value);
-		else {
-			if (d.field == F_SPEED) k.speed = v;
-			else if (d.field == F_RETRIES) k.retries = v;
-			else if (d.field == F_CHECK) k.check = v;
-			else if (d.field == F_EJECT) k.eject = v;
-			else if (d.field == F_AUTOSTART) k.autostart = v;
-			card_store(card);
+		if (!cf) { snprintf(why, wn, "The drive %s has no port: its settings cannot be saved.", id); return -1; }
+		if (d.kind == SK_DEST) {
+			if (!card) snprintf(g_outdir, sizeof(g_outdir), "%s", value);
+			else snprintf(g_outdir_usb[usbodd_port(card - 1)], sizeof(g_outdir_usb[0]), "%s", value);
+			__sync_fetch_and_or(&k.pend_cfg, CF_OUTDIR);   // the card takes it on the UI thread
+		} else {
+			DriveCfg nd = {1, -1, -1, -1, -1, -1};
+			if (cf->set) nd = *cf;
+			nd.set = 1;
+			*drive_field(nd, d.field) = v;
+			*cf = nd;
+			__sync_fetch_and_or(&k.pend_cfg, CF_DRIVE);
 		}
 		cfg_save_src(AU_MCP);
 		logf("mcp: drive %s: %s=%s", id, d.key, value);
 		return 0;
 	}
 	char line[700];
-	int mask = g_webhook_mask;
+	int mask = g_webhook_mask, was_remote = g_remote;
 	switch (d.field) {
 	case F_WH_EVENT:
 		snprintf(line, sizeof(line), "webhook_events=%d", v ? mask | 1 << d.arg : mask & ~(1 << d.arg));
@@ -6185,7 +6285,7 @@ static int setting_apply(const SettingDef &d, int card, const char *value, char 
 	cfg_save_src(AU_MCP);
 	if (d.kind == SK_SECRET) logf("mcp: setting %s %s", d.key, value[0] ? "set" : "cleared");   // never the value
 	else logf("mcp: setting %s=%s", d.key, value);
-	if (d.field == F_REMOTE && g_remote) notify_url(STR_REMOTE_HELP, "");   // as the menu does when it turns the view on
+	if (d.field == F_REMOTE && g_remote && !was_remote) notify_url(STR_REMOTE_HELP, "");   // as the menu does when it turns the view on
 	return 0;
 }
 
@@ -6205,11 +6305,20 @@ static int mcp_set_setting(const char *key, const char *value, const char *drive
 		return -1;
 	}
 	char why[800];
-	CfgLock lock;   // the answer shows this change, not one made right after it
-	if (setting_apply(*d, card, value, why, sizeof(why))) { snprintf(out, n, "%s", why); utf8_fix(out); return -1; }
-	Js j = js_begin(out, n);
-	setting_json(j, *d, card);
-	return js_end(j, out, n);
+	DestOpts *dests = NULL;
+	if (d->kind == SK_DEST && !(dests = dest_opts())) { snprintf(out, n, "Out of memory."); return -1; }   // before the lock
+	int rc;
+	{
+		CfgLock lock;   // the answer shows this change, not one made right after it
+		if (setting_apply(*d, card, value, dests, why, sizeof(why))) { snprintf(out, n, "%s", why); utf8_fix(out); rc = -1; }
+		else {
+			Js j = js_begin(out, n);
+			setting_json(j, *d, card, dests);
+			rc = js_end(j, out, n);
+		}
+	}
+	free(dests);
+	return rc;
 }
 
 // read_log: lines of psxrip.log from line `from` (-1: the last max), with the next line's number.
@@ -6224,19 +6333,23 @@ static int log_line(FILE *f, char *buf, int n)   // the next line without its ne
 	return 1;
 }
 #define LOG_SECRETS (2 + 2 * WH_HEADERS)
+#define LOG_SHOWN 1023                  // a line shows at most this many bytes of the log
+#define LOG_READ (LOG_SHOWN + 512 + 1)  // read: a secret (< 512 bytes) that starts within them is read whole
+#define LOG_CLEAN (LOG_SHOWN * 8 + 16)  // a shown line with each secret byte as "[secret]" at the worst
 static int mcp_read_log(int from, int max, char *out, int n)
 {
 	if (max < 1) max = 1;
 	if (max > MCP_MAX_LOG_LINES) max = MCP_MAX_LOG_LINES;
-	char *sec = (char *)malloc(LOG_SECRETS * 512), *line = (char *)malloc(1024), *clean = (char *)malloc(2048);
+	char *sec = (char *)malloc(LOG_SECRETS * 512), *line = (char *)malloc(LOG_READ), *clean = (char *)malloc(LOG_CLEAN);
 	if (!sec || !line || !clean) { free(sec); free(line); free(clean); snprintf(out, n, "Out of memory."); return -1; }
 	int ns = 0;
-	{   // the secrets as they are now: the address, its path (the secret id), each header and its value
+	{   // the secrets as they are now: the address, its path (the secret id), each header and its value,
+		// however short (a path "/" alone is none)
 		CfgLock lock;
-		auto add = [&](const char *s, size_t len) { if (len >= 4 && len < 512) { memcpy(sec + ns * 512, s, len); sec[ns * 512 + len] = 0; ns++; } };
+		auto add = [&](const char *s, size_t len) { if (len >= 1 && len < 512) { memcpy(sec + ns * 512, s, len); sec[ns * 512 + len] = 0; ns++; } };
 		add(g_webhook, strlen(g_webhook));
 		const char *h = strstr(g_webhook, "://"), *path = h ? strchr(h + 3, '/') : NULL;
-		if (path && strlen(path) >= 6) add(path, strlen(path));
+		if (path && strlen(path) >= 2) add(path, strlen(path));
 		for (int i = 0; i < WH_HEADERS; i++) {
 			const char *hd = g_webhook_hdr[i], *c = strchr(hd, ':');
 			add(hd, strlen(hd));
@@ -6250,23 +6363,24 @@ static int mcp_read_log(int from, int max, char *out, int n)
 	int total = 0, got = 0, cut = 0;
 	FILE *f = fopen(LOG_PATH, "r");
 	if (f && from < 0) {   // the last max lines: count them first
-		while (log_line(f, line, 1024)) total++;
+		while (log_line(f, line, LOG_READ)) total++;
 		from = total > max ? total - max : 0;
 		rewind(f);
 		total = 0;
 	}
 	if (from < 0) from = 0;
 	js_put(j, "{\"lines\":[");
-	j.n -= 100;   // room for the end
-	while (f && log_line(f, line, 1024)) {
+	int end_room = j.n > 200 ? 100 : 0;   // room for the end (a tiny buffer: js_end says it is too small)
+	j.n -= end_room;
+	while (f && log_line(f, line, LOG_READ)) {
 		int at = total++;
 		if (at < from || got >= max || cut) continue;
-		size_t o = 0;   // the line with each secret replaced
-		for (const char *p = line; *p && o < 2000; ) {
+		size_t o = 0;   // the line's first LOG_SHOWN bytes with each secret replaced (a secret that starts in them whole)
+		for (const char *p = line; *p && p - line < LOG_SHOWN && o + 9 < LOG_CLEAN; ) {
 			int hit = 0;
 			for (int s = 0; s < ns && !hit; s++) {
 				size_t sl = strlen(sec + s * 512);
-				if (!strncmp(p, sec + s * 512, sl)) { o += snprintf(clean + o, 2048 - o, "[secret]"); p += sl; hit = 1; }
+				if (!strncmp(p, sec + s * 512, sl)) { o += snprintf(clean + o, LOG_CLEAN - o, "[secret]"); p += sl; hit = 1; }
 			}
 			if (!hit) clean[o++] = *p++;
 		}
@@ -6278,7 +6392,7 @@ static int mcp_read_log(int from, int max, char *out, int n)
 		got++;
 	}
 	if (f) fclose(f);
-	j.n += 100;
+	j.n += end_room;
 	int start = from < total ? from : total;
 	js_put(j, "],\"from\":%d,\"next\":%d,\"total\":%d%s}", start, start + got, total, cut ? ",\"truncated\":true" : "");
 	free(sec); free(line); free(clean);
@@ -7233,9 +7347,12 @@ static void own_dialog_draw(const char *msg, int yesno)
 }
 static int own_dialog(const char *msg, int yesno)
 {
-	snprintf(g_dlg_text, sizeof(g_dlg_text), "%s", msg);
-	g_dlg_q = yesno;
-	g_dlg_open = 1;
+	{
+		UiLock lock;
+		snprintf(g_ui.dlg_text, sizeof(g_ui.dlg_text), "%s", msg);
+		g_ui.dlg_q = yesno;
+		g_ui.dlg_open = 1;
+	}
 	pad_pressed();
 	g_redraw = 2;
 	int a = 2;
@@ -7251,7 +7368,7 @@ static int own_dialog(const char *msg, int yesno)
 		if (p & B_CROSS) { a = 1; break; }
 		if (yesno && (p & B_CIRCLE)) break;
 	}
-	g_dlg_open = 0;
+	{ UiLock lock; g_ui.dlg_open = 0; }
 	return a;
 }
 
@@ -7309,6 +7426,18 @@ static int result_screen()
 	return 0;
 }
 
+// The app's locks (the UI tests create them too).
+static void locks_init()
+{
+	sys_mutex_attr_t ma;
+	sysMutexAttrInitialize(ma);
+	sysMutexCreate(&g_rd_mx, &ma);
+	sysMutexCreate(&g_idx_mx, &ma);
+	sysMutexCreate(&g_ui_mx, &ma);
+	ma.attr_recursive = SYS_MUTEX_ATTR_RECURSIVE;
+	sysMutexCreate(&g_cfg_mx, &ma);
+}
+
 int main(int argc, char *argv[])
 {
 	void *host_addr = memalign(1024 * 1024, HOST_SIZE);
@@ -7329,7 +7458,7 @@ int main(int argc, char *argv[])
 		t_card = -1;
 		logf("thread-local storage %s (thread saw %d)", g_parallel ? "ok: parallel rips" : "NOT working: one rip at a time", seen);
 	}
-	{ sys_mutex_attr_t ma; sysMutexAttrInitialize(ma); sysMutexCreate(&g_rd_mx, &ma); sysMutexCreate(&g_idx_mx, &ma); ma.attr_recursive = SYS_MUTEX_ATTR_RECURSIVE; sysMutexCreate(&g_cfg_mx, &ma); }
+	locks_init();
 	lang_init();
 	netInitialize();
 	// start-up checks: config, lv1 state after an earlier crash, USB file systems

@@ -15,6 +15,8 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <set>
+#include <pthread.h>
 
 struct Box { int kind, x, y, w, h, extra; std::string text; };
 static std::vector<Box> g_boxes;
@@ -494,6 +496,12 @@ static void run_screen(std::function<void()> screen, std::function<int(int)> ste
 	g_step = nullptr;
 }
 
+// n frames of a screen with nothing pressed: the UI thread's turn (it takes what MCP asked for)
+static void ui_frames(int n)
+{
+	run_screen([]() { about_screen(); }, [n](int f) -> int { return f > n ? B_CIRCLE : 0; });
+}
+
 static void mcp_scenarios()
 {
 	int bad = 0;
@@ -512,6 +520,7 @@ static void mcp_scenarios()
 	g_webhook[0] = 0; g_webhook_hdr[0][0] = 0; g_webhook_on = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5;
 	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
 	g_remote = g_mcp = g_status_json = 0; g_audit_mb = 256;
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};   // the drives' own values: none (as the cards)
 	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();   // primes
 	const McpHooks &h = g_mcp_hooks;
 	mcp_init(&g_mcp_hooks, APP_VERSION);   // as the app does at start
@@ -559,9 +568,13 @@ static void mcp_scenarios()
 		need(rc != 0, "destination needs a drive", out);
 		// a drive's own values, like the drive's settings (SELECT)
 		rc = h.set_setting("speed", "1", "usb2", out, sizeof out);
-		need(rc == 0 && g_cards[2].speed == 1 && g_usbcfg[2].set && g_usbcfg[2].speed == 1, "usb2's own speed", out);
+		need(rc == 0 && g_usbcfg[2].set && g_usbcfg[2].speed == 1 && strstr(out, "\"value\":\"1\""), "usb2's own speed", out);
+		need(g_cards[2].speed == -1 && (g_cards[2].pend_cfg & CF_DRIVE), "MCP's thread never writes the card: the UI takes it", out);
+		ui_frames(1);
+		need(g_cards[2].speed == 1 && !g_cards[2].pend_cfg, "the card takes usb2's speed on the next frame");
 		need(setting_rows("drive_usb2", AU_MCP) == 1, "usb2's change is an audit row drive_usb2 with source mcp");
 		rc = h.set_setting("speed", "-1", "usb2", out, sizeof out);
+		ui_frames(1);
 		need(rc == 0 && g_cards[2].speed == -1, "usb2 back to the standard speed", out);
 		rc = h.set_setting("speed", "1", "usb5", out, sizeof out);
 		need(rc != 0, "a drive that is not there is refused", out);
@@ -572,7 +585,8 @@ static void mcp_scenarios()
 		need(rc != 0, "a busy drive's destination is refused", out);
 		g_cards[1].job = 0;
 		rc = h.set_setting("destination", "/dev_hdd0/PSXISO", "internal", out, sizeof out);
-		need(rc == 0 && !strcmp(g_cards[0].outdir, "/dev_hdd0/PSXISO"), "the internal drive's destination", out);
+		ui_frames(1);
+		need(rc == 0 && !strcmp(g_cards[0].outdir, "/dev_hdd0/PSXISO") && !strcmp(g_outdir, "/dev_hdd0/PSXISO"), "the internal drive's destination", out);
 		rc = h.set_setting("destination", "/dev_hdd0/ELSEWHERE", "internal", out, sizeof out);
 		need(rc != 0, "a destination that is not offered is refused", out);
 		// switches, webhook events and progress, the file name, the audit size
@@ -727,12 +741,285 @@ static void mcp_scenarios()
 	if (bad) g_fail += bad; else printf("ok   MCP: state, drives, settings (list, set, the open screen), log, no secrets\n");
 }
 
+
+// ---------------------------------------------------------------- MCP: the settings the screens offer, threads, the log's secrets
+// The value of a list setting as the screens and set_setting see it (the standard: card -1)
+static int value_of(const char *key, int card)
+{
+	for (int i = 0; i < NSETTINGS; i++) if (!strcmp(SETTINGS[i].key, key)) return setting_int(SETTINGS[i], card);
+	return -999;
+}
+// Where a list setting is changed on a screen: the screen, the row (reached with DOWN from row 0)
+struct ScreenRow { const char *key; int drive; void (*screen)(); int row; };
+static int g_rows_card;
+static void drive_screen_of_test() { drive_settings_screen(g_rows_card); }
+
+static void mcp_settings_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp settings: %s%s%.300s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
+	reset_all(); usb(0, 0); usb(1, 2);
+	for (int c = 0; c < 3; c++) { g_cards[c].tried = 1; card_defaults(g_cards[c]); }
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	g_webhook[0] = 0; for (int i = 0; i < WH_HEADERS; i++) g_webhook_hdr[i][0] = 0;
+	g_webhook_on = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5; g_webhook_hdr_on = 0;
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	g_remote = g_mcp = g_status_json = 0; g_audit_mb = 256;
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();
+	const McpHooks &h = g_mcp_hooks;
+	static char out[MCP_MAX_RESPONSE];
+
+	// free text and secrets: no control characters (the on-screen keyboard cannot type them)
+	{
+		int keys = 0;
+		const char *bad_bytes[] = {"\t", "\x1b", "\x7f", "\x01", "\x1f"};
+		for (int i = 0; i < NSETTINGS; i++) {
+			const SettingDef &d = SETTINGS[i];
+			if (d.kind != SK_TEXT && d.kind != SK_SECRET) continue;
+			keys++;
+			const char *base = d.field == F_NAME ? "%T " : d.field == F_WH_URL ? "http://h.example/x" : "X-Key: v";
+			for (const char *b : bad_bytes) {
+				std::string v = std::string(base) + b + "end";
+				std::string before = d.field == F_NAME ? g_name_pat : d.field == F_WH_URL ? g_webhook : g_webhook_hdr[d.arg];
+				int rc = h.set_setting(d.key, v.c_str(), NULL, out, sizeof out);
+				std::string after = d.field == F_NAME ? g_name_pat : d.field == F_WH_URL ? g_webhook : g_webhook_hdr[d.arg];
+				char what[120];
+				snprintf(what, sizeof what, "%s with byte 0x%02x is refused", d.key, (unsigned char)b[0]);
+				need(rc != 0 && before == after && strstr(out, "control character") && !strstr(out, "end"), what, out);
+			}
+			std::string ok = std::string(d.field == F_NAME ? "%T \xc3\x85" : d.field == F_WH_URL ? "http://h.example/\xc3\x85" : "X-Key: \xc3\x85");
+			int rc = h.set_setting(d.key, ok.c_str(), NULL, out, sizeof out);
+			char what[120];
+			snprintf(what, sizeof what, "%s takes UTF-8 letters", d.key);
+			need(rc == 0, what, out);
+			h.set_setting(d.key, d.field == F_NAME ? "%T [%D]" : "", NULL, out, sizeof out);
+		}
+		need(keys == 5, "the free-text and secret keys: name_pattern, webhook, three headers");
+		const char *req = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"set_setting\",\"arguments\":{\"key\":\"name_pattern\",\"value\":\"%T\\u0009x\"}}}";
+		mcp_handle(req, (int)strlen(req), out, sizeof out);
+		need(strstr(out, "\"isError\":true") && !strcmp(g_name_pat, "%T [%D]"), "a tab sent as \\u0009 over JSON-RPC is refused", out);
+	}
+
+	// every value a screen reaches is one set_setting takes, and the other way round
+	{
+		int ev_row[WH_COUNT], r = 2;   // the webhooks' rows: address, headers, the events but progress, progress
+		for (int i = 0; i < WH_COUNT; i++) if (i != WH_RIP_PROGRESS) ev_row[i] = r++;
+		const int prog_row = r;
+		std::vector<ScreenRow> rows = {
+			{"speed", 0, settings_screen, 0}, {"retries", 0, settings_screen, 1}, {"check", 0, settings_screen, 2},
+			{"eject", 0, settings_screen, 3}, {"autostart", 0, settings_screen, 4}, {"redump", 0, settings_screen, 6},
+			{"webhook_on", 0, settings_screen, 9}, {"audit_mb", 0, settings_screen, 11},
+			{"remote", 0, remote_control_screen, 0}, {"mcp", 0, remote_control_screen, 1}, {"status_json", 0, remote_control_screen, 2},
+			{"webhook_headers_on", 0, webhook_settings_screen, 1}, {"webhook_progress", 0, webhook_settings_screen, prog_row},
+			{"speed", 1, drive_screen_of_test, 0}, {"retries", 1, drive_screen_of_test, 1}, {"check", 1, drive_screen_of_test, 2},
+			{"eject", 1, drive_screen_of_test, 3}, {"autostart", 1, drive_screen_of_test, 4},
+		};
+		for (int i = 0; i < NSETTINGS; i++)
+			if (SETTINGS[i].field == F_WH_EVENT) rows.push_back({SETTINGS[i].key, 0, webhook_settings_screen, ev_row[SETTINGS[i].arg]});
+		for (int i = 0; i < NSETTINGS; i++) {   // each list setting has its screen row here (a new one must be added)
+			const SettingDef &d = SETTINGS[i];
+			if (d.kind != SK_LIST) continue;
+			for (int drive = 0; drive < 2; drive++) {
+				if ((drive && d.scope == SC_STD) || (!drive && d.scope == SC_DRIVE)) continue;
+				int found = 0;
+				for (auto &sr : rows) found |= !strcmp(sr.key, d.key) && sr.drive == drive;
+				char what[120];
+				snprintf(what, sizeof what, "%s%s has a screen row in the parity test", d.key, drive ? " (a drive)" : "");
+				need(found, what);
+			}
+		}
+		g_rows_card = 2;
+		const int card = 2;
+		for (auto &sr : rows) {
+			std::set<int> reached;
+			int c = sr.drive ? card : -1;
+			reached.insert(value_of(sr.key, c));
+			int labels_ok = 1;
+			const SettingDef *d = NULL;
+			for (int i = 0; i < NSETTINGS; i++) if (!strcmp(SETTINGS[i].key, sr.key)) d = &SETTINGS[i];
+			run_screen(sr.screen, [&](int f) -> int {
+				int v = value_of(sr.key, c);
+				reached.insert(v);
+				if (f > sr.row + 1 && v >= 0 && !(sr.screen == settings_screen && (sr.row == 9))) {   // the row shows the table's label
+					char l[100] = "";
+					for (int i = 0; i < d->nopts; i++) if (d->opts[i].v == v) opt_label(d->opts[i], T, l, sizeof l);
+					if (!l[0] || !has_text(l)) labels_ok = 0;
+				}
+				if (f <= sr.row) return B_DOWN;
+				if (f <= sr.row + 12) return B_LEFT;
+				if (f <= sr.row + 24) return B_RIGHT;
+				if (f <= sr.row + 25) return 0;
+				return B_CIRCLE;
+			});
+			ui_frames(1);   // a drive's change reaches its card
+			std::set<int> taken;
+			char drive_id_s[16] = "";
+			if (sr.drive) drive_id(card, drive_id_s, sizeof drive_id_s);
+			for (int v = -3; v <= 300; v++) {
+				char t[16];
+				snprintf(t, sizeof t, "%d", v);
+				if (!h.set_setting(sr.key, t, sr.drive ? drive_id_s : NULL, out, sizeof out)) taken.insert(v);
+			}
+			ui_frames(1);
+			std::string a, b;
+			for (int v : reached) a += std::to_string(v) + " ";
+			for (int v : taken) b += std::to_string(v) + " ";
+			char what[300];
+			snprintf(what, sizeof what, "%s%s: the screen reaches {%s}, set_setting takes {%s}", sr.key, sr.drive ? " (usb2)" : "", a.c_str(), b.c_str());
+			need(reached == taken, what);
+			snprintf(what, sizeof what, "%s%s: the screen shows the table's labels", sr.key, sr.drive ? " (usb2)" : "");
+			need(labels_ok, what);
+		}
+		g_remote = g_mcp = g_status_json = 0; remote_apply();
+	}
+
+	// switches: the web server's paths follow (remote_apply), the popup only when the view turns on
+	{
+		host_remote_flags = -1;
+		int rc = h.set_setting("mcp", "1", NULL, out, sizeof out);
+		need(rc == 0 && host_remote_flags == REMOTE_MCP, "set_setting mcp=1 tells the web server", out);
+		rc = h.set_setting("status_json", "1", NULL, out, sizeof out);
+		need(rc == 0 && host_remote_flags == (REMOTE_MCP | REMOTE_STATUS), "set_setting status_json=1 tells the web server", out);
+		int calls = host_webman_calls;
+		rc = h.set_setting("remote", "1", NULL, out, sizeof out);
+		need(rc == 0 && host_remote_flags == (REMOTE_VIEW | REMOTE_MCP | REMOTE_STATUS), "set_setting remote=1 tells the web server", out);
+		need(host_webman_calls == calls + 1, "remote off -> on shows the address (one popup)");
+		rc = h.set_setting("remote", "1", NULL, out, sizeof out);
+		need(rc == 0 && host_webman_calls == calls + 1, "remote on -> on: no popup");
+		rc = h.set_setting("mcp", "0", NULL, out, sizeof out);
+		need(rc == 0 && host_remote_flags == (REMOTE_VIEW | REMOTE_STATUS), "set_setting mcp=0 tells the web server", out);
+		h.set_setting("remote", "0", NULL, out, sizeof out); h.set_setting("status_json", "0", NULL, out, sizeof out);
+		need(host_remote_flags == 0, "all off: the web server stops");
+	}
+
+	// destinations: scanned without the config lock; one that is not connected is listed as such
+	{
+		int io = 0, io_locked = 0;
+		static int *pio, *pio_locked;
+		pio = &io; pio_locked = &io_locked;
+		host_io = []() { (*pio)++; if (host_mutex_held(g_cfg_mx)) (*pio_locked)++; };
+		int rc = h.list_settings(out, sizeof out);
+		need(rc == 0 && io > 0 && io_locked == 0, "list_settings scans the drives without the config lock", out);
+		io = io_locked = 0;
+		rc = h.set_setting("destination", "/dev_hdd0/PSXISO", "usb0", out, sizeof out);
+		need(rc == 0 && io > 0 && io_locked == 0, "set_setting destination scans without the config lock", out);
+		host_io = NULL;
+		ui_frames(1);
+		snprintf(g_outdir, sizeof g_outdir, "/dev_usb006/PSXISO");   // chosen before, not plugged in now
+		card_take_cfg(0, CF_OUTDIR);
+		rc = h.list_settings(out, sizeof out);
+		const char *e = strstr(out, "{\"value\":\"/dev_usb006/PSXISO\",\"label\":{\"en\":");
+		need(rc == 0 && e && strstr(e, "not connected") && strstr(e, "inte ansluten") && strstr(e, "inte ansluten") < strstr(e, "}}"),
+		     "a destination that is not connected is in values, marked so", out);
+		rc = h.set_setting("destination", "/dev_usb006/PSXISO", "internal", out, sizeof out);
+		need(rc == 0, "the listed destination that is not connected is taken (it is the current one)", out);
+		rc = h.set_setting("destination", "/dev_usb007/PSXISO", "internal", out, sizeof out);
+		need(rc != 0, "another destination that is not connected is refused", out);
+		h.set_setting("destination", "/dev_hdd0/PSXISO", "internal", out, sizeof out);
+		ui_frames(1);
+	}
+
+	// get_state reads one consistent picture while the UI thread changes screens
+	{
+		static volatile int stop, started;
+		stop = started = 0;
+		pthread_t t;
+		pthread_create(&t, NULL, [](void *) -> void * {
+			while (!stop) { ui_at(SCR_DRIVE_SETTINGS, 4, 2); ui_at(SCR_SETTINGS, 1, -1); started = 1; }
+			return NULL;
+		}, NULL);
+		while (!started) usleep(100);
+		int torn = 0;
+		for (int i = 0; i < 20000 && !torn; i++) {
+			h.state(out, sizeof out);
+			bool ds = strstr(out, "\"screen\":\"drive_settings\"") != NULL, st = strstr(out, "\"screen\":\"settings\"") != NULL;
+			bool r4 = strstr(out, "\"row\":4") != NULL, r1 = strstr(out, "\"row\":1") != NULL, dr = strstr(out, "\"drive\":\"usb2\"") != NULL;
+			if (!((ds && r4 && dr) || (st && r1 && !dr))) torn = 1;
+		}
+		stop = 1;
+		pthread_join(t, NULL);
+		need(!torn, "get_state never pairs one screen with another's row or drive", out);
+	}
+
+	// the config lock is recursive and shared: MCP changes settings while the settings screen does
+	{
+		static volatile int stop;
+		static int sets_ok;
+		stop = 0; sets_ok = 0;
+		pthread_t t;
+		pthread_create(&t, NULL, [](void *) -> void * {
+			static char o[MCP_MAX_RESPONSE];
+			for (int i = 0; !stop && i < 300; i++)
+				if (!g_mcp_hooks.set_setting("speed", i & 1 ? "1" : "2", NULL, o, sizeof o)) sets_ok++;
+			return NULL;
+		}, NULL);
+		run_screen(settings_screen, [&](int f) -> int {
+			if (f == 1) return B_DOWN;   // re-reads
+			if (f < 120) return f & 1 ? B_RIGHT : 0;
+			return B_CIRCLE;
+		});
+		stop = 1;
+		pthread_join(t, NULL);
+		std::string cfg = read_file("out/psxrip.cfg");
+		char sp[32], re[32];
+		snprintf(sp, sizeof sp, "\nspeed=%d\n", g_std.speed);
+		snprintf(re, sizeof re, "\nretries=%d\n", g_std.retries);
+		need(sets_ok > 0 && cfg.find(sp) != std::string::npos && cfg.find(re) != std::string::npos,
+		     "two threads: the saved config is the last values of both", cfg.c_str());
+	}
+
+	// read_log: short secrets, short paths, a secret cut by a long line, a tiny buffer
+	{
+		h.set_setting("webhook", "http://h.example/abcd", NULL, out, sizeof out);
+		h.set_setting("webhook_header1", "X-K: q7z", NULL, out, sizeof out);
+		h.set_setting("webhook_header2", "X-Long: TOPSECRETLONGVALUE", NULL, out, sizeof out);
+		FILE *f = fopen(LOG_PATH, "w");
+		fprintf(f, "key q7z sent\n");
+		fprintf(f, "path /abcd used\n");
+		fprintf(f, "%s TOPSECRETLONGVALUE\n", std::string(1015, 'x').c_str());   // the secret across the 1023-byte cut
+		fclose(f);
+		int rc = h.read_log(0, 10, out, sizeof out);
+		need(rc == 0 && !strstr(out, "q7z") && !strstr(out, "/abcd") && !strstr(out, "TOPS") && !strstr(out, "TOPSECRET"), "read_log: short secrets and a cut one are taken out", out);
+		need(strstr(out, "key [secret] sent") && strstr(out, "path [secret] used"), "read_log: the short ones as [secret]", out);
+		static char small[400];
+		memset(small, 'Z', sizeof small);
+		rc = h.read_log(0, 10, small, 300);
+		need(small[299] == 'Z' || memchr(small, 0, 300), "read_log with a tiny buffer stays in it");
+		need(small[300] == 'Z' && small[399] == 'Z', "read_log with a tiny buffer writes nothing past it");
+		h.set_setting("webhook", "", NULL, out, sizeof out);
+		h.set_setting("webhook_header1", "", NULL, out, sizeof out);
+		h.set_setting("webhook_header2", "", NULL, out, sizeof out);
+		remove(LOG_PATH);
+	}
+
+	g_webhook[0] = 0; for (int i = 0; i < WH_HEADERS; i++) g_webhook_hdr[i][0] = 0;
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; g_audit_mb = 256; audit_apply_cap();
+	g_remote = g_mcp = g_status_json = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5; g_webhook_on = 0; g_webhook_hdr_on = 0;
+	snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	snprintf(g_outdir, sizeof g_outdir, "/dev_hdd0/PSXISO");
+	for (int c = 0; c < NCARDS; c++) { card_defaults(g_cards[c]); g_cards[c].pend_cfg = 0; }
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	ui_at(SCR_HOME);
+	system("rm -rf out/audit out/psxrip.cfg");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   MCP: control characters, the screens' values, switches, destinations, threads, log secrets\n");
+}
+
 int main()
 {
 	setvbuf(stdout, NULL, _IONBF, 0);   // every line out before a crash
 	system("mkdir -p out");
 	ui_init();
 	lang_init();
+	locks_init();   // as the app does at start: real (host) mutexes
 	for (int c = 0; c < NCARDS; c++) ctx_init(c);
 	ui_trace = trace;
 
@@ -1344,6 +1631,7 @@ int main()
 		if (bad) g_fail += bad; else printf("ok   undoing an audit_mb row applies the cap at once\n");
 	}
 	mcp_scenarios();
+	mcp_settings_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

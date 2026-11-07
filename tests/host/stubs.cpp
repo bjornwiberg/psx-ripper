@@ -26,9 +26,11 @@
 #include "webhook.h"
 #include "host.h"
 
+void (*host_io)() = 0;   // called by the drive scans and free-space queries (a test checks which locks are held)
 // lv2: free space on a drive (syscall 840) is a hard disk with room; nothing else happens
 void host_lv2_3(int n, u64, u64 total, u64 avail)
 {
+	if (n == 840 && host_io) host_io();
 	if (n == 840) { *(uint64_t *)(uintptr_t)total = 465ull << 30; *(uint64_t *)(uintptr_t)avail = 338ull << 30; }
 }
 
@@ -81,13 +83,54 @@ int sysThreadCreate(sys_ppu_thread_t *id, void (*entry)(void *), void *arg, int,
 }
 void sysThreadExit(u64) { pthread_exit(NULL); }   // only the server's threads call it here
 #else
-int sysThreadCreate(sys_ppu_thread_t *id, void (*)(void *), void *, int, u64, u64, char *) { *id = 0; return -1; }
+int host_webman_calls = 0;   // webMAN requests the app started (a popup, ...): counted, not sent
+int sysThreadCreate(sys_ppu_thread_t *id, void (*)(void *), void *, int, u64, u64, char *name)
+{
+	*id = 0;
+	if (name && !strcmp(name, "psxwebman")) __sync_fetch_and_add(&host_webman_calls, 1);
+	return -1;
+}
 void sysThreadExit(u64) {}
 #endif
 int sysThreadJoin(sys_ppu_thread_t, u64 *) { return 0; }
-int sysMutexCreate(sys_mutex_t *m, const sys_mutex_attr_t *) { *m = 1; return 0; }
-int sysMutexLock(sys_mutex_t, u64) { return 0; }
-int sysMutexUnlock(sys_mutex_t) { return 0; }
+// Real mutexes, recursive when the attributes say so (as lv2's): a test can run a screen and MCP's
+// hooks on two threads. A handle is an index; 0 was never created (a lock on it fails, as on the console).
+#include <pthread.h>
+#define HOST_MUTEXES 32
+static pthread_mutex_t g_host_mx[HOST_MUTEXES];
+static pthread_t g_host_owner[HOST_MUTEXES];
+static int g_host_depth[HOST_MUTEXES], g_host_mx_n = 1;
+int sysMutexCreate(sys_mutex_t *m, const sys_mutex_attr_t *a)
+{
+	int i = __sync_fetch_and_add(&g_host_mx_n, 1);
+	if (i >= HOST_MUTEXES) return -1;
+	pthread_mutexattr_t at;
+	pthread_mutexattr_init(&at);
+	pthread_mutexattr_settype(&at, a && a->attr_recursive == SYS_MUTEX_ATTR_RECURSIVE ? PTHREAD_MUTEX_RECURSIVE : PTHREAD_MUTEX_ERRORCHECK);
+	pthread_mutex_init(&g_host_mx[i], &at);
+	pthread_mutexattr_destroy(&at);
+	*m = i;
+	return 0;
+}
+int sysMutexLock(sys_mutex_t m, u64)
+{
+	if (m < 1 || m >= (sys_mutex_t)g_host_mx_n) return -1;
+	int r = pthread_mutex_lock(&g_host_mx[m]);
+	if (r) { fprintf(stderr, "FAIL mutex %u: lock error %d (a second lock of a lock that is not recursive)\n", m, r); abort(); }
+	g_host_owner[m] = pthread_self();
+	g_host_depth[m]++;
+	return 0;
+}
+int sysMutexUnlock(sys_mutex_t m)
+{
+	if (m < 1 || m >= (sys_mutex_t)g_host_mx_n) return -1;
+	if (!--g_host_depth[m]) g_host_owner[m] = pthread_t();
+	return pthread_mutex_unlock(&g_host_mx[m]);
+}
+int host_mutex_held(sys_mutex_t m)   // by the calling thread
+{
+	return m >= 1 && m < (sys_mutex_t)g_host_mx_n && g_host_depth[m] > 0 && pthread_equal(g_host_owner[m], pthread_self());
+}
 int sysMemContainerCreate(sys_mem_container_t *c, u64) { *c = 1; return 0; }
 int sysMemContainerDestroy(sys_mem_container_t) { return 0; }
 
@@ -148,8 +191,8 @@ int vf_close(VFile *f) { int r = fclose(f->f); free(f); return r; }
 int vf_unlink(const char *path) { return unlink(path); }
 int vf_rename(const char *from, const char *to) { return rename(from, to); }
 int vf_mkdir(const char *) { return 0; }
-int vf_scan(VfVolume *, int) { return 0; }
-int vf_free_mb(const char *, uint64_t *mb) { *mb = 338 * 1024; return 0; }   // a hard disk with room
+int vf_scan(VfVolume *, int) { if (host_io) host_io(); return 0; }
+int vf_free_mb(const char *, uint64_t *mb) { if (host_io) host_io(); *mb = 338 * 1024; return 0; }   // a hard disk with room
 int vf_list(const char *, void (*)(const char *, void *), void *) { return 0; }
 
 // Redump, the remote view and webhooks: no network on the host
@@ -175,7 +218,8 @@ int netCtlGetInfo(int, union net_ctl_info *info)   // this computer's first LAN 
 }
 #else
 void remote_init(const RemoteHooks *) {}
-void remote_set(int) {}
+int host_remote_flags = -1;   // what the app last told the web server to serve (remote_set)
+void remote_set(int flags) { host_remote_flags = flags; }
 int remote_ip(char *out, int n) { snprintf(out, n, "192.168.1.50"); return 0; }
 int remote_jpeg(unsigned char **jpg, int *len) { *jpg = NULL; *len = 0; return -1; }   // the encoder is remote.cpp's (remote_test)
 #endif
