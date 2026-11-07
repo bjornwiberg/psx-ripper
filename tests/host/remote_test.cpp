@@ -27,7 +27,7 @@ int ui_w() { return 64; }
 int ui_h() { return 36; }
 const char *T(StrId) { return "text"; }
 int netCtlInit() { return 0; }
-int netCtlGetInfo(int, union net_ctl_info *info) { snprintf(info->ip_address, sizeof(info->ip_address), "127.0.0.1"); return 0; }
+int netCtlGetInfo(int, union net_ctl_info *info) { snprintf(info->ip_address, sizeof(info->ip_address), "192.168.1.50"); return 0; }
 int sysThreadCreate(sys_ppu_thread_t *id, void (*entry)(void *), void *arg, int, u64, u64, char *)
 {
 	*id = 0;
@@ -46,15 +46,18 @@ extern volatile int g_remote_sndbuf;
 
 static int status_hook(char *out, int n) { snprintf(out, n, "{\"drives\":[]}"); return 0; }
 // get_state answers with a large text: a client that never reads it fills the socket buffers
+static volatile int g_state_delay_ms = 0;   // get_state takes this long (a slow tool)
 static int big_state(char *out, int n)
 {
+	if (g_state_delay_ms) { usleep(g_state_delay_ms * 1000); snprintf(out, n, "slow"); return 0; }
 	int k = n / 2 - 300;
 	if (k > 250000) k = 250000;
 	memset(out, '"', k);   // each one escaped: twice as long in the answer
 	out[k] = 0;
 	return 0;
 }
-static int press_hook(const char *b) { return strcmp(b, "cross") != 0; }
+static volatile int g_presses = 0;   // buttons the pad pressed
+static int press_hook(const char *b) { g_presses++; return strcmp(b, "cross") != 0; }
 
 struct Resp { int status; std::string head, body; };
 
@@ -122,6 +125,13 @@ static double now_s()
 	return t.tv_sec + t.tv_nsec / 1e9;
 }
 
+static void *http_thread(void *arg)
+{
+	std::pair<std::string, Resp> *x = (std::pair<std::string, Resp> *)arg;
+	x->second = http(x->first);
+	return NULL;
+}
+
 // A slow client: sends `start`, then one byte of `drip` every 300 ms (never finishing the request)
 // until the server answers or closes, or `max_secs` pass. The answer, and how long it took.
 static Resp slow_client(const std::string &start, char drip, int max_secs, double *took)
@@ -141,10 +151,10 @@ static Resp slow_client(const std::string &start, char drip, int max_secs, doubl
 	return r;
 }
 
-static std::string with_origin(const char *origin, const std::string &body)
+static std::string with_origin(const char *origin, const std::string &body, const char *path = "/mcp")
 {
 	char h[256];
-	snprintf(h, sizeof(h), "POST /mcp HTTP/1.1\r\nHost: x\r\nOrigin: %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n", origin, body.size());
+	snprintf(h, sizeof(h), "POST %s HTTP/1.1\r\nHost: x\r\nOrigin: %s\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n", path, origin, body.size());
 	return h + body;
 }
 
@@ -220,16 +230,55 @@ int main()
 	expect(r.status == 403 && r.body.find("\"error\"") != std::string::npos && r.body.find("protocolVersion") == std::string::npos, "Origin elsewhere: 403", r);
 	r = http(with_origin("http://192.168.1.5:8090", init));
 	expect(r.status == 403, "Origin of another LAN address: 403", r);
-	r = http(with_origin("http://127.0.0.1:8090.evil.example", init));
+	r = http(with_origin("http://192.168.1.50:8090.evil.example", init));
 	expect(r.status == 403, "Origin that only starts like the console's: 403", r);
-	r = http(with_origin("http://127.0.0.1:3000", init));
+	r = http(with_origin("http://192.168.1.50:3000", init));
 	expect(r.status == 403, "Origin of the console's address on another port: 403", r);
+	r = http(with_origin("http://127.0.0.1:3000", init));
+	expect(r.status == 403, "Origin of the simulator's address on another port: 403", r);
 	r = http(with_origin("null", init));
 	expect(r.status == 403, "Origin null: 403", r);
-	r = http(with_origin("http://127.0.0.1:8090", init));   // the test's console address (netCtlGetInfo above)
+	r = http(with_origin("http://192.168.1.50:8090", init));   // the test's console address (netCtlGetInfo above)
 	expect(r.status == 200 && r.body.find("protocolVersion") != std::string::npos, "Origin of the console itself: allowed", r);
+	// the simulator's page (HOST_REMOTE only; the console's build allows only its own address)
 	r = http(with_origin("http://localhost:8090", init));
-	expect(r.status == 200 && r.body.find("protocolVersion") != std::string::npos, "Origin localhost: allowed", r);
+	expect(r.status == 200 && r.body.find("protocolVersion") != std::string::npos, "simulator: Origin localhost allowed", r);
+	r = http(with_origin("http://127.0.0.1:8090", init));
+	expect(r.status == 200 && r.body.find("protocolVersion") != std::string::npos, "simulator: Origin 127.0.0.1 allowed", r);
+
+	// the pad: a page elsewhere must not press the console's buttons either; its own page and a
+	// program (no Origin) may
+	const int presses = g_presses;
+	r = http(with_origin("http://evil.example", "cross", "/pad"));
+	expect(r.status == 403, "POST /pad with an Origin elsewhere: 403", r);
+	r = http(with_origin("null", "cross", "/pad"));
+	expect(r.status == 403, "POST /pad with Origin null: 403", r);
+	r = http(with_origin("http://192.168.1.50:3000", "cross", "/pad"));
+	expect(r.status == 403, "POST /pad from the console's address on another port: 403", r);
+	expect(g_presses == presses, "POST /pad refused by Origin: nothing pressed", r);
+	r = http(with_origin("http://192.168.1.50:8090", "cross", "/pad"));
+	expect(r.status == 204, "POST /pad from the console's own page: pressed", r);
+	r = http(post("/pad", "cross"));
+	expect(r.status == 204, "POST /pad without Origin: pressed", r);
+
+	{   // a request waiting behind a slow one is not handled once MCP was turned off meanwhile
+		g_state_delay_ms = 1000;
+		std::pair<std::string, Resp> slow(post("/mcp", "{\"jsonrpc\":\"2.0\",\"id\":21,\"method\":\"tools/call\",\"params\":{\"name\":\"get_state\"}}"), Resp());
+		std::pair<std::string, Resp> waiting(post("/mcp", "{\"jsonrpc\":\"2.0\",\"id\":22,\"method\":\"ping\"}"), Resp());
+		pthread_t a, b;
+		pthread_create(&a, NULL, http_thread, &slow);
+		usleep(300 * 1000);
+		pthread_create(&b, NULL, http_thread, &waiting);
+		usleep(300 * 1000);
+		remote_set(REMOTE_VIEW | REMOTE_STATUS);   // MCP off on the console while the second waits
+		pthread_join(a, NULL);
+		pthread_join(b, NULL);
+		g_state_delay_ms = 0;
+		expect(slow.second.status == 200 && slow.second.body.find("\"id\":21") != std::string::npos, "MCP off mid-request: the request being handled is answered", slow.second);
+		expect(waiting.second.status == 403 && waiting.second.body.find("MCP is off") != std::string::npos && waiting.second.body.find("\"id\":22") == std::string::npos,
+		       "MCP off while a request waits for another: 403, not handled", waiting.second);
+		remote_set(REMOTE_VIEW | REMOTE_MCP | REMOTE_STATUS);
+	}
 
 	// other methods on /mcp: 405 with Allow: POST; /mcp is the exact path
 	r = http("GET /mcp HTTP/1.1\r\nHost: x\r\n\r\n");

@@ -137,8 +137,8 @@ static int content_length(const char *req, const char *hend)
 }
 
 // A browser sends Origin with a request a page makes: only the console's own pages may reach
-// /mcp (a page elsewhere could otherwise use the browser to control the app). No Origin: a
-// program such as an MCP client, allowed.
+// /mcp and /pad (a page elsewhere could otherwise use the browser to control the app). No Origin:
+// a program such as an MCP client, allowed.
 static int origin_ok(const char *req, const char *hend)
 {
 	const char *v = header(req, hend, "Origin:");
@@ -149,9 +149,13 @@ static int origin_ok(const char *req, const char *hend)
 	memcpy(o, v, k); o[k] = 0;
 	if (remote_ip(ip, sizeof(ip))) ip[0] = 0;
 	// exactly the page's origin (scheme, host and this port): anything else, "null" included, is
-	// another site; localhost and 127.0.0.1 are the simulator on a computer
-	const char *hosts[] = {ip, "localhost", "127.0.0.1"};
-	for (int i = 0; i < 3; i++) {
+	// another site
+#ifdef HOST_REMOTE
+	const char *hosts[] = {ip, "localhost", "127.0.0.1"};   // the simulator: its page is on this computer
+#else
+	const char *hosts[] = {ip};                              // the console: only its own address
+#endif
+	for (int i = 0; i < (int)(sizeof(hosts) / sizeof(hosts[0])); i++) {
 		if (!hosts[i][0]) continue;
 		snprintf(me, sizeof(me), "http://%s:%d", hosts[i], REMOTE_PORT);
 		if (!strcasecmp(o, me)) return 1;
@@ -165,6 +169,8 @@ static int mcp_path(const char *req)
 	const char *p = strchr(req, ' ');
 	return p && !strncmp(p + 1, "/mcp", 4) && (p[5] == ' ' || p[5] == '?');
 }
+
+static const char MCP_OFF_TEXT[] = "MCP is off on the console. Turn it on in PSX RiPPER: Settings → Remote control → MCP.";
 
 static const char *http_reason(int st)
 {
@@ -213,14 +219,16 @@ static void mcp_request(int s, const char *got, int have, int want, time_t deadl
 		return;
 	}
 	body[n] = 0;
-	char *out = (char *)malloc(MCP_MAX_RESPONSE);   // only now: a slow client never holds it
-	if (out) {
-		while (__sync_lock_test_and_set(&g_mcp_busy, 1)) usleep(5 * 1000);
-		int st = mcp_handle(body, n, out, MCP_MAX_RESPONSE);
-		__sync_lock_release(&g_mcp_busy);
-		if (st == 202) send_str(s, "HTTP/1.0 202 Accepted\r\nContent-Length: 0\r\n\r\n");
-		else send_json(s, st, out);
-	}
+	while (__sync_lock_test_and_set(&g_mcp_busy, 1)) usleep(5 * 1000);
+	// only now: a request waiting for another one holds no answer buffer, and one that waited
+	// while MCP was turned off on the console is not handled
+	const int on = g_paths & REMOTE_MCP;
+	char *out = on ? (char *)malloc(MCP_MAX_RESPONSE) : NULL;
+	int st = out ? mcp_handle(body, n, out, MCP_MAX_RESPONSE) : 0;
+	__sync_lock_release(&g_mcp_busy);
+	if (!on) send_rpc_error(s, 403, -32000, MCP_OFF_TEXT);
+	else if (st == 202) send_str(s, "HTTP/1.0 202 Accepted\r\nContent-Length: 0\r\n\r\n");
+	else if (out) send_json(s, st, out);   // no memory: the connection closes without an answer
 	free(body);
 	free(out);
 }
@@ -259,7 +267,7 @@ static void client_thread(void *arg)
 
 	if (mcp_path(req)) {
 		if (!(g_paths & REMOTE_MCP))   // the agent learns why, and what to do about it
-			send_rpc_error(s, 403, -32000, "MCP is off on the console. Turn it on in PSX RiPPER: Settings → Remote control → MCP.");
+			send_rpc_error(s, 403, -32000, MCP_OFF_TEXT);
 		else if (!hend) send_rpc_error(s, 400, -32700, "Parse error: incomplete request headers (or over 2 KB)");
 		else if (!origin_ok(req, hend)) send_rpc_error(s, 403, -32000, "Origin not allowed: only the console's own pages may use MCP");
 		else if (strncmp(req, "POST ", 5))   // no event stream (GET): only POST
@@ -326,6 +334,8 @@ static void client_thread(void *arg)
 			if (!send_str(s, hdr)) send_str(s, js);
 			free(js);
 		}
+	} else if (!strncmp(req, "POST /pad", 9) && hend && !origin_ok(req, hend)) {   // a page elsewhere
+		send_str(s, "HTTP/1.0 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
 	} else if (!strncmp(req, "POST /pad", 9)) {   // a button of the web page's pad
 		char b[16];
 		size_t k = strcspn(body, " \r\n&");
@@ -428,7 +438,7 @@ static void server_thread(void *arg)
 				}
 				sys_ppu_thread_t t;
 				// low priority (higher number): never compete with the rip threads
-				if (sysThreadCreate(&t, client_thread, (void *)(long)s, 2000, 0x8000, 0, (char *)"psxremote")) {
+				if (sysThreadCreate(&t, client_thread, (void *)(long)s, 2000, 0x10000, 0, (char *)"psxremote")) {
 					close(s);
 					__sync_fetch_and_sub(&g_clients, 1);
 				}
