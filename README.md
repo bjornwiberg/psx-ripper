@@ -37,8 +37,12 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
 - **Destinations**: the internal hard disk or USB drives (FAT32 and exFAT), a file name pattern
   (`%T` title, `%R` region, `%D` disc ID, `%N` Redump name) and detection of discs already
   ripped there.
+- **Game list**: every PS1 image in the `PSXISO` folder of the hard disk or a USB
+  drive (also from other tools) with
+  its format and status, filters, a check against Redump from the files without the disc,
+  renaming, and a trash; all undoable in the audit log.
 - **Audit log with undo**: every rip, repair and setting change is logged with what started it;
-  settings and a repair's sectors can be undone. See the user guide.
+  settings, a repair's sectors and the game list's file changes can be undone. See the user guide.
 - **Automatic mode**: rip (or repair) when a disc is inserted, eject when done.
 - **Remote view**: the screen as a web page on port 8090 with a pad whose buttons press the
   console's, `/status.json`, and **webhooks** (for example to Home Assistant) for every event.
@@ -77,7 +81,7 @@ size, and whether it is already ripped to the destination.
 | ○ | Cancel the rip on this tab, or exit when nothing is ripping |
 
 A full CD takes about four minutes on the internal drive. Each rip writes `<name>.bin`, `.cue`,
-`.md5` (MD5 per track) and `.log` (the rip log, which *Repair* uses). The app's own log is
+`.bin.md5` (MD5 per track) and `.bin.log` (the rip log, which *Repair* uses). The app's own log is
 `/dev_hdd0/tmp/psxrip.log`.
 
 More: **[user guide](docs/user-guide.md)** · [FAQ](docs/faq.md) ·

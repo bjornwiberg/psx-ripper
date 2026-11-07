@@ -12,3 +12,16 @@ extern void (*host_frame)();
 extern int host_webman_calls, host_remote_flags;
 int host_mutex_held(unsigned m);
 extern void (*host_io)();
+// The console's drives: paths /dev_... and exfatN:/... are looked up under host_root ("" = they do
+// not exist, as on an empty console); host_exfat[port] = an exFAT drive is on that port;
+// host_label[port] = its volume label (FAT32 or exFAT).
+extern char host_root[256];
+extern int host_exfat[8];
+extern int (*host_rename_hook)(const char *from, const char *to);   // nonzero: vf_rename fails
+extern char host_label[8][24];
+extern const char *host_listdir_extra;   // a name vf_listdir adds to every folder (NULL = none)
+// Redump's local copy: host_rd_local = there is one; it knows one disc of one track, with MD5
+// host_rd_md5, named host_rd_name (0 = no copy, as before: every check is "unchecked").
+extern int host_rd_local;
+extern unsigned char host_rd_md5[16];
+extern char host_rd_name[160];

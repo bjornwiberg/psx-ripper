@@ -5,6 +5,39 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.3.0](https://github.com/bjornwiberg/psx-ripper/compare/v1.2.0...v1.3.0) (2026-11-07)
+
+
+### Features
+
+* game list with Redump checks, renaming and trash, undoable in the audit log ([#29](https://github.com/bjornwiberg/psx-ripper/issues/29)) ([c0fb692](https://github.com/bjornwiberg/psx-ripper/commit/c0fb69249338ca0440918af5bdd99e60658ba90b))
+
+
+### Bug fixes
+
+* the internal drive reads the real disc when webMAN has an image mounted ([#28](https://github.com/bjornwiberg/psx-ripper/issues/28)) ([ed23515](https://github.com/bjornwiberg/psx-ripper/commit/ed235151cde4fd6748bc07948a26e96c795a1373))
+
+## [1.2.0](https://github.com/bjornwiberg/psx-ripper/compare/v1.1.0...v1.2.0) (2026-11-04)
+
+
+### Features
+
+* audit log of every change, with undo ([#25](https://github.com/bjornwiberg/psx-ripper/issues/25)) ([e8579af](https://github.com/bjornwiberg/psx-ripper/commit/e8579afbb893e10360d152c00cfae8a6bc4e78ce))
+
+
+### Bug fixes
+
+* no rip starts for a disc already in a USB drive at app start ([#27](https://github.com/bjornwiberg/psx-ripper/issues/27)) ([127eefd](https://github.com/bjornwiberg/psx-ripper/commit/127eefd9930bf3c5b274ae646c9ccb81a2cce21b))
+* progress under 10 % with a decimal, and time left for the slow re-read pass ([#20](https://github.com/bjornwiberg/psx-ripper/issues/20)) ([eb43e22](https://github.com/bjornwiberg/psx-ripper/commit/eb43e221a2939233b9690c5e94fe548dbcc3f11d))
+* take the disc ID from the volume name when a disc has no SYSTEM.CNF ([#26](https://github.com/bjornwiberg/psx-ripper/issues/26)) ([bd00f4c](https://github.com/bjornwiberg/psx-ripper/commit/bd00f4ca722d6f2ce184c7b00a11efb724a24025))
+
+
+### Documentation
+
+* design of the game list; trash and renaming move there from the MCP design ([#23](https://github.com/bjornwiberg/psx-ripper/issues/23)) ([6508aa3](https://github.com/bjornwiberg/psx-ripper/commit/6508aa31124d700e0c9d716d62a5593f0695e078))
+* design of the MCP server ([#22](https://github.com/bjornwiberg/psx-ripper/issues/22)) ([97eb86d](https://github.com/bjornwiberg/psx-ripper/commit/97eb86dcfcb010a5c6091fb1d8911dcaa5263678))
+* MCP design – screen state and answering without touching the screen ([#24](https://github.com/bjornwiberg/psx-ripper/issues/24)) ([1aa1e7d](https://github.com/bjornwiberg/psx-ripper/commit/1aa1e7d818c94a1f2088836909110d56b66917d3))
+
 ## [1.1.0](https://github.com/bjornwiberg/psx-ripper/compare/v1.0.2...v1.1.0) (2026-11-03)
 
 

@@ -142,7 +142,7 @@ static void tools_list(int &bad)
 	CHECK(has("\"required\":[\"key\",\"value\"]"));
 	CHECK(has("\"value\":{\"type\":[\"string\",\"number\",\"boolean\"]"));
 	CHECK(has("\"enum\":[\"cross\",\"circle\",\"triangle\",\"square\",\"up\",\"down\",\"left\",\"right\",\"start\",\"select\",\"l1\",\"r1\",\"l2\",\"r2\"]"));
-	CHECK(has("\"enum\":[\"home\",\"settings\",\"drive_settings\",\"filename\",\"webhooks\",\"about\",\"audit_log\",\"remote_control\"]"));
+	CHECK(has("\"enum\":[\"home\",\"settings\",\"drive_settings\",\"filename\",\"webhooks\",\"about\",\"audit_log\",\"remote_control\",\"games\"]"));
 	CHECK(has("\"max_lines\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":500"));
 	// the descriptions steer agents to the action tools first; press_button and go_* are the fallback
 	CHECK(has("{\"name\":\"press_button\",\"description\":\"Fallback:"));

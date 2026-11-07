@@ -14,7 +14,7 @@ app writes the whole file again.
 | `retries` | 1, 2, 4, 8, 16, 32 | Re-reads on read errors (the standard for all drives) |
 | `speed` | 0 = max, 1 = 8x, 2 = 4x, 3 = 2x | Read speed |
 | `eject` | 0 / 1 | Eject the disc when done |
-| `autostart` | 0 / 1 | Rip a disc when it is inserted (a disc already ripped there with known errors is repaired instead) |
+| `autostart` | 0 / 1 | Rip a disc when it is inserted while the app runs, not one already in a drive when the app starts or the drive connects (a disc already ripped there with known errors is repaired instead) |
 | `redump` | 0 = off, 1 = online, 2 = local copy | Check against Redump |
 | `check` | 0 = off, 1 = check and re-read, 2 = bit-perfect | Sector check |
 | `drive_bd`, `drive_usb0` … `7` | `retries,speed,eject,autostart,check` | One drive's own settings instead of the standard (SELECT on its tab); `-1` = the standard |
@@ -25,6 +25,8 @@ app writes the whole file again.
 | `webhook_header1` … `3` | `Name: value` | Extra headers (e.g. authentication) |
 | `webhook_events` | bit mask, bit n = event n below | Events that are sent |
 | `webhook_step` | 1, 2, 5, 10, 15, 25, 50 | Progress every N percent |
+| `games_source` | `hdd`, `usb0` … `7`, `all` | The game list's source (SELECT in the list); default `all` |
+| `games_filter` | `format,redump,errors,other`, e.g. `0,2,0,0` | The game list's filter: format 0 any, 1 2352, 2 2048; Redump 0 any, 1 verified, 2 not checked, 3 does not match, 4 not verified; errors 0 any, 1 with, 2 without; other 0 any, 1 broken sets, 2 duplicates, 3 LibCrypt .sbi missing |
 | `audit_mb` | 1, 2, 4, 8, 16, 32, 64, 128, 256 | Size limit in MB of the audit log's sector copies (default 256) |
 
 Webhook event bits: 0 `disc_identified`, 1 `rip_started`, 2 `rip_progress`, 3 `rip_finished`,

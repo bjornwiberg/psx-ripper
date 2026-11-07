@@ -10,6 +10,7 @@ and file see [configuration](configuration.md); for questions see the [FAQ](faq.
 - [After a rip](#after-a-rip)
 - [Damaged discs and Repair](#damaged-discs-and-repair)
 - [Checking an earlier rip against Redump](#checking-an-earlier-rip-against-redump)
+- [Game list](#game-list)
 - [Several drives at once](#several-drives-at-once)
 - [Where the rips go](#where-the-rips-go)
 - [Settings](#settings)
@@ -95,7 +96,7 @@ means Redump was off or knows no such disc.
 ## Damaged discs and Repair
 
 Scratches can make sectors unreadable. The rip still finishes; the sectors that could not be
-read are written into the rip's log (`<name>.log`) and the tab shows the warning icon and
+read are written into the rip's log (`<name>.bin.log`) and the tab shows the warning icon and
 *Known errors: n sectors*.
 
 1. Clean the disc.
@@ -112,6 +113,174 @@ the whole disc again instead.
 A rip made with Redump off, or with an older version, shows *not checked against Redump*.
 **□ Check against Redump** computes the MD5s from the file on the hard disk (the disc is not
 read) and writes the result into the rip's log.
+
+## Game list
+
+The game list shows every game image on a hard disk or USB drive, not only the rips PSX RiPPER
+made: its format, whether it is free of errors, and whether it matches Redump. Open it from the
+settings: START, then **✕** on the first row, *Games*.
+
+**What it lists**: every `.bin`/`.cue`, `.iso` and `.img` in the `PSXISO` folder of the source,
+in alphabetical order. The discs of one game in one folder (*Disc 1*, *Disc 2*, …) are one row,
+*n discs*, and the row shows the worst status of its discs. Up to 1000 discs per source are
+listed; with more, the list says so.
+
+| Button | In the list |
+|---|---|
+| ↑ ↓ | Select a game |
+| L2 / R2 | Jump to the previous / next letter |
+| ✕ | Details |
+| □ | Check the selected game against Redump |
+| START | Check all: every game shown that is not checked yet (in the trash: empty it) |
+| △ | Move the game to the trash (in the trash: restore it) |
+| R1 | Filter |
+| L1 | Clear the filter (shown while a filter is set) |
+| SELECT | The next source |
+| ○ | Back to the settings |
+
+□ and START are only offered with *Check against Redump* on (online or local copy); otherwise the
+list says that Redump must be turned on. START is offered only while a game shown is not checked.
+
+**Sources**: SELECT steps through *Hard disk*, *USB 0*, *USB 1*, … (with the drive's name when the
+app can read it) and *All*, every source at once. In *All* the line under the list says where the
+selected game is. The choice is remembered. A USB drive that is pulled out shows *… is not
+connected*.
+
+**The summary** at the top counts the whole source, not only the rows a filter shows, for
+example *142 games · 98 verified · 6 with errors · 12 re-rip · 1 broken*.
+
+**The status of a row**:
+
+| Status | Meaning |
+|---|---|
+| *Verified* | Every track's MD5 matches Redump |
+| *Does not match* | Checked, and the MD5s do not match Redump's (or Redump does not know the disc) |
+| *Not checked* | No Redump result yet: press □, or START for all of them |
+| *1 error* / *n errors* | The rip log still lists sectors that could not be read or were bad: put the disc back in and repair it (see [Damaged discs and Repair](#damaged-discs-and-repair)) |
+| *Re-rip to verify* | A 2048 image (data only, from another tool): Redump cannot be compared with it, so rip the disc again to verify it |
+| *Broken* | An incomplete set: a `.bin` without its `.cue`, a `.cue` whose file is missing, a `.bin.part` left by a cancelled rip, a log or `.md5` whose image is gone, or an empty or unreadable image |
+
+After the status the row shows the format (*2352* or *2048*) and *n discs* or *n tracks*, and two
+marks: *Duplicate*, when the same disc is there twice (the same disc ID and size, or the same
+Redump name; with *All*, also on another source), and *.sbi missing*, for a PAL game that uses
+LibCrypt and has no `.sbi`. The line under the list names the other copy of a duplicate.
+
+**Filter** (R1): four criteria, all of which must match; a game of several discs matches when one
+of its discs matches them all. ↑↓ select a row, ← → change it, L1 sets all to *Any*, ○ closes and
+applies. The filter is remembered.
+
+| Row | Values |
+|---|---|
+| Format | Any, 2352, 2048 |
+| Redump | Any, Verified, Not checked, Does not match, Not verified (not checked or does not match) |
+| Errors | Any, With errors, Without errors |
+| Other | Any, Broken sets, Duplicates, LibCrypt .sbi missing |
+| Show | Games, Trash |
+
+The criteria set are shown above the list (for example *2048 · Not checked*) with *n of m*, the
+rows shown of all.
+
+**Details** (✕): for each disc its status, format, disc ID, Redump's name, when and on which drive
+it was ripped, the size, the place, whether there is a cover picture, when it was last checked,
+LibCrypt, the other copy of a duplicate, every track with its MD5, the sectors with errors and the
+set's files. ↑↓ and L2/R2 scroll, □ checks the game, △ moves it to the trash, ✕ renames it, ○ goes
+back to the list.
+
+### Checking games against Redump
+
+**□** checks the selected game: it computes the MD5 of every track from the files (the disc is not
+needed) and compares them with Redump, also for a game that was checked before. **START** does
+this for every game shown that has no Redump result yet, so a filter picks what is checked. A
+progress screen shows *Game n of m*, the file and the percentage; **○** cancels the
+check: the game being checked and those not reached yet keep the result they had. At the end a
+line says how many were checked and how many could not be.
+
+The result goes into the game's log next to the image: `<name>.bin.log` and `<name>.bin.md5` for a
+rip, `<name>.iso.log` and `<name>.iso.md5` (or `.img.log`/`.img.md5`) for an image from another
+tool. The row then shows its status like any other.
+
+Not checked, with the reason on the screen: a 2048 image, a broken set, an image in several `.bin`
+files, a game whose file names were too long for the list to read in full, and a game a drive is
+working on right now. With *Online* a disc without a disc ID
+is left out. If Redump cannot be reached, the check stops and the stored results stay as they
+were.
+
+Each check is a job in the audit log (*Rips*), like a check from a drive's tab. While a check runs,
+a drive cannot rip, repair or check that same file.
+
+### Renaming a game
+
+✕ in the details opens the file name screen for this game. It starts from the game's current
+name: if a pattern gives that name (your *File name* setting, a ready-made one, or one made from
+the name), that pattern is shown; otherwise your *File name* pattern, with *Now: <name>* above
+the preview. Change it as in the settings (← → pick a part, ✕ adds it at the cursor, L1/R1 move
+the cursor, □ removes the part before it, △ types freely). The preview shows each disc's new name
+and the files that are also renamed. **START** renames; ○ goes back and the game keeps its name.
+Your *File name* setting is not changed.
+
+The rename takes every file of the set named after it: the image (also `(Track n)` files), its
+`.cue`, its log and `.md5` (`.bin.log`, `.iso.log`, …), the cover `.jpg` and the `.sbi`. When an
+`.iso` has the same name as a rip, the cover and the `.sbi` stay with the rip. The `FILE` lines in
+the `.cue` are changed to the new names. The title in the log stays as it is.
+
+It is refused when the name stays the same, when a game with the new name is already there, when a
+drive or a check is using the game, or when the `.cue` is too big to be rewritten.
+
+### The trash
+
+**△** moves the game, all its files, to `.trash` in the same `PSXISO` folder. Nothing is deleted.
+To see the trash, open the filter (R1) and set *Show* to *Trash*. There, **△** restores the
+selected game to its folder, and **START** empties the trash after a question that names the
+number of games and their size: ✕ deletes, ○ keeps them.
+
+Emptying deletes only the files of the games the trash lists. Other files in `.trash` stay. With
+*All*, the trash of every drive is emptied. It is final: deleted files cannot be restored, also not
+from the audit log.
+
+A game with the same name as one already in the trash cannot be moved there: restore it or empty
+the trash first. △ is not offered while a check runs in the list, and a game a drive is working
+on is not moved.
+
+### Undo in the audit log
+
+Every rename, move to the trash, restore and emptying is a job in the audit log's *Files* domain,
+listed under the game, and emptying under *Trash*. △ on the job, or on any of its rows, undoes the
+whole job: the files go back to their old names and folder, and a renamed `.cue` gets its old
+`FILE` lines. A game's files are always moved together, never one alone. An undone job can be
+redone, as often as you like.
+
+Undo and redo are refused, with the reason, when:
+
+- a file of the game is no longer where the job left it (*… is gone*),
+- a file is in the way at the old place (*… is already there*),
+- the trash was emptied since (*The trash was emptied: … is deleted*),
+- a drive or a check is using the game right now,
+- the job is still running; a job that failed cannot be redone (*The move failed and was put
+  back*), but what it left can be undone.
+
+The emptying itself cannot be undone: its rows are records of what was deleted.
+
+If a move fails halfway, the files already moved are put back, and the job is logged as failed.
+Should a file not go back either, the note says which one; undo the job in the audit log to bring
+the game back together.
+
+### A rip and an .iso with the same name
+
+A folder can hold a rip (`Game [SLUS_000.00].bin`/`.cue`) and an `.iso` with the same name, for
+example from another tool. They are two rows, and each has its own log and `.md5`
+(`.bin.log`/`.bin.md5` and `.iso.log`/`.iso.md5`), so each can be checked without touching the
+other. If they are the same disc, both rows say *Duplicate*, and either can be moved to the trash.
+
+### Logs from earlier versions
+
+Earlier versions wrote `<name>.log` and `<name>.md5`. The app still reads them. When the game
+list reads a folder, it renames the logs it wrote itself (first line `PSX Ripper rip log`), and
+their `.md5`, to the new names, for the image they belong to: the `.bin` when a rip has that name,
+otherwise the single image. It is one job per folder in the audit log, listed under the folder
+(*Files* → the folder → *Rename logs*), and can be undone there. The list does not rename it again
+after an undo, but checking, ripping or repairing that game later writes its new name, and so
+does the list once the game is renamed (its log then has the game's new name). A log another
+program wrote, a name that is already taken, and a game a drive is working on are left as they are.
 
 ## Several drives at once
 
@@ -137,9 +306,18 @@ Each rip writes:
 | File | Content |
 |---|---|
 | `<name>.bin` / `.cue` | The image: every track, raw 2352-byte sectors |
-| `<name>.md5` | MD5 of every track |
-| `<name>.log` | The rip log: tracks, MD5s, Redump result, unreadable sectors (used by Repair) |
+| `<name>.bin.md5` | MD5 of every track |
+| `<name>.bin.log` | The rip log: tracks, MD5s, Redump result, unreadable sectors (used by Repair) |
 | `/dev_hdd0/tmp/sbi/<SERIAL>.sbi` | LibCrypt data, only for the PAL discs that use LibCrypt |
+
+The log and the `.md5` are named after the image they describe. Checking a single `.iso` or
+`.img` from another tool against Redump writes `<name>.iso.log` and `<name>.iso.md5` (or
+`.img.log`/`.img.md5`); such a log says on its `checked=` line that it comes from a check, not a
+rip. So a rip and an `.iso` with the same name in one folder each keep their own result.
+Covers (`<name>.jpg`) and `.sbi` files keep the plain name, as emulators and webMAN expect.
+
+Logs from earlier versions (`<name>.log`, `<name>.md5`) are still read, and the game list
+renames them to the new names: see [Logs from earlier versions](#logs-from-earlier-versions).
 
 The file name follows the *File name* setting; the default is `%T [%D]`, for example
 `Final Fantasy IX (Disc 1) [SLES_029.65]`. webMAN hides the part in brackets in its list.
@@ -151,6 +329,7 @@ everything, ○ goes back.
 
 | Setting | What it does |
 |---|---|
+| Games | ✕ opens the [game list](#game-list) |
 | Read speed | Max, 8×, 4× or 2×. Max is right for most discs |
 | Re-reads on read errors | How often the drive retries a hard sector in the slow pass |
 | Sector check | *Bit-perfect* (default): checksums, double-check of sectors without one, slow re-reads. *Check and re-read*: without the double-check. *Off*: read once |
@@ -177,13 +356,16 @@ started it, and undo it. Open it from the settings (*Audit log*; *Ändringslogg*
   bytes.
 - **Settings**: every change, with the old and the new value. A change made in the config file
   while the app was off (over FTP) is logged at the next start, from the app itself.
+- **Files**: every rename, move to the trash, restore and emptying of the trash from the
+  [game list](#game-list), and the renaming of logs from earlier versions, with each file's old
+  and new place.
 - **Source**: each entry says what did it: the console's pad, the remote view's pad, the app
   itself (automatic mode), or an undo.
 
 Secrets are never stored. Of a webhook address or header the log only says that it was set or
 cleared, never the value.
 
-**Using the screen**: four levels, ✕ opens and ○ goes back. First the kind (*Rips*, *Settings*),
+**Using the screen**: four levels, ✕ opens and ○ goes back. First the kind (*Rips*, *Settings*, *Files*),
 then the discs or the settings changes, then a disc's jobs, then one job's rows. △ undoes the
 selected item after a question: one row, one job, or everything on a disc (or redoes it, see
 below).
@@ -194,11 +376,14 @@ below).
 - A **repair's sectors**: the old bytes are written back into the image, as long as the sector
   in the image is still what the repair wrote and the saved copy has not been removed. The rip
   is then checked again (MD5 and Redump) and the sectors that were unreadable or bad before go
-  back into the rip's `.log`, so *Repair* can try them again.
+  back into the rip's `.bin.log`, so *Repair* can try them again.
 - The sectors a **finished rip** corrected in its later passes, the same way: the image gets the
   first read back. Undoing a disc includes them.
 - Not the rip itself, a check or a Redump result: they are records, not changes. Delete a rip
   yourself.
+- A game's **files** (rename, trash, restore): they go back together, see
+  [Undo in the audit log](#undo-in-the-audit-log). Not the emptying of the trash: deleted files
+  are gone.
 - Not a secret setting, since its value was never stored.
 - Not a job that is still running, or the sectors of a rip that was not finished.
 - Not the sectors of a file that was ripped again since: the new rip replaced the image they
@@ -214,7 +399,7 @@ select it and △ says *Redo* (*Gör om* in Swedish); it applies the change agai
 longer undone, so △ undoes it again, as often as you like. (The undo rows stay in the list as
 history; △ on the newest one does the same.) A setting gets the value the change gave
 it, as long as it still has the value the undo put back. A sector gets the repaired bytes again,
-as long as the image still has the bytes the undo put back, and leaves the rip's `.log` again;
+as long as the image still has the bytes the undo put back, and leaves the rip's `.bin.log` again;
 the rip is checked again. The rules above apply here too (a running job, a file ripped again
 since, a removed copy). A job or disc whose changes are all undone is redone the same way, oldest
 row first, stopping at the first row that cannot be redone. The redo is logged as well, so it
@@ -245,4 +430,5 @@ start it from the XMB. Cobra applies the `.sbi` of LibCrypt discs by itself.
 
 - `/dev_hdd0/tmp/psxrip.log`: what the app did, for bug reports (remove webhook addresses and
   headers before you share it).
-- `<name>.log` next to each rip: that rip's tracks, MD5s, Redump result and unreadable sectors.
+- `<name>.bin.log` next to each rip: that rip's tracks, MD5s, Redump result and unreadable sectors
+  (`<name>.log` from earlier versions).

@@ -4,3 +4,4 @@ remote_sim
 audit_test
 mcp_test
 remote_test
+library_test

@@ -300,7 +300,7 @@ struct Arg { const char *name; ArgType type; bool required; const char *desc; };
 enum ToolKind { T_STATE, T_SHOT, T_DRIVES, T_LIST, T_SET, T_SCREEN, T_UI, T_LOG };
 struct Tool { const char *name; ToolKind kind; bool reads; const char *desc; Arg args[3]; };
 
-static const char *const k_screens[] = {"home", "settings", "drive_settings", "filename", "webhooks", "about", "audit_log", "remote_control", NULL};
+static const char *const k_screens[] = {"home", "settings", "drive_settings", "filename", "webhooks", "about", "audit_log", "remote_control", "games", NULL};
 static const char *const k_buttons[] = {"cross", "circle", "triangle", "square", "up", "down", "left", "right", "start", "select", "l1", "r1", "l2", "r2", NULL};
 
 #define DRIVE_DESC "The drive: internal, or usbN by its port as the tabs show it"
@@ -484,7 +484,7 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			if (!valid_drive(a->str[i])) return set_err(er, -32602, g.name, "must be internal or usbN (N the port)");
 			break;
 		case A_SCREEN:
-			if (!in_list(a->str[i], k_screens)) return set_err(er, -32602, g.name, "must be one of home, settings, drive_settings, filename, webhooks, about, audit_log, remote_control");
+			if (!in_list(a->str[i], k_screens)) return set_err(er, -32602, g.name, "must be one of home, settings, drive_settings, filename, webhooks, about, audit_log, remote_control, games");
 			break;
 		case A_BUTTON:
 			if (!in_list(a->str[i], k_buttons)) return set_err(er, -32602, g.name, "must be one of cross, circle, triangle, square, up, down, left, right, start, select, l1, r1, l2, r2");
