@@ -102,7 +102,9 @@ void without_brackets(const char *in, char *out, size_t n)
 	squeeze(out);
 }
 
-// The disc number in "(Disc N)", 0 without one; *at/*len = where it is.
+// The disc number in "(Disc N)", 0 without one; *at/*len = where it is. Other tools name discs
+// "CD1", "CD 2" or "Disc 3" (any case) as a word of their own: those count too, with the space
+// before them, so cutting leaves "The Legend Of Dragoon" of "The Legend Of Dragoon CD1".
 int disc_number(const char *s, const char **at = NULL, size_t *len = NULL)
 {
 	for (const char *p = strstr(s, "(Disc "); p; p = strstr(p + 1, "(Disc ")) {
@@ -113,6 +115,23 @@ int disc_number(const char *s, const char **at = NULL, size_t *len = NULL)
 			if (len) *len = (size_t)(e + 1 - p);
 			return (int)v;
 		}
+	}
+	for (const char *p = s; *p; p++) {
+		if (p > s && p[-1] != ' ' && p[-1] != '(' && p[-1] != '-' && p[-1] != '_') continue;   // a word's start
+		size_t w = !strncasecmp(p, "CD", 2) ? 2 : !strncasecmp(p, "Disc", 4) ? 4 : 0;
+		if (!w) continue;
+		const char *q = p + w;
+		if (*q == ' ') q++;
+		if (*q < '1' || *q > '9') continue;
+		char *e;
+		long v = strtol(q, &e, 10);
+		if (v <= 0 || v > 99 || (*e && *e != ' ' && *e != ')' && *e != '[' && *e != '.' && *e != ',')) continue;   // a word's end
+		const char *from = p, *to = e;
+		if (p > s && p[-1] == '(' && *e == ')') { from = p - 1; to = e + 1; }   // "(CD1)"
+		if (from > s && from[-1] == ' ') from--;
+		if (at) *at = from;
+		if (len) *len = (size_t)(to - from);
+		return (int)v;
 	}
 	return 0;
 }
