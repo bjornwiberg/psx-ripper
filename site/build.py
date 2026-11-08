@@ -118,23 +118,14 @@ EXT_A = re.compile(r'<a ((?:(?!>).)*?)href="(https?://[^"]+|mailto:[^"]+)"((?:(?
 
 
 def mark_external(content):
-    """External links open in a new tab and get the small arrow (class ext); buttons and mail links
-    keep their look but still open in a new tab when they leave the site."""
+    """A link that leaves the site (http or https) opens in a new tab. The arrow after it comes from
+    the CSS, which matches the same addresses. A download stays in this tab."""
     def fix(m):
         before, url, after = m.group(1), m.group(2), m.group(3)
         attrs = before + after
-        if url.startswith("https://psxripper.bjrn.nu") or "target=" in attrs:
+        if url.startswith("mailto:") or "target=" in attrs or "/download/" in url:
             return m.group(0)
-        if url.startswith("mailto:") or "btn-dl" in attrs or "/download/" in url:   # a download stays in this tab
-            return m.group(0)
-        extra = ' target="_blank" rel="noopener"'
-        if "class=" in attrs:
-            if "btn" not in attrs and 'class="gh"' not in attrs:
-                before = re.sub(r'class="', 'class="ext ', before) if 'class="' in before else before
-                after = re.sub(r'class="', 'class="ext ', after) if 'class="' in after else after
-        else:
-            extra += ' class="ext"'
-        return f'<a {before}href="{url}"{after}{extra}>'
+        return f'<a {before}href="{url}"{after} target="_blank" rel="noopener">'
     return EXT_A.sub(fix, content)
 
 
