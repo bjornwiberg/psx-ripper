@@ -1,0 +1,309 @@
+/* PSX RiPPER site. The colours and the type follow the app's own screen: the navy gradient,
+   DejaVu Sans (Verdana is its closest relative where DejaVu is not installed), the blue tab,
+   the amber [MCP] and the button glyphs. */
+
+:root {
+  --navy-top: #1f2552;
+  --navy-bottom: #0c0d1e;
+  --ink: #ffffff;
+  --text: #dfe2f2;
+  --dim: #a3a9cc;
+  --faint: #767ca3;
+  --rule: #3a4072;
+  --label: #a4b6ff;
+  --tab: #3d6ee0;
+  --tab-idle: #3a3f66;
+  --select: #2b4386;
+  --amber: #f0bd5c;
+  --ok: #7ad8a6;
+  --panel: #10122a;
+  --cross: #9db7ff;
+  --circle: #ff8aa6;
+  --triangle: #74e0bb;
+  --square: #f3a0dc;
+  --sans: "DejaVu Sans", "Bitstream Vera Sans", Verdana, "Segoe UI", sans-serif;
+  --mono: "DejaVu Sans Mono", "Bitstream Vera Sans Mono", Menlo, Consolas, monospace;
+  --measure: 46rem;
+  --wide: 62rem;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html {
+  background: var(--navy-bottom);
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: linear-gradient(180deg, var(--navy-top) 0, #171b3f 28rem, var(--navy-bottom) 70rem) no-repeat,
+              var(--navy-bottom);
+  color: var(--text);
+  font: 400 1rem/1.6 var(--sans);
+  overflow-wrap: break-word;
+}
+
+a { color: var(--cross); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { color: var(--ink); }
+:focus-visible { outline: 2px solid var(--amber); outline-offset: 3px; border-radius: 2px; }
+
+code, pre, kbd { font-family: var(--mono); font-size: 0.88em; }
+code { color: var(--ink); }
+
+img { max-width: 100%; height: auto; display: block; }
+
+.skip {
+  position: absolute; left: 1rem; top: -4rem; z-index: 10;
+  background: var(--tab); color: var(--ink); padding: 0.5rem 0.9rem;
+}
+.skip:focus { top: 1rem; }
+
+/* ------------------------------------------------------------------ header: the drive tabs */
+
+.top {
+  max-width: var(--wide);
+  margin: 0 auto;
+  padding: 1.1rem 1rem 0;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1.5rem;
+}
+.brand {
+  display: flex; align-items: center; gap: 0.55rem;
+  color: var(--ink); text-decoration: none; font-weight: 700; letter-spacing: 0.01em;
+}
+.brand img { border-radius: 6px; }
+.tabs {
+  list-style: none; margin: 0; padding: 0;
+  display: flex; flex-wrap: wrap; gap: 0.4rem;
+}
+.tabs a {
+  display: block; padding: 0.3rem 0.7rem;
+  background: var(--tab-idle); color: var(--text);
+  font-size: 0.86rem; text-decoration: none;
+}
+.tabs a:hover { background: #4a5084; color: var(--ink); }
+.tabs a[aria-current="page"] { background: var(--tab); color: var(--ink); }
+.top::after {
+  content: ""; flex-basis: 100%; height: 1px; background: var(--rule); margin-top: 0.15rem;
+}
+
+/* ------------------------------------------------------------------ hero: the title screen */
+
+.hero {
+  max-width: var(--wide);
+  margin: 0 auto;
+  padding: 3.5rem 1rem 1rem;
+  text-align: center;
+}
+.title-row { position: relative; display: inline-block; }
+.hero h1 {
+  margin: 0;
+  color: var(--ink);
+  font-weight: 700;
+  font-size: clamp(2.6rem, 9vw, 5.2rem);
+  line-height: 1;
+  letter-spacing: 0.01em;
+}
+.mcp-tag {
+  position: absolute; right: 100%; top: 0.2em; margin-right: 1.4rem;
+  color: var(--amber); font-size: clamp(0.8rem, 1.6vw, 1rem); text-decoration: none;
+  white-space: nowrap;
+}
+.mcp-tag:hover { color: var(--ink); }
+.ver { margin: 0.5rem 0 0; color: var(--dim); font-size: 1.05rem; }
+.lede {
+  max-width: 36rem; margin: 1.6rem auto 0;
+  font-size: 1.12rem; line-height: 1.55; color: var(--text);
+}
+.lede code { font-size: 0.92em; }
+
+/* The button bar at the bottom of every app screen, used as the site's actions. */
+.pad {
+  list-style: none; margin: 2.2rem 0 0; padding: 0;
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 0.6rem 1.8rem;
+}
+.key {
+  display: inline-flex; align-items: center; gap: 0.55rem;
+  padding: 0.35rem 0.2rem;
+  color: var(--ink); font-size: 1.15rem; text-decoration: none;
+}
+.key:hover { color: var(--ink); text-decoration: underline; text-decoration-color: var(--faint); }
+.key-main {
+  padding: 0.55rem 1.2rem 0.55rem 0.7rem;
+  background: var(--select); border-radius: 999px;
+  box-shadow: inset 0 0 0 1px #4f6bc4;
+}
+.key-main:hover { background: var(--tab); text-decoration: none; }
+
+.g {
+  display: inline-grid; place-items: center; flex: none;
+  font-family: var(--sans); line-height: 1;
+}
+.g-cross {
+  width: 1.55em; height: 1.55em; border-radius: 50%;
+  border: 1.5px solid currentColor; color: var(--cross); font-size: 0.9em;
+  background: rgb(157 183 255 / 0.12);
+}
+.g-pill {
+  padding: 0.22em 0.6em; border-radius: 999px;
+  border: 1px solid #8b90b8; color: var(--text);
+  font-size: 0.62em; letter-spacing: 0.04em; background: #2a2f57;
+}
+.g-inline { display: inline-grid; vertical-align: -0.3em; font-size: 0.85em; }
+
+.rel { margin: 1.2rem 0 0; color: var(--dim); font-size: 0.88rem; }
+
+.tv {
+  margin: 3rem auto 0; max-width: 54rem;
+  border: 1px solid var(--rule);
+  box-shadow: 0 1.5rem 4rem -1rem rgb(0 0 0 / 0.6);
+}
+
+/* ------------------------------------------------------------------ sections */
+
+.sec {
+  max-width: var(--wide);
+  margin: 0 auto;
+  padding: 3.5rem 1rem 0;
+}
+/* The app's section label: blue text over a rule ("Disc", "Destination"). */
+.label {
+  margin: 0 0 1.5rem; padding-bottom: 0.35rem;
+  border-bottom: 1px solid var(--rule);
+  color: var(--label); font-weight: 400; font-size: 1.35rem;
+}
+.sec h3 { margin: 0 0 0.5rem; color: var(--ink); font-size: 1.08rem; line-height: 1.35; }
+.sec h3 code { font-size: 0.92em; }
+.sec p { margin: 0 0 0.75rem; }
+
+.grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  gap: 2rem 2.5rem;
+}
+.feat { font-size: 0.95rem; color: var(--text); }
+.feat p:last-child { margin-bottom: 0; }
+.feat .spec code { color: var(--dim); margin-right: 0.4rem; }
+.feat-wide {
+  grid-column: 1 / -1;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 1.5rem 2.5rem;
+  align-items: center;
+  padding: 1.6rem 0 0; border-top: 1px solid var(--rule);
+}
+.amber { color: var(--amber); font-weight: 400; }
+
+.term {
+  margin: 0; padding: 1rem 1.1rem;
+  background: var(--panel); border: 1px solid var(--rule); border-left: 3px solid var(--amber);
+  color: var(--ink); font-size: 0.85rem; line-height: 1.6;
+  white-space: pre; overflow-x: auto;
+}
+.term .c { color: var(--faint); }
+.term .p { color: var(--amber); user-select: none; }
+
+.sec .aside { margin: 2.5rem 0 0; color: var(--dim); font-size: 0.9rem; }
+
+.gallery {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 17rem), 1fr));
+  gap: 1.6rem 1.4rem;
+}
+.gallery figure { margin: 0; }
+.gallery a { display: block; border: 1px solid var(--rule); }
+.gallery a:hover { border-color: var(--label); }
+.gallery figcaption { margin-top: 0.5rem; color: var(--dim); font-size: 0.86rem; }
+
+.cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr)); gap: 2rem 3rem; }
+.plain { margin: 0; padding-left: 1.1rem; }
+.plain li, .steps li { margin-bottom: 0.6rem; }
+.steps { margin: 0 0 1rem; padding-left: 1.4rem; }
+.steps li::marker { color: var(--label); }
+
+.doclist { list-style: none; margin: 0; padding: 0; }
+.doclist li {
+  display: grid; grid-template-columns: 11rem 1fr; gap: 0.2rem 1.5rem;
+  padding: 0.7rem 0; border-bottom: 1px solid #262b55;
+}
+.doclist a { color: var(--ink); text-decoration: none; }
+.doclist a:hover { text-decoration: underline; }
+.doclist span { color: var(--dim); font-size: 0.92rem; }
+
+/* ------------------------------------------------------------------ docs pages */
+
+.doc { max-width: var(--wide); margin: 0 auto; padding: 2.5rem 1rem 0; }
+.prose { max-width: var(--measure); font-size: 0.97rem; }
+.prose h1 {
+  margin: 0 0 1.5rem; color: var(--ink); font-size: clamp(1.8rem, 5vw, 2.4rem); line-height: 1.15;
+}
+.prose h2 {
+  margin: 2.8rem 0 1rem; padding-bottom: 0.35rem; border-bottom: 1px solid var(--rule);
+  color: var(--label); font-weight: 400; font-size: 1.4rem; line-height: 1.3;
+}
+.prose h3 { margin: 2rem 0 0.6rem; color: var(--ink); font-size: 1.1rem; line-height: 1.35; }
+.prose h4 { margin: 1.5rem 0 0.5rem; color: var(--ink); font-size: 1rem; }
+.prose h2 a, .prose h3 a { color: inherit; }
+.prose p, .prose ul, .prose ol { margin: 0 0 0.9rem; }
+.prose li { margin-bottom: 0.3rem; }
+.prose li > ul, .prose li > ol { margin: 0.3rem 0 0; }
+.prose strong { color: var(--ink); }
+.prose blockquote {
+  margin: 0 0 1rem; padding: 0.6rem 1rem;
+  border-left: 3px solid var(--tab); background: rgb(43 67 134 / 0.25); color: var(--text);
+}
+.prose blockquote p:last-child { margin-bottom: 0; }
+.prose pre {
+  margin: 0 0 1.1rem; padding: 0.9rem 1rem; overflow-x: auto;
+  background: var(--panel); border: 1px solid var(--rule); line-height: 1.5;
+}
+.prose pre code { color: var(--text); font-size: 0.84rem; }
+.prose :not(pre) > code {
+  padding: 0.05em 0.3em; background: rgb(255 255 255 / 0.06); border-radius: 3px;
+}
+.prose img { margin: 0.5rem 0 1rem; border: 1px solid var(--rule); }
+.prose hr { border: 0; border-top: 1px solid var(--rule); margin: 2rem 0; }
+
+/* Tables read like the app's detail rows: a dim first column, rules between the rows. */
+.prose table {
+  display: block; max-width: 100%; overflow-x: auto;
+  border-collapse: collapse; margin: 0 0 1.2rem; font-size: 0.9rem;
+}
+.prose th, .prose td {
+  padding: 0.45rem 1rem 0.45rem 0; text-align: left; vertical-align: top;
+  border-bottom: 1px solid #262b55;
+}
+.prose th { color: var(--dim); font-weight: 400; border-bottom-color: var(--rule); }
+.prose td:first-child { color: var(--ink); white-space: nowrap; }
+
+.changelog h2 a { color: var(--label); text-decoration: none; }
+.changelog h2 a:hover { text-decoration: underline; }
+.changelog h3 { color: var(--dim); font-weight: 400; font-size: 0.95rem; margin-top: 1rem; }
+.changelog li a { color: var(--faint); }
+
+.edit { margin: 2.5rem 0 0; font-size: 0.86rem; color: var(--faint); }
+.edit a { color: var(--dim); }
+
+/* ------------------------------------------------------------------ footer */
+
+.foot { margin-top: 5rem; border-top: 1px solid var(--rule); }
+.foot-in {
+  max-width: var(--wide); margin: 0 auto; padding: 1.6rem 1rem 2.5rem;
+  color: var(--faint); font-size: 0.84rem;
+}
+.foot p { margin: 0 0 0.5rem; max-width: 46rem; }
+.foot a { color: var(--dim); }
+
+/* ------------------------------------------------------------------ small screens */
+
+@media (max-width: 40rem) {
+  .hero { padding-top: 2.2rem; }
+  .title-row { display: flex; flex-direction: column-reverse; align-items: center; gap: 0.4rem; }
+  .mcp-tag { position: static; margin: 0; }
+  .pad { flex-direction: column; align-items: center; gap: 0.5rem; }
+  .feat-wide { grid-template-columns: minmax(0, 1fr); }
+  .doclist li { grid-template-columns: 1fr; }
+  .tabs a { font-size: 0.8rem; padding: 0.28rem 0.55rem; }
+  .prose td:first-child { white-space: normal; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; transition: none !important; }
+}

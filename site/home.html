@@ -1,0 +1,194 @@
+<section class="hero" aria-labelledby="hero-title">
+  <div class="title-row">
+    <a class="mcp-tag" href="#mcp" title="MCP: AI agents can run the app">[MCP]</a>
+    <h1 id="hero-title">PSX RiPPER</h1>
+  </div>
+  <p class="ver">v{{version}}</p>
+  <p class="lede">A PS3 homebrew app that rips your own PlayStation&nbsp;1 discs to bit-perfect
+    <code>.bin</code>/<code>.cue</code> images and checks every rip against Redump.</p>
+
+  <ul class="pad" aria-label="Get PSX RiPPER">
+    <li><a class="key key-main" href="https://github.com/bjornwiberg/psx-ripper/releases/latest/download/psxripper.pkg"><span class="g g-cross" aria-hidden="true">✕</span>Download psxripper.pkg</a></li>
+    <li><a class="key" href="docs/user-guide.html"><span class="g g-pill" aria-hidden="true">START</span>User guide</a></li>
+    <li><a class="key" href="https://github.com/bjornwiberg/psx-ripper"><span class="g g-pill" aria-hidden="true">SELECT</span>Source on GitHub</a></li>
+  </ul>
+  <p class="rel">Version {{version}} for a PS3 with custom firmware and Cobra.
+    <a href="https://github.com/bjornwiberg/psx-ripper/releases/latest">Release notes and SHA-256</a></p>
+
+  <figure class="tv">
+    <img src="img/games.jpg" width="960" height="540"
+         alt="The game list: every PS1 image on the hard disk with its Redump status and format">
+  </figure>
+</section>
+
+<section class="sec" id="features" aria-labelledby="features-h">
+  <h2 class="label" id="features-h">What it does</h2>
+  <div class="grid">
+    <article class="feat">
+      <h3>Bit-perfect rips</h3>
+      <p>Raw 2352-byte sectors, every track including CD audio, with pregaps read from the Q
+        subchannel. Every data sector is checked against its EDC/ECC. Video and sound sectors
+        have no checksum, so they are read again and compared. Unreadable sectors are retried
+        slowly.</p>
+      <p><strong>Repair</strong> re-reads only the sectors the rip log lists, so you can clean a
+        disc and try again later without a full re-rip. It never makes a rip worse.</p>
+      <p class="spec"><code>name.bin</code> <code>.cue</code> <code>.bin.md5</code> <code>.bin.log</code></p>
+    </article>
+
+    <article class="feat">
+      <h3>Redump verification</h3>
+      <p>Every track's MD5 is compared with <a href="http://redump.org/">Redump</a>, online or
+        from a local copy of the PlayStation list (about 4&nbsp;MB, downloaded once from the
+        app). Discs get Redump's names, and a medal on the drive's tab means the rip is
+        bit-perfect.</p>
+      <p>Older rips and images from other tools are checked from the files, without the
+        disc.</p>
+    </article>
+
+    <article class="feat" id="libcrypt">
+      <h3>LibCrypt and <code>.sbi</code></h3>
+      <p>For the PAL discs its LibCrypt list names (197 serials), the app reads the protection
+        from the disc's subchannel and writes the <code>.sbi</code> itself:
+        <code>/dev_hdd0/tmp/sbi/&lt;SERIAL&gt;.sbi</code>, which Cobra reads when the image is
+        mounted, and <code>&lt;name&gt;.sbi</code> next to the image. Only an original disc
+        carries this data; a burned copy does not.</p>
+      <p>Bringing your own? Put it in that folder named after the disc ID,
+        <code>/dev_hdd0/tmp/sbi/SLES_029.65.sbi</code>, or next to the image with the image's
+        name. The game list flags LibCrypt games that have neither. No <code>.sbi</code> files
+        ship with the app.</p>
+    </article>
+
+    <article class="feat">
+      <h3>Three drives at once</h3>
+      <p>The PS3's own Blu-ray drive plus up to two Apple USB SuperDrives (A1379, USB ID
+        <code>05AC:1500</code>), each on its own tab with its own progress, destination and
+        settings. The PS3 passes no commands to USB optical drives, so the app brings its own USB
+        driver. The SuperDrives run on the console's USB power, no Y-cable.</p>
+      <p>Tested bit-perfect against Redump on all three at once.</p>
+    </article>
+
+    <article class="feat">
+      <h3>Game list</h3>
+      <p>Every <code>.bin</code>/<code>.cue</code>, <code>.iso</code> and <code>.img</code> in the
+        <code>PSXISO</code> folder of the hard disk or a USB drive, also from other tools, with its
+        format, errors, Redump status, duplicates and missing <code>.sbi</code> files.</p>
+      <p>Filter it, check games against Redump, rename a whole set (the <code>.cue</code>'s
+        <code>FILE</code> lines follow) or move it to a trash that deletes nothing until you empty
+        it.</p>
+    </article>
+
+    <article class="feat">
+      <h3>Audit log with undo</h3>
+      <p>Every rip, repair, check, setting change and file change is logged with what started it:
+        the console's pad, the remote view, an MCP agent or the app itself.</p>
+      <p>Undo a setting, the sectors a repair wrote, or a rename or move to the trash, and redo it
+        if you change your mind. Secret values, such as webhook headers, are never stored.</p>
+    </article>
+
+    <article class="feat">
+      <h3>Remote view</h3>
+      <p>Open <code>http://&lt;ps3&gt;:8090/</code> on a phone or computer on your network: the
+        app's screen as an MJPEG stream and a pad whose buttons press the console's. Switch tabs
+        or start a rip from the sofa.</p>
+    </article>
+
+    <article class="feat">
+      <h3><code>status.json</code> and webhooks</h3>
+      <p><code>/status.json</code> gives every drive's state, phase and progress to your scripts.
+        Webhooks send a JSON POST when a disc is identified, a rip starts, progresses, finishes or
+        fails, a repair finishes, a disc is ejected or the app starts. Point them at a Home
+        Assistant automation and get a notification when a rip is done.</p>
+    </article>
+
+    <article class="feat feat-wide" id="mcp">
+      <div>
+        <h3><span class="amber">[MCP]</span> An MCP server for AI agents</h3>
+        <p>An agent such as Claude Code can run the app over the
+          <a href="https://modelcontextprotocol.io/">Model Context Protocol</a>: 34 tools to read
+          the screen, the drives and the log, start and cancel rips, change settings, check, rename
+          and trash games, and read and undo the audit log. Each action goes through the same
+          checks as the pad, and every change lands in the audit log with the source MCP.</p>
+        <p>It is off by default. While it is on, <span class="amber">[MCP]</span> shows at the
+          left of the title on the console's screen. There is no login, so keep it on your home
+          network. <a href="docs/mcp.html">Every tool, with examples</a></p>
+      </div>
+      <pre class="term" aria-label="Connect Claude Code to the console"><code><span class="c"># use your console's address (Settings → Remote control shows it)</span>
+<span class="p">$</span> claude mcp add --transport http psx-ripper http://192.168.1.50:8090/mcp</code></pre>
+    </article>
+  </div>
+  <p class="aside">The app has its own on-screen UI in English and Swedish, picked from the
+    system language, and works offline once installed.</p>
+</section>
+
+<section class="sec" id="screens" aria-labelledby="screens-h">
+  <h2 class="label" id="screens-h">Screens</h2>
+  <div class="gallery">
+    <figure>
+      <a href="img/home.jpg"><img src="img/home.jpg" width="960" height="540" loading="lazy"
+         alt="A drive's tab waiting for a disc, with tabs for the internal drive and two USB SuperDrives"></a>
+      <figcaption>A tab per drive: the internal drive and two SuperDrives</figcaption>
+    </figure>
+    <figure>
+      <a href="img/game-detail.jpg"><img src="img/game-detail.jpg" width="960" height="540" loading="lazy"
+         alt="A game's details: status, format, disc ID, Redump name, track MD5s and files"></a>
+      <figcaption>A game's details: Redump result, tracks and files</figcaption>
+    </figure>
+    <figure>
+      <a href="img/settings.jpg"><img src="img/settings.jpg" width="960" height="540" loading="lazy"
+         alt="The settings: read speed, re-reads, sector check, file name, Redump"></a>
+      <figcaption>Settings</figcaption>
+    </figure>
+    <figure>
+      <a href="img/audit-log.jpg"><img src="img/audit-log.jpg" width="960" height="540" loading="lazy"
+         alt="The audit log: rips, settings and files"></a>
+      <figcaption>The audit log: rips, settings and files</figcaption>
+    </figure>
+    <figure>
+      <a href="img/remote-control.jpg"><img src="img/remote-control.jpg" width="960" height="540" loading="lazy"
+         alt="Remote control: switches for the remote view, MCP and status.json"></a>
+      <figcaption>Remote control: remote view, MCP and status.json</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="sec" id="install" aria-labelledby="install-h">
+  <h2 class="label" id="install-h">Requirements and install</h2>
+  <div class="cols">
+    <div>
+      <h3>You need</h3>
+      <ul class="plain">
+        <li>A PS3 with custom firmware and Cobra, with PS3MAPI. Developed and tested on
+          <strong>Evilnat 4.93</strong>.</li>
+        <li><strong>webMAN MOD</strong>, recommended: it unmounts a mounted image before a rip,
+          refreshes the game list when you exit, and mounts your rips to play them.</li>
+        <li>Optional: one or two Apple USB SuperDrives to rip up to three discs at once.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Install</h3>
+      <ol class="steps">
+        <li><a href="https://github.com/bjornwiberg/psx-ripper/releases/latest/download/psxripper.pkg">Download psxripper.pkg</a>.</li>
+        <li>Copy it to the PS3 with a USB stick, FTP or webMAN's <em>Install PKG</em>.</li>
+        <li>Install it with <em>Package Manager → Install Package Files</em>. Installing over an
+          older version keeps your settings.</li>
+        <li>Start <strong>PSX RiPPER</strong> from the Game column, insert a disc and press
+          <span class="g g-cross g-inline" aria-label="cross">✕</span>.</li>
+      </ol>
+      <p>Rips go to <code>/dev_hdd0/PSXISO/</code> by default. Mount the <code>.cue</code> with
+        webMAN and start it from the XMB. The <a href="docs/user-guide.html">user guide</a> walks
+        through the rest.</p>
+    </div>
+  </div>
+</section>
+
+<section class="sec" id="docs" aria-labelledby="docs-h">
+  <h2 class="label" id="docs-h">Docs</h2>
+  <ul class="doclist">
+    <li><a href="docs/user-guide.html">User guide</a><span>From installing to playing your rips: the screen, Repair, the game list, the audit log</span></li>
+    <li><a href="docs/configuration.html">Configuration</a><span>The settings file, the remote view, webhooks, <code>status.json</code>, Redump</span></li>
+    <li><a href="docs/mcp.html">MCP</a><span>Connecting an agent and every tool, with examples</span></li>
+    <li><a href="docs/faq.html">FAQ</a><span>Firmwares, Redump mismatches, LibCrypt, SuperDrives</span></li>
+    <li><a href="docs/how-it-works.html">How it works</a><span>The lv1 patch, raw reads, the Q subchannel, the USB driver</span></li>
+    <li><a href="changelog.html">Changelog</a><span>Every release since 1.0.0</span></li>
+  </ul>
+</section>

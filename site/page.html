@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}}</title>
+<meta name="description" content="{{description}}">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#1c2149">
+<meta property="og:title" content="{{title}}">
+<meta property="og:description" content="{{description}}">
+<meta property="og:image" content="https://psxripper.bjrn.nu/icon.png">
+<link rel="icon" type="image/png" href="{{root}}icon.png">
+<link rel="stylesheet" href="{{root}}style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <a class="brand" href="{{root}}"><img src="{{root}}icon.png" alt="" width="28" height="28"><span>PSX RiPPER</span></a>
+  <nav aria-label="Site">
+    <ul class="tabs">
+{{nav}}
+    </ul>
+  </nav>
+</header>
+<main id="main" class="{{main_class}}">
+{{body}}
+</main>
+<footer class="foot">
+  <div class="foot-in">
+    <p>PSX RiPPER {{version}} is free software under the
+      <a href="https://github.com/bjornwiberg/psx-ripper/blob/main/LICENSE">GPL-3.0</a>.
+      Source on <a href="https://github.com/bjornwiberg/psx-ripper">GitHub</a>.</p>
+    <p>Not affiliated with or endorsed by Sony Interactive Entertainment. "PlayStation" is a
+      trademark of Sony Interactive Entertainment. Rip only discs you own.</p>
+  </div>
+</footer>
+</body>
+</html>
