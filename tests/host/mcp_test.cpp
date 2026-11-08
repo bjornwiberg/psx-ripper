@@ -124,7 +124,7 @@ static void ping(int &bad)
 static const char *k_tools[] = {"get_state", "get_screenshot", "get_drives", "list_settings", "set_setting",
 	"go_screen", "go_tab", "press_button", "rip", "repair", "check", "cancel", "skip_rereads", "eject", "read_log",
 	"list_games", "get_game", "check_game", "check_games", "cancel_check", "rename_game", "trash_game", "restore_game", "empty_trash", "show_games",
-	"get_app_info", "audit_log", "preview_name"};
+	"get_app_info", "audit_log", "preview_name", "audit_undo", "audit_redo", "reset_settings", "redump_download", "webhook_test", "show_game"};
 static const int k_ntools = sizeof(k_tools) / sizeof(k_tools[0]);
 
 static void tools_list(int &bad)
@@ -299,7 +299,9 @@ static void tool_errors(int &bad)
 			: !strcmp(k_tools[i], "rename_game") ? "{\"id\":\"hdd:/a\",\"pattern\":\"%T\"}"
 			: !strcmp(k_tools[i], "empty_trash") ? "{\"source\":\"hdd\",\"confirm\":true}"
 			: !strcmp(k_tools[i], "preview_name") ? "{\"pattern\":\"%T\"}"
-			: !strcmp(k_tools[i], "audit_log") ? "{}"
+			: !strcmp(k_tools[i], "audit_log") || !strcmp(k_tools[i], "redump_download") || !strcmp(k_tools[i], "webhook_test") ? "{}"
+			: !strcmp(k_tools[i], "audit_undo") || !strcmp(k_tools[i], "audit_redo") ? "{\"row\":1}"
+			: !strcmp(k_tools[i], "show_game") ? "{\"id\":\"hdd:/a\"}"
 			: (!strncmp(k_tools[i], "get_", 4) || !strcmp(k_tools[i], "list_settings") || !strcmp(k_tools[i], "read_log") || !strcmp(k_tools[i], "list_games") ||
 			   !strcmp(k_tools[i], "check_games") || !strcmp(k_tools[i], "cancel_check") || !strcmp(k_tools[i], "show_games")) ? "{}"
 			: "{\"drive\":\"usb0\"}";
@@ -799,6 +801,56 @@ static void app_reads(int &bad)
 	mcp_init(&g_hooks, "1.2.3-test");
 }
 
+// ---- the app's other changing tools: audit_undo and audit_redo (a whole disc only with confirm),
+// reset_settings (all of them only with confirm), redump_download, webhook_test, show_game
+static int h_undo(int redo, const McpAuditQuery *q, char *out, int n) { g_aq = *q; g_call = std::string(redo ? "redo|" : "undo|") + aq_text(q); return answer(out, n); }
+static int h_whtest(char *out, int n) { g_call = "webhook_test"; return answer(out, n); }
+static void app_actions(int &bad)
+{
+	McpHooks hk = g_hooks;
+	hk.audit_undo = h_undo; hk.webhook_test = h_whtest; hk.game = h_gact;
+	mcp_init(&hk, "1.2.3-test");
+	g_ret = 0; g_answer = "{\"ok\":true}";
+	const char *esc = "{\\\"ok\\\":true}";
+	for (const char *t : {"audit_undo", "audit_redo", "reset_settings", "redump_download", "show_game"})
+		if (!has_desc(t, "instead of press_button")) { printf("  %s does not steer away from press_button\n", t); CHECK(0); }
+	CHECK(has_desc("audit_undo", "audit_redo") && has_desc("audit_redo", "audit_undo") && has_desc("audit_undo", "confirm"));
+	CHECK(has_desc("reset_settings", "MCP stays on") && has_desc("redump_download", "get_state") && has_desc("webhook_test", "never"));
+	CHECK(has_desc("set_setting", "audit_mb") && has_desc("press_button", "audit_undo") && has_desc("press_button", "reset_settings"));
+	// audit_undo / audit_redo: exactly one of row, job and disc; a disc only with confirm: true
+	CHECK(text_ok(tool("audit_undo", "{\"row\":12}"), esc)); CHECK(g_call == "undo|||12|0|0|50|0");
+	CHECK(text_ok(tool("audit_redo", "{\"job\":7}"), esc)); CHECK(g_call == "redo|||0|7|0|50|0");
+	CHECK(text_ok(tool("audit_undo", "{\"disc\":\"SLES_011.35\",\"confirm\":true}"), esc)); CHECK(g_call == "undo||SLES_011.35|0|0|0|50|1");
+	CHECK(text_ok(tool("audit_redo", "{\"disc\":\"SLES_011.35\",\"confirm\":true}"), esc)); CHECK(g_call == "redo||SLES_011.35|0|0|0|50|1");
+	for (const char *a : {"{\"disc\":\"SLES_011.35\"}", "{\"disc\":\"SLES_011.35\",\"confirm\":false}"}) {
+		CHECK(tool("audit_undo", a) == 200 && has("\"isError\":true") && has("confirm: true") && g_call.empty());
+	}
+	CHECK(param_err(tool("audit_undo", "{}"), "row"));
+	CHECK(param_err(tool("audit_undo", "{\"row\":1,\"job\":2}"), "row"));
+	CHECK(param_err(tool("audit_redo", "{\"job\":2,\"disc\":\"x\",\"confirm\":true}"), "row"));
+	CHECK(param_err(tool("audit_undo", "{\"row\":0}"), "row"));
+	CHECK(param_err(tool("audit_undo", "{\"row\":\"5\"}"), "row"));
+	CHECK(param_err(tool("audit_undo", "{\"row\":5,\"confirm\":1}"), "confirm"));
+	// reset_settings: a drive's own settings at once; all of them only with confirm: true
+	CHECK(text_ok(tool("reset_settings", "{\"drive\":\"usb0\"}"), esc)); CHECK(g_call == "reset_settings|usb0");
+	CHECK(text_ok(tool("reset_settings", "{\"confirm\":true}"), esc)); CHECK(g_call == "reset_settings|");
+	for (const char *a : {"{}", "{\"confirm\":false}"}) {
+		CHECK(tool("reset_settings", a) == 200 && has("\"isError\":true") && has("confirm: true") && g_call.empty());
+	}
+	CHECK(param_err(tool("reset_settings", "{\"drive\":\"cd\"}"), "drive"));
+	// redump_download: start, or stop with cancel
+	CHECK(text_ok(tool("redump_download", NULL), esc)); CHECK(g_call == "redump_download|");
+	CHECK(text_ok(tool("redump_download", "{\"cancel\":false}"), esc)); CHECK(g_call == "redump_download|");
+	CHECK(text_ok(tool("redump_download", "{\"cancel\":true}"), esc)); CHECK(g_call == "redump_download|cancel");
+	CHECK(param_err(tool("redump_download", "{\"cancel\":\"yes\"}"), "cancel"));
+	// webhook_test, show_game
+	CHECK(text_ok(tool("webhook_test", NULL), esc)); CHECK(g_call == "webhook_test");
+	CHECK(param_err(tool("webhook_test", "{\"url\":\"http://x\"}"), "url"));
+	CHECK(text_ok(tool("show_game", "{\"id\":\"hdd:/a\"}"), esc)); CHECK(g_call.compare(0, 18, "show_game|hdd:/a|(") == 0);
+	CHECK(param_err(tool("show_game", "{}"), "id"));
+	mcp_init(&g_hooks, "1.2.3-test");
+}
+
 int main()
 {
 	setvbuf(stdout, NULL, _IOLBF, 0);
@@ -808,7 +860,7 @@ int main()
 		{"bad_arguments", bad_arguments}, {"tool_errors", tool_errors}, {"screenshot", screenshot},
 		{"protocol_errors", protocol_errors}, {"notifications", notifications}, {"too_large", too_large},
 		{"depth", depth}, {"fuzz", fuzz}, {"small_buffer", small_buffer}, {"games", games},
-		{"app_reads", app_reads},
+		{"app_reads", app_reads}, {"app_actions", app_actions},
 	};
 	for (auto &t : tests) {
 		int bad = 0;

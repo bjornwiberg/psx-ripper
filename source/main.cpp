@@ -3486,10 +3486,10 @@ static volatile int g_remote_btn = 0;
 // dialog, the on-screen keyboard and the hint bar's buttons are noted where they are drawn.
 enum { SCR_HOME, SCR_SETTINGS, SCR_DRIVE_SETTINGS, SCR_FILENAME, SCR_WEBHOOKS, SCR_WEBHOOK_HEADERS, SCR_ABOUT, SCR_AUDIT_LOG,
        SCR_REMOTE_CONTROL, SCR_REDUMP_DOWNLOAD, SCR_GAMES, SCR_GAME_FILTER, SCR_GAME_DETAIL, SCR_GAME_RENAME,
-       SCR_GAME_CHECK };
+       SCR_GAME_CHECK, SCR_AUDIT_UNDO };
 static const char *const SCR_NAMES[] = {"home", "settings", "drive_settings", "filename", "webhooks", "webhook_headers", "about", "audit_log",
                                         "remote_control", "redump_download", "games", "game_filter", "game_detail",
-                                        "game_rename", "game_check"};
+                                        "game_rename", "game_check", "audit_undo"};
 #define HINTS 8
 struct UiState {
 	int scr, row, card;          // the screen, its focused row (-1 none), its drive (card, -1 none)
@@ -3499,10 +3499,13 @@ struct UiState {
 	int osk;                     // the system's on-screen keyboard is up
 	int hint_n;                  // the hint bar last drawn: button and what it does
 	char hint_b[HINTS][12], hint_l[HINTS][64];
+	char wait_name[128];         // SCR_AUDIT_UNDO: what an undo works on, whether it redoes, checks the rip again,
+	int wait_redo, wait_check;   // and how far (MB)
+	uint32_t wait_mb;
 };
 // Written by the UI thread, read whole by MCP's get_state under a short lock (never a screen with
 // another screen's row). The lock is a leaf: nothing else is taken while it is held.
-static UiState g_ui = {SCR_HOME, -1, -1, 0, 0, 0, "", 0, 0, {}, {}};
+static UiState g_ui = {SCR_HOME, -1, -1, 0, 0, 0, "", 0, 0, {}, {}, "", 0, 0, 0};
 static sys_mutex_t g_ui_mx;
 struct UiLock { UiLock() { sysMutexLock(g_ui_mx, 0); } ~UiLock() { sysMutexUnlock(g_ui_mx); } };
 // MCP's answer while the app's own dialog is open: its text and the buttons that answer it.
@@ -3521,11 +3524,12 @@ static void ui_snapshot(UiState &s) { UiLock lock; s = g_ui; }
 // The slot: MCP fills and posts, the UI takes and finishes. PEEK: the UI reads a posted request; MCP
 // cannot withdraw it meanwhile (only POSTED -> FREE), so the UI never reads one half replaced.
 enum { RQ_FREE, RQ_FILLING, RQ_POSTED, RQ_TAKEN, RQ_DONE, RQ_GONE, RQ_PEEK };
-enum { RK_BUTTON, RK_SCREEN, RK_TAB, RK_ACTION, RK_GAME };
+enum { RK_BUTTON, RK_SCREEN, RK_TAB, RK_ACTION, RK_GAME, RK_AUDIT, RK_RESET, RK_REDUMP };
+#define RK_NOT_BUTTON (1 << RK_SCREEN | 1 << RK_TAB | 1 << RK_ACTION | 1 << RK_GAME | 1 << RK_AUDIT | 1 << RK_RESET | 1 << RK_REDUMP)
 enum { ACT_RIP, ACT_REPAIR, ACT_CHECK, ACT_CANCEL, ACT_SKIP, ACT_EJECT };
 // The game list's actions (RK_GAME): □ on a game, START, ○ on the check's progress, the rename view's
 // START, △ (to the trash, back), START + yes in the trash; SELECT and the filter panel (show_games).
-enum { GA_CHECK_ONE, GA_CHECK_ALL, GA_CANCEL, GA_RENAME, GA_TRASH, GA_RESTORE, GA_EMPTY, GA_SHOW };
+enum { GA_CHECK_ONE, GA_CHECK_ALL, GA_CANCEL, GA_RENAME, GA_TRASH, GA_RESTORE, GA_EMPTY, GA_SHOW, GA_DETAIL };
 struct UiReq {
 	int kind;      // RK_*
 	int bits;      // RK_BUTTON: the button (B_*)
@@ -3541,6 +3545,11 @@ struct UiReq {
 	int gfgiven, gfclear;    // RK_GAME show: the criteria given (McpGameQuery.fgiven), or clear them all
 	int gexp, gexp_ids;      // RK_GAME empty: the games the agent expects in that trash (-1: not given),
 	uint64_t gexp_hash;      // and with gexp_ids the sum of their ids' mcp_id_hash
+	int aredo;               // RK_AUDIT: a redo (audit_redo) of the row, job or rips disc, confirmed for a disc
+	uint32_t arow, ajob;
+	char adisc[MCP_MAX_DISC + 1];
+	int aconfirm;
+	int rcancel;             // RK_REDUMP: stop the download (else start it); RK_RESET: card -1 = every setting
 	int seq;       // which request this is (MCP numbers them): the UI takes only the one it looked at
 	int rc;        // the UI's answer: 0 done, else refused with why
 	char why[400];
@@ -3605,15 +3614,28 @@ static int scr_parent(int scr)
 enum { RR_NONE = -1, RR_BACK = -2, RR_HERE = -3 };
 // What screen loop `me` (a drive's settings: of card) does with MCP's request this frame: RR_NONE
 // (nothing, or a screen request that ends here: done at the next frame), RR_BACK (leave, as O does),
-// RR_HERE (taken: the home screen's tab or action, the game list's action), or the screen to open
+// RR_HERE (taken: the home screen's tab or action, the game list's action, the audit log's undo, a
+// reset, the Redump download), or the screen to open
 // from here on the way.
 // The request is read once (g_req_seen, also for the caller): a step on the way is a move the pad
 // could make; the request is acted on and answered only once it is taken by its seq.
+// The screen a request is carried out on.
+static int req_screen(const UiReq &r)
+{
+	switch (r.kind) {
+	case RK_SCREEN: return r.scr;
+	case RK_GAME: return SCR_GAMES;
+	case RK_AUDIT: return SCR_AUDIT_LOG;
+	case RK_RESET: return r.card >= 0 ? SCR_DRIVE_SETTINGS : SCR_SETTINGS;
+	case RK_REDUMP: return SCR_SETTINGS;
+	}
+	return SCR_HOME;
+}
 static int ui_req_route(int me, int card)
 {
 	UiReq &r = g_req_seen;
 	if (!ui_req_peek(r) || r.kind == RK_BUTTON) return RR_NONE;
-	int t = r.kind == RK_SCREEN ? r.scr : r.kind == RK_GAME ? SCR_GAMES : SCR_HOME;
+	int t = req_screen(r);
 	if (t == me && (t != SCR_DRIVE_SETTINGS || r.card == card)) {
 		if (!ui_req_take(1 << r.kind, r.seq)) return RR_NONE;
 		if (r.kind == RK_SCREEN) { g_req_flip = 1; return RR_NONE; }
@@ -3626,7 +3648,7 @@ static int ui_req_route(int me, int card)
 // but a button is answered at once with what is in the way.
 static void ui_req_refuse(const char *why)
 {
-	if (ui_req_take(1 << RK_SCREEN | 1 << RK_TAB | 1 << RK_ACTION | 1 << RK_GAME)) ui_req_done(-1, why);
+	if (ui_req_take(RK_NOT_BUTTON)) ui_req_done(-1, why);
 }
 
 // A button by the name the remote view's pad and MCP use; 0 = none.
@@ -3901,17 +3923,37 @@ static void download_thread(void *arg)
 	sysThreadExit(0);
 }
 
-static void redump_download_screen()
+#define RD_DL_NOSTART (-8)   // the download's thread could not be started
+// The download with its progress; O stops it. src: who started it. by_tool: MCP's redump_download (its
+// request taken) started it: answered at once with started, and its end shows no dialog, the result is
+// in get_app_info (D2). While it runs, redump_download with cancel stops it as O does.
+static void redump_download_screen(AuditSrc src, int by_tool)
 {
-	g_dl_done = g_dl_total = 0; g_dl_phase = 0; g_dl_abort = 0; g_dl_finished = 0;
+	g_dl_done = g_dl_total = 0; g_dl_phase = 0; g_dl_abort = 0; g_dl_finished = 0; g_dl_result = 0;
+	g_dl_running = 1;
 	sys_ppu_thread_t tid;
-	sysThreadCreate(&tid, download_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxredump");
+	int started = sysThreadCreate(&tid, download_thread, NULL, 1000, 0x10000, THREAD_JOINABLE, (char *)"psxredump") == 0;
+	if (!started) { g_dl_result = RD_DL_NOSTART; g_dl_finished = 1; }
+	if (by_tool) {   // the request that started it: its answer is the next frame (the progress), or why not
+		if (started) { g_req.res = strdup("{\"started\":true,\"note\":\"The download runs: get_state shows how far (redump_download), get_app_info the result.\"}"); g_req_flip = 1; }
+		else ui_req_done(-1, "The download could not be started.");
+	}
+	logf("redump download started%s", by_tool ? " by mcp" : "");
 	pad_pressed();
 	uint32_t shown = 101, shown_kb = ~0u;
 	int last_phase = -1, shown_abort = 0;
 	while (!g_dl_finished) {
 		if ((pad_pressed() & B_CIRCLE) || exit_requested) g_dl_abort = 1;
-		ui_req_refuse("The Redump copy is downloading: wait until it is done, or press_button circle to stop it.");
+		UiReq q;
+		if (ui_req_peek(q) && q.kind == RK_REDUMP && ui_req_take(1 << RK_REDUMP, q.seq)) {   // MCP's redump_download while it runs
+			if (q.rcancel) {
+				g_dl_abort = 1;
+				logf("redump download: stopped by mcp");
+				g_req.res = strdup("{\"cancelled\":true}");
+				g_req_flip = 1;
+			} else ui_req_done(-1, "A Redump download runs already: get_state shows how far; redump_download with cancel: true stops it.");
+		}
+		ui_req_refuse("The Redump copy is downloading: wait until it is done (get_state shows how far), or stop it with redump_download and cancel: true.");
 		// each phase runs the bar from 0 to 100 %: first the download (bytes), then the index
 		uint32_t tot = g_dl_total ? g_dl_total : 1;
 		uint32_t pct = g_dl_total ? (uint32_t)((uint64_t)g_dl_done * 100 / tot) : 0;
@@ -3927,16 +3969,20 @@ static void redump_download_screen()
 		flip_frame();
 	}
 	u64 rv;
-	sysThreadJoin(tid, &rv);
+	if (started) sysThreadJoin(tid, &rv);
 	logf("redump download result %d", g_dl_result);
+	g_dl_last.set = 0;
+	__sync_synchronize();
 	g_dl_last.result = g_dl_result;
 	g_dl_last.at = time(NULL);
-	g_dl_last.src = g_input_src;
+	g_dl_last.src = src;
 	g_dl_last.version[0] = 0;
 	if (g_dl_result > 0) rd_local_info(g_dl_last.version, sizeof(g_dl_last.version), NULL);
 	__sync_synchronize();
 	g_dl_last.set = 1;
+	g_dl_running = 0;
 	if (g_dl_result == -7 || exit_requested) return;   // cancelled
+	if (by_tool) return;   // no dialog to answer on the TV: get_app_info has the result
 	char msg[256], ver[64] = "";
 	if (g_dl_result > 0) {
 		char raw[64] = "";
@@ -5074,6 +5120,31 @@ static void audit_draw(const AuditView &v)
 	hint_bar(b, l, m);
 }
 
+// An undo of the audit screen runs (the pad's or MCP's): get_state shows screen audit_undo with how far,
+// and every other request is answered at once. MCP's undo (g_undo_mcp) that runs longer than
+// g_undo_early_ms is answered then with started: the slot is free again, and the rest is not answered.
+static int g_undo_early_ms = 3000;   // (the host tests make it short)
+static int g_undo_mcp, g_undo_early;
+static uint64_t g_undo_t0;
+static char g_undo_item[160];   // what MCP's undo works on, for its early answer ("row 12", "job 3", "disc ...")
+static char *undo_early_res();   // that answer (with MCP's other tools)
+static void undo_wait_state(const char *name, int redo, int check, uint32_t mb)
+{
+	{
+		UiLock lock;
+		g_ui.scr = SCR_AUDIT_UNDO; g_ui.row = -1; g_ui.card = -1;
+		snprintf(g_ui.wait_name, sizeof(g_ui.wait_name), "%s", name);
+		g_ui.wait_redo = redo; g_ui.wait_check = check; g_ui.wait_mb = mb;
+	}
+	if (g_undo_mcp && !g_undo_early && now_ms() - g_undo_t0 >= (uint64_t)g_undo_early_ms) {
+		g_undo_early = 1;
+		g_req.res = undo_early_res();
+		g_req_flip = 1;   // answered with the frame the tick shows next
+	}
+	if (ui_req_take(RK_NOT_BUTTON | 1 << RK_BUTTON))
+		ui_req_done(-1, "An undo in the audit log runs: wait until it has ended (get_state shows how far).");
+}
+
 // The wait while an undone rip is checked again (it reads the whole image), or while a big undo
 // writes its sectors back (STR_AUDIT_UNDOING): its name and how far.
 static void audit_wait_draw(const char *name, uint32_t mb, StrId what = STR_AUDIT_WAIT)
@@ -5088,8 +5159,10 @@ static void audit_wait_draw(const char *name, uint32_t mb, StrId what = STR_AUDI
 		ui_text(UI_SMALL, ui_w() / 2, y + ui_line(UI_SMALL) / 2, 0xA8B0C8, t, UI_CENTER);
 	}
 }
+static int g_wait_redo;   // the audit screen's undo running now is a redo
 static void audit_wait_tick(uint32_t sectors)
 {
+	undo_wait_state(g_wait_name, g_wait_redo, 1, (uint32_t)((uint64_t)sectors * RAW_SIZE >> 20));
 	audit_wait_draw(g_wait_name, (uint32_t)((uint64_t)sectors * RAW_SIZE >> 20));
 	g_drawn = 2;
 	g_backdrop_shown = 0;
@@ -5098,7 +5171,6 @@ static void audit_wait_tick(uint32_t sectors)
 }
 // What the wait of a big undo says: undoing, or redoing (applying undone changes again).
 static StrId audit_wait_what(int redo) { return redo ? STR_AUDIT_REDOING : STR_AUDIT_UNDOING; }
-static int g_wait_redo;   // the audit screen's undo running now is a redo
 
 // The audit's undo of a job or disc, every AUDIT_TICK sectors: the screen says how far (the audit
 // screen only) and the system's callbacks run; closing the app stops the undo.
@@ -5106,6 +5178,7 @@ static int audit_undo_tick(uint32_t done, uint32_t total)
 {
 	(void)total;
 	if (g_check_ui) {
+		undo_wait_state(g_wait_name, g_wait_redo, 0, (uint32_t)((uint64_t)done * RAW_SIZE >> 20));
 		audit_wait_draw(g_wait_name, (uint32_t)((uint64_t)done * RAW_SIZE >> 20), audit_wait_what(g_wait_redo));
 		g_drawn = 2;
 		g_backdrop_shown = 0;
@@ -5114,6 +5187,7 @@ static int audit_undo_tick(uint32_t done, uint32_t total)
 	return exit_requested;
 }
 
+static void audit_mcp(AuditView &v);   // MCP's audit_undo / audit_redo, taken (below, with MCP's other tools)
 static void audit_screen()
 {
 	AuditView v;
@@ -5130,7 +5204,9 @@ static void audit_screen()
 		ui_at(SCR_AUDIT_LOG, v.row);
 		flip_frame();
 		int p = pad_pressed();
-		if (ui_req_route(SCR_AUDIT_LOG, -1) == RR_BACK) return;   // MCP goes elsewhere: out of the log at once
+		int rr = ui_req_route(SCR_AUDIT_LOG, -1);
+		if (rr == RR_BACK) return;   // MCP goes elsewhere: out of the log at once
+		if (rr == RR_HERE) { audit_mcp(v); g_redraw = 2; }   // audit_undo / audit_redo, as triangle and yes
 		if (p) g_redraw = 2;
 		if (p & (B_UP | B_DOWN | B_L2 | B_R2)) audit_nav(v, p);
 		if (p & B_CROSS) audit_open(v);
@@ -6646,6 +6722,29 @@ static void settings_draw(int row, const DriveCfg &sd, int redump, int remote, i
 	}
 }
 
+// Every setting back to its default (triangle in the settings): the webhook address, headers and
+// events, the Redump copy and the drives' own settings and destinations are kept. keep_remote: the
+// Remote control switches stay as they are (MCP's reset_settings, D1: the agent keeps its connection).
+static void settings_reset(AuditSrc src, int keep_remote)
+{
+	CfgLock lock;
+	DriveCfg st = {1, 4, 0, 1, 0, CHECK_BITPERFECT};
+	snprintf(g_name_pat, sizeof(g_name_pat), "%s", FN_PRESETS[0]);
+	g_std = st;
+	g_redump = RD_OFF;
+	if (!keep_remote) {
+		g_remote = g_mcp = g_status_json = 0;
+		remote_apply();
+	}
+	g_webhook_on = 0; g_webhook_step = 5;
+	g_audit_mb = 256;
+	for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;   // names and destinations may have changed
+	cfg_save_src(src);
+	audit_apply_cap();
+	logf("settings reset to the defaults%s; remote=%d mcp=%d status_json=%d", src == AU_MCP ? " by mcp" : "", g_remote, g_mcp, g_status_json);
+}
+static char *settings_res(int card);   // MCP's answer to a reset: the settings as list_settings gives them
+
 static void settings_screen()
 {
 	// the values shown are the settings themselves (no copies): a change over MCP shows at once
@@ -6667,6 +6766,22 @@ static void settings_screen()
 		int p = pad_pressed();
 		switch (ui_req_route(SCR_SETTINGS, -1)) {   // MCP goes elsewhere: back as O, or to a row and in as X
 		case RR_BACK: p = B_CIRCLE; break;
+		case RR_HERE: {   // reset_settings (all of them) or redump_download, taken
+			const UiReq &q = g_req_seen;
+			g_redraw = 2;
+			if (q.kind == RK_RESET) {   // as triangle and yes (the call is the yes), the Remote control switches kept
+				settings_reset(AU_MCP, 1);
+				g_req.res = settings_res(-1);
+				g_req_flip = 1;
+			} else if (q.kind == RK_REDUMP && q.rcancel) ui_req_done(-1, "No Redump download runs: there is nothing to stop.");
+			else if (q.kind == RK_REDUMP) {   // as X on the Redump copy's row
+				row = SR_RDCOPY;
+				redump_download_screen(AU_MCP, 1);
+				rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
+				pad_pressed();
+			} else ui_req_done(-1, "Refused.");
+			continue;
+		}
 		case SCR_GAMES: row = SR_GAMES; p = B_CROSS; break;
 		case SCR_FILENAME: row = SR_FILENAME; p = B_CROSS; break;
 		case SCR_REMOTE_CONTROL: row = SR_REMOTE; p = B_CROSS; break;
@@ -6716,7 +6831,7 @@ static void settings_screen()
 			continue;
 		}
 		if ((p & B_CROSS) && row == SR_RDCOPY) {
-			redump_download_screen();
+			redump_download_screen(g_input_src, 0);
 			rdcount = rd_local_info(rdver, sizeof(rdver), &rdwhen);
 			pad_pressed();
 			g_redraw = 2;
@@ -6731,19 +6846,11 @@ static void settings_screen()
 			g_redraw = 2;
 		}
 		if (!d && !reset) { if (p & B_CIRCLE) return; continue; }
-		{   // every change is applied and saved immediately
+		if (reset) settings_reset(g_input_src, g_input_src == AU_MCP);   // the pad's turns the Remote control switches off too; MCP's (press_button) keeps them
+		else {   // every change is applied and saved immediately
 			CfgLock lock;
 			DriveCfg &sd = g_std;
-			if (reset) {   // defaults; the webhook address and the Redump copy are kept
-				DriveCfg st = {1, 4, 0, 1, 0, CHECK_BITPERFECT};
-				snprintf(g_name_pat, sizeof(g_name_pat), "%s", FN_PRESETS[0]);
-				sd = st;
-				g_redump = RD_OFF;
-				g_remote = g_mcp = g_status_json = 0;
-				remote_apply();
-				g_webhook_on = 0; g_webhook_step = 5;
-				g_audit_mb = 256;
-			} else if (row == SR_SPEED) {   // right = faster (2x, 4x, 8x, max), no wrap-around
+			if (row == SR_SPEED) {   // right = faster (2x, 4x, 8x, max), no wrap-around
 				sd.speed = opt_clamp(OPTS(o_speed), sd.speed, d);
 			} else if (row == SR_RETRIES) {
 				sd.retries = opt_wrap(OPTS(o_retries), sd.retries, d);
@@ -6777,6 +6884,17 @@ static void settings_screen()
 // drive: the PS3's as drive_bd=, a USB drive by its port as drive_usbN=.
 enum { CF_OUTDIR = 1, CF_DRIVE = 2 };   // what a card takes from the config (Card::pend_cfg)
 static void card_take_cfg(int c, int what, bool busy_too = false);
+// A drive's own settings back to the standard (triangle in its settings); its destination stays.
+static void drive_reset(int c, AuditSrc src)
+{
+	Card &k = g_cards[c];
+	CfgLock lock;
+	card_take_cfg(c, k.pend_cfg & CF_DRIVE, true);   // a value saved since the frame: reset on top of it
+	card_defaults(k);
+	card_store(c);
+	cfg_save_src(src);
+	logf("drive %d settings: all standard%s", c, src == AU_MCP ? " (mcp)" : "");
+}
 static void drive_settings_screen(int c)
 {
 	Card &k = g_cards[c];
@@ -6806,30 +6924,32 @@ static void drive_settings_screen(int c)
 		ui_at(SCR_DRIVE_SETTINGS, row, c);
 		flip_frame();
 		int p = pad_pressed();
-		if (ui_req_route(SCR_DRIVE_SETTINGS, c) == RR_BACK) p = B_CIRCLE;   // MCP goes elsewhere: back, as O
+		int rr = ui_req_route(SCR_DRIVE_SETTINGS, c);
+		if (rr == RR_BACK) p = B_CIRCLE;   // MCP goes elsewhere: back, as O
+		else if (rr == RR_HERE) {   // reset_settings with this drive: as triangle
+			drive_reset(c, AU_MCP);
+			g_req.res = settings_res(c);
+			g_req_flip = 1;
+			g_redraw = 2;
+		}
 		if (p) g_redraw = 2;
 		if (p & B_UP) row = (row + NROWS - 1) % NROWS;
 		if (p & B_DOWN) row = (row + 1) % NROWS;
 		if (p & B_R2) row = NROWS - 1;   // all rows show: L2/R2 go to the first / last
 		if (p & B_L2) row = 0;
 		int d = (p & B_RIGHT) ? 1 : (p & B_LEFT) ? -1 : 0;
-		if (!d && !(p & B_TRIANGLE)) { if (p & B_CIRCLE) return; continue; }
-		int reset = 0;
+		if (p & B_TRIANGLE) drive_reset(c, g_input_src);   // all back to the standard
+		if (!d) { if (p & B_CIRCLE) return; continue; }
 		CfgLock lock;
 		card_take_cfg(c, k.pend_cfg & CF_DRIVE, true);   // a value MCP saved since the frame: changed on top of it, never overwritten
-		if (p & B_TRIANGLE) { card_defaults(k); reset = 1; }   // all back to the standard
-		if (d) {
-			if (row == 0) k.speed = opt_std(OPTS(o_speed), k.speed, d);   // right = faster
-			else if (row == 1) k.retries = opt_std(OPTS(o_retries), k.retries, d);
-			else if (row == 2) k.check = opt_std(OPTS(o_check), k.check, d);
-			else if (row == 3) k.eject = opt_std(OPTS(o_onoff), k.eject, d);
-			else if (row == 4) k.autostart = opt_std(OPTS(o_onoff), k.autostart, d);
-		}
-		if (d || reset) {
-			card_store(c);
-			cfg_save();
-			logf("drive %d settings: speed=%d retries=%d check=%d eject=%d autostart=%d (-1 = standard)", c, k.speed, k.retries, k.check, k.eject, k.autostart);
-		}
+		if (row == 0) k.speed = opt_std(OPTS(o_speed), k.speed, d);   // right = faster
+		else if (row == 1) k.retries = opt_std(OPTS(o_retries), k.retries, d);
+		else if (row == 2) k.check = opt_std(OPTS(o_check), k.check, d);
+		else if (row == 3) k.eject = opt_std(OPTS(o_onoff), k.eject, d);
+		else if (row == 4) k.autostart = opt_std(OPTS(o_onoff), k.autostart, d);
+		card_store(c);
+		cfg_save();
+		logf("drive %d settings: speed=%d retries=%d check=%d eject=%d autostart=%d (-1 = standard)", c, k.speed, k.retries, k.check, k.eject, k.autostart);
 		if (p & B_CIRCLE) return;
 	}
 }
@@ -7693,7 +7813,7 @@ static int home_screen()
 			}
 			if (rr == SCR_DRIVE_SETTINGS) {   // as SELECT on its tab; not while a job runs there (the pad cannot either)
 				if (!there || g_cards[rc].job) {
-					if (ui_req_take(1 << RK_SCREEN, q.seq)) ui_req_done(-1, there ? T_en(STR_CAN_SETTINGS_BUSY) : "That drive is not there any more.");
+					if (ui_req_take(1 << q.kind, q.seq)) ui_req_done(-1, there ? T_en(STR_CAN_SETTINGS_BUSY) : "That drive is not there any more.");
 					continue;
 				}
 				sel = rc;
@@ -8177,7 +8297,19 @@ static int mcp_state(char *out, int n)
 		js_str(j, u.hint_l[i]);
 		js_put(j, "}");
 	}
-	js_put(j, "],\"busy\":%s,", g_state_busy() ? "true" : "false");
+	js_put(j, "]");
+	if (g_dl_running) {   // the Redump download: each phase (download, index) goes from 0 to 100 %
+		uint32_t done = g_dl_done, tot = g_dl_total;
+		int ph = g_dl_phase;
+		js_put(j, ",\"redump_download\":{\"phase\":\"%s\",\"percent\":%u,\"kb\":%u,\"kb_total\":%u,\"cancelling\":%s}", ph ? "index" : "download",
+		       tot ? (unsigned)((uint64_t)done * 100 / tot) : 0, ph ? 0 : done / 1024, ph ? 0 : tot / 1024, g_dl_abort ? "true" : "false");
+	}
+	if (scr == SCR_AUDIT_UNDO) {   // an undo of the audit screen runs: what, and how far
+		js_put(j, ",\"audit_undo\":{\"what\":");
+		js_str(j, u.wait_name);
+		js_put(j, ",\"redo\":%s,\"step\":\"%s\",\"mb\":%u}", u.wait_redo ? "true" : "false", u.wait_check ? "checking" : "writing", u.wait_mb);
+	}
+	js_put(j, ",\"busy\":%s,", g_state_busy() ? "true" : "false");
 	js_drives(j);
 	js_put(j, "}");
 	return js_end(j, out, n);
@@ -8240,7 +8372,7 @@ static int ui_call(const UiReq &r, uint64_t end, char *out, int n)
 	__sync_synchronize();
 	int rc;
 	if (g_req.rc) { snprintf(out, n, "%s", g_req.why[0] ? g_req.why : "Refused."); utf8_fix(out); rc = -1; }
-	else if (r.kind == RK_GAME) {   // what the game list did, then the state
+	else if (r.kind == RK_GAME || r.kind == RK_AUDIT || r.kind == RK_RESET || r.kind == RK_REDUMP) {   // what was done, then the state
 		int k = snprintf(out, n, "{\"result\":%s,\"state\":", g_req.res && g_req.res[0] ? g_req.res : "{}");
 		rc = k > 0 && k < n - 256 ? mcp_state(out + k, n - k - 1) : -1;
 		if (rc) snprintf(out, n, "Done, but the answer is too large: get_state shows the screen.");
@@ -8288,6 +8420,13 @@ static int mcp_ui(const char *tool, const char *arg, char *out, int n)
 	} else if (!strcmp(tool, "go_tab")) {
 		r.kind = RK_TAB;
 		snprintf(drive, sizeof(drive), "%s", arg);
+	} else if (!strcmp(tool, "reset_settings")) {   // arg: the drive, "" every setting (mcp.cpp asked for confirm)
+		r.kind = RK_RESET;
+		snprintf(drive, sizeof(drive), "%s", arg);
+	} else if (!strcmp(tool, "redump_download")) {
+		r.kind = RK_REDUMP;
+		r.rcancel = !strcmp(arg, "cancel");
+		if (r.rcancel && !g_dl_running) { snprintf(out, n, "No Redump download runs: there is nothing to stop."); return -1; }
 	} else {
 		for (size_t i = 0; i < sizeof(acts) / sizeof(acts[0]); i++) if (!strcmp(tool, acts[i].name)) { r.kind = RK_ACTION; r.act = acts[i].act; }
 		if (r.kind < 0) { snprintf(out, n, "Unknown tool \"%.20s\".", tool); return -1; }
@@ -8636,12 +8775,12 @@ static int mcp_game(const char *tool, const char *id, const char *pat, const Mcp
 {
 	static const struct { const char *name; int ga; } acts[] = {
 		{"check_game", GA_CHECK_ONE}, {"check_games", GA_CHECK_ALL}, {"cancel_check", GA_CANCEL}, {"rename_game", GA_RENAME},
-		{"trash_game", GA_TRASH}, {"restore_game", GA_RESTORE}, {"empty_trash", GA_EMPTY}, {"show_games", GA_SHOW}};
+		{"trash_game", GA_TRASH}, {"restore_game", GA_RESTORE}, {"empty_trash", GA_EMPTY}, {"show_games", GA_SHOW}, {"show_game", GA_DETAIL}};
 	UiReq *r = (UiReq *)calloc(1, sizeof(UiReq));
 	if (!r) { snprintf(out, n, "Out of memory."); return -1; }
 	r->kind = RK_GAME; r->card = -1; r->gact = -1; r->gexp = -1;
 	for (size_t i = 0; i < sizeof(acts) / sizeof(acts[0]); i++) if (!strcmp(tool, acts[i].name)) r->gact = acts[i].ga;
-	int one = r->gact == GA_CHECK_ONE || r->gact == GA_RENAME || r->gact == GA_TRASH || r->gact == GA_RESTORE, rc = -1;
+	int one = r->gact == GA_CHECK_ONE || r->gact == GA_RENAME || r->gact == GA_TRASH || r->gact == GA_RESTORE || r->gact == GA_DETAIL, rc = -1;
 	char key[8];
 	if (r->gact < 0) snprintf(out, n, "Unknown tool \"%.20s\".", tool);
 	else if (r->gact == GA_EMPTY && (!q || !q->source[0] || !strcmp(q->source, "all")))   // (mcp.cpp asks for one; never all at once)
@@ -8708,9 +8847,9 @@ static GameFilter gv_show_filter(const UiReq &r)
 // and the filter panel's Show) and while that is read. For an action only the view switches: SELECT
 // alone remembers a source (g_games_source), so the list opens on the user's own next time; show_games
 // is SELECT and the filter panel themselves, so it sets the source and filter as they do (in memory
-// until the app restarts, never saved), at once: when the read takes longer than MCP waits, they stay set. A source that is
-// not connected cannot be chosen (SELECT offers only the connected ones): refused at once, nothing
-// changed. 1: it waits (not taken yet), or it was refused.
+// until the app restarts, never saved), at once: when the read takes longer than MCP waits, they stay
+// set. A source that is not connected cannot be chosen (SELECT offers only the connected ones):
+// refused at once, nothing changed. 1: it waits (not taken yet), or it was refused.
 static int gv_mcp_wait(GamesView &v)
 {
 	UiReq r;
@@ -8875,6 +9014,25 @@ static int gv_mcp_do(GamesView &v, const UiReq &r, char *why, size_t wn, char **
 	if (gi < 0) { snprintf(why, wn, "No game with the id \"%.300s\" is there now: list_games gives the ids.", r.gid); return -1; }
 	const Game &g = g_gl.g[gi];
 	int in = gl_in_trash(g_gl.d[g.first].base);
+	if (r.gact == GA_DETAIL) {   // as X on its row: the row must show (the filter may hide it)
+		int row = -1;
+		for (int i = 0; i < v.nshown && row < 0; i++) if (v.shown[i] == gi) row = i;
+		if (row < 0) { snprintf(why, wn, "The list's filter hides this game: show_games with filter \"clear\" shows every game."); return -1; }
+		v.row = row;
+		gv_fix(v);
+		gd_build(g);
+		v.dfirst = 0;
+		v.mode = GV_DETAIL;
+		logf("game list: details of %s shown by mcp", g.name);
+		Js j = {NULL, 0, 0, false};
+		char b[600];
+		j.p = b; j.n = (int)sizeof(b);
+		js_put(j, "{\"shown\":");
+		js_str(j, g.name);
+		js_put(j, ",\"discs\":%d,\"note\":\"The game's detail view is on the screen: get_game reads it.\"}", g.ndiscs);
+		*res = strdup(j.over ? "{\"shown\":true}" : b);
+		return 0;
+	}
 	if (r.gact == GA_CHECK_ONE) {   // as □
 		if (in) { snprintf(why, wn, "The game is in the trash: restore it to check it."); return -1; }
 		if (g_redump == RD_OFF) { snprintf(why, wn, "%s", T_en(STR_GC_REDUMP_OFF)); return -1; }
@@ -9786,8 +9944,229 @@ static int mcp_preview_name(const char *pattern, const char *drive, const char *
 	return js_end(j, out, n);
 }
 
+// ---- audit_undo and audit_redo: a request the audit screen takes (RK_AUDIT) and carries out as
+// triangle and yes do, with the screen's checks; reset_settings' answer; webhook_test.
+static int mcp_audit_undo(int redo, const McpAuditQuery *q, char *out, int n)
+{
+	if (q->disc[0] && !q->confirm) { snprintf(out, n, "Not %s: a whole disc needs confirm: true.", redo ? "redone" : "undone"); return -1; }   // (mcp.cpp asks for it)
+	UiReq *r = (UiReq *)calloc(1, sizeof(UiReq));
+	if (!r) { snprintf(out, n, "Out of memory."); return -1; }
+	r->kind = RK_AUDIT; r->card = -1;
+	r->aredo = redo; r->arow = q->row; r->ajob = q->job; r->aconfirm = q->confirm;
+	snprintf(r->adisc, sizeof(r->adisc), "%s", q->disc);
+	int rc = ui_call_one(*r, out, n);
+	free(r);
+	return rc;
+}
+
+// On the UI thread, the audit screen: the item, its verdict (as triangle is offered or not), then the
+// core's undo as after the screen's yes. 0 done (*res), else why (English).
+static int audit_mcp_do(AuditView &v, const UiReq &r, char *why, size_t wn, char **res)
+{
+	AuditRow *row = (AuditRow *)malloc(sizeof(AuditRow));
+	if (!row) { snprintf(why, wn, "Out of memory."); return -1; }
+	AuVerdict vd;
+	char label[200], shown[160], key[MCP_MAX_DISC + 1] = "";
+	AuditDom dom = AU_RIPS;
+	int rc = 0;
+	if (r.arow) {
+		if (!audit_row(r.arow, row)) { snprintf(why, wn, "No row %u in the audit log: audit_log gives the ids.", (unsigned)r.arow); rc = -1; }
+		else if (!strcmp(row->kind, "job")) {
+			snprintf(why, wn, "Row %u is the row of job %u: give job: %u to %s the job.", (unsigned)r.arow, (unsigned)row->job, (unsigned)row->job, r.aredo ? "redo" : "undo");
+			rc = -1;
+		}
+		snprintf(g_undo_item, sizeof(g_undo_item), "row %u", (unsigned)r.arow);
+	} else if (r.ajob) {
+		if (!audit_job_row(r.ajob, row)) { snprintf(why, wn, "No job %u in the audit log: audit_log gives the jobs.", (unsigned)r.ajob); rc = -1; }
+		snprintf(g_undo_item, sizeof(g_undo_item), "job %u", (unsigned)r.ajob);
+	} else {   // a disc of the rips (a disc of the files is undone by its jobs, as on the screen)
+		snprintf(key, sizeof(key), "%s", r.adisc);
+		snprintf(g_undo_item, sizeof(g_undo_item), "disc %s", key);
+		char (*keys)[96] = (char (*)[96])malloc((size_t)AU_MCP_MAX * 96), (*names)[96] = (char (*)[96])malloc((size_t)AU_MCP_MAX * 96);
+		int at = -1, files = 0;
+		if (keys && names) {
+			int nd = audit_discs(keys, names, NULL, NULL, AU_MCP_MAX, AU_RIPS);
+			for (int i = 0; i < nd; i++) if (!strcmp(keys[i], key)) at = i;
+			if (at >= 0) snprintf(shown, sizeof(shown), "%s", names[at]);
+			nd = at < 0 ? audit_discs(keys, NULL, NULL, NULL, AU_MCP_MAX, AU_FILES) : 0;
+			for (int i = 0; i < nd; i++) files |= !strcmp(keys[i], key);
+		}
+		free(keys); free(names);
+		if (at < 0) {
+			if (files) snprintf(why, wn, "%s", AU_FILES_DISC);
+			else snprintf(why, wn, "No disc \"%.95s\" in the domain rips: audit_log with domain rips lists them.", key);
+			rc = -1;
+		} else if (!r.aconfirm) { snprintf(why, wn, "A whole disc needs confirm: true."); rc = -1; }
+	}
+	if (rc) { free(row); utf8_fix(why); return -1; }
+	if (key[0]) { vd = au_disc_verdict(AU_RIPS, key); snprintf(label, sizeof(label), "%s", shown); }
+	else {
+		vd = au_row_verdict(*row);
+		dom = row->dom;
+		av_row_label(*row, label, sizeof(label), T_en);
+		if (!strcmp(row->kind, "job") && row->before[0]) snprintf(label + strlen(label), sizeof(label) - strlen(label), " · %.100s", row->before);
+	}
+	const char *done = r.aredo ? "redone" : "undone";
+	if (!r.aredo && vd.redo) snprintf(why, wn, "Not undone: %s is undone already. audit_redo applies it again.", g_undo_item);
+	else if (r.aredo && !vd.redo) snprintf(why, wn, "Not redone: %s is not undone. audit_undo undoes it.", g_undo_item);
+	else if (!vd.can) snprintf(why, wn, "Not %s: %s", done, vd.why);
+	if (why[0]) { free(row); utf8_fix(why); return -1; }
+	// as after the screen's yes: the wait screen names it (in the console's language), a big one says how far
+	if (key[0]) snprintf(g_wait_name, sizeof(g_wait_name), "%s", shown);
+	else av_row_label(*row, g_wait_name, sizeof(g_wait_name));
+	g_check_ui = 1;
+	g_wait_redo = vd.redo;
+	g_undo_mcp = 1; g_undo_early = 0; g_undo_t0 = now_ms();
+	g_files_busy = dom == AU_FILES;
+	char cw[200] = "";
+	AuditReason rs;
+	memset(&rs, 0, sizeof(rs));
+	if (r.arow) rc = audit_undo_row(r.arow, cw, sizeof(cw), &rs);
+	else if (r.ajob) rc = audit_undo_job(r.ajob, cw, sizeof(cw), &rs);
+	else rc = audit_undo_disc_since(key, 0, cw, sizeof(cw), &rs);
+	g_files_busy = 0;
+	g_check_ui = g_wait_redo = 0;
+	g_undo_mcp = 0;
+	if (dom == AU_FILES) {   // the game list and the rip index read their folders again, a card showing a moved rip looks again
+		idx_stale();
+		for (int c = 0; c < NCARDS; c++) g_cards[c].recheck = 1;
+	}
+	logf("audit %s of %s by mcp: %s", r.aredo ? "redo" : "undo", g_undo_item, rc ? cw : "done");
+	av_load(v);
+	av_fix(v);
+	free(row);
+	if (rc) {
+		char rt[300];
+		av_reason(rs, rt, sizeof(rt), T_en);
+		snprintf(why, wn, "Not %s: %s", done, rt);
+		utf8_fix(why);
+		return -1;
+	}
+	char b[800];
+	Js j = {b, (int)sizeof(b), 0, false};
+	js_put(j, "{\"%s\":", done);
+	js_str(j, g_undo_item);
+	js_put(j, ",\"label\":");
+	js_str(j, label);
+	js_put(j, ",\"note\":\"Logged in the audit log with the source MCP; audit_log shows the item now.\"}");
+	*res = strdup(j.over ? "{}" : b);
+	return 0;
+}
+static char *undo_early_res()
+{
+	char b[400];
+	Js j = {b, (int)sizeof(b), 0, false};
+	js_put(j, "{\"started\":true,\"what\":");
+	js_str(j, g_undo_item);
+	js_put(j, ",\"note\":\"The undo runs on: get_state shows how far (screen audit_undo), audit_log the result when it has ended.\"}");
+	return strdup(j.over ? "{\"started\":true}" : b);
+}
+static void audit_mcp(AuditView &v)
+{
+	char why[400] = "", *res = NULL;
+	int rc = audit_mcp_do(v, g_req_seen, why, sizeof(why), &res);
+	if (g_undo_early) { free(res); g_undo_early = 0; return; }   // answered "started" already: the slot is not this request's any more
+	if (rc) ui_req_done(-1, why[0] ? why : "Refused.");
+	else { g_req.res = res; g_req_flip = 1; }
+}
+
+// reset_settings' answer: the settings that were reset, as list_settings gives them (a drive's: its own
+// values, without its destination, which stays).
+static char *settings_res(int card)
+{
+	size_t cap = 64 * 1024;
+	char *b = (char *)malloc(cap);
+	if (!b) return NULL;
+	Js j = {b, (int)cap, 0, false};
+	char id[16] = "all";
+	if (card >= 0) drive_id(card, id, sizeof(id));
+	js_put(j, "{\"reset\":\"%s\",\"note\":", id);
+	js_str(j, card >= 0 ? "The drive's own settings are back to the standard; its destination stays. Logged in the audit log and undoable there." :
+	       "Every setting is back to its default. Kept: the webhook address, headers and events, the Redump copy, the drives' own settings and "
+	       "destinations, and the Remote control switches (MCP stays on). Each change is logged in the audit log and undoable there.");
+	js_put(j, ",\"settings\":[");
+	{
+		CfgLock lock;
+		int first = 1;
+		for (int i = 0; i < NSETTINGS; i++) {
+			const SettingDef &d = SETTINGS[i];
+			if (card < 0 ? d.scope == SC_DRIVE : d.scope == SC_STD || d.kind == SK_DEST) continue;
+			js_put(j, first ? "" : ",");
+			first = 0;
+			setting_json(j, d, card, NULL);
+		}
+	}
+	js_put(j, "]}");
+	if (j.over) { free(b); return req_res("{\"reset\":\"%s\"}", id); }
+	utf8_fix(b);
+	return b;
+}
+
+// webhook_test: the test event of the webhook screen's Test row, posted on a thread of its own (a
+// connect to an address that does not answer can take long); MCP waits at most WH_TEST_MS for it, the
+// UI thread not at all. The answer is the HTTP status or why it failed, never the address or headers.
+#define WH_TEST_MS 4000
+static void event_json(char *js, size_t n, const char *event);
+struct WhTest { char url[512], hdrs[1024], js[1024]; volatile int status, done, refs; };
+static volatile int g_wh_testing;   // a test's thread runs (one at a time)
+static void wh_test_free(WhTest *t) { if (__sync_sub_and_fetch(&t->refs, 1) == 0) free(t); }
+static void wh_test_thread(void *arg)
+{
+	WhTest *t = (WhTest *)arg;
+	t->status = webhook_post(t->url, t->js, t->hdrs);
+	logf("webhook test -> %d (mcp)", t->status);
+	__sync_synchronize();
+	t->done = 1;
+	g_wh_testing = 0;
+	wh_test_free(t);
+	sysThreadExit(0);
+}
+static int mcp_webhook_test(char *out, int n)
+{
+	{
+		UiState u;
+		ui_snapshot(u);
+		if (u.dlg_open) { dlg_open_text(out, n, u.dlg_text, u.dlg_q); utf8_fix(out); return -1; }   // as the other changing tools
+	}
+	WhTest *t = (WhTest *)calloc(1, sizeof(WhTest));
+	if (!t) { snprintf(out, n, "Out of memory."); return -1; }
+	{
+		CfgLock lock;
+		if (!g_webhook[0]) { free(t); snprintf(out, n, "No webhook address is set: set it with set_setting webhook first."); return -1; }
+		snprintf(t->url, sizeof(t->url), "%s", g_webhook);
+		webhook_headers(t->hdrs, sizeof(t->hdrs));
+	}
+	event_json(t->js, sizeof(t->js), "test");
+	if (__sync_lock_test_and_set(&g_wh_testing, 1)) {
+		free(t);
+		snprintf(out, n, "A webhook test is still waiting for its answer: try again in a moment.");
+		return -1;
+	}
+	t->refs = 2;   // this call and the thread: the last one frees it
+	sys_ppu_thread_t tid;
+	if (sysThreadCreate(&tid, wh_test_thread, t, 1500, 0x4000, 0, (char *)"psxwhtest")) {
+		g_wh_testing = 0;
+		free(t);
+		snprintf(out, n, "The test could not be started.");
+		return -1;
+	}
+	uint64_t end = now_ms() + WH_TEST_MS;
+	while (!t->done && now_ms() < end) usleep(10000);
+	__sync_synchronize();
+	int done = t->done, st = t->status;
+	wh_test_free(t);
+	const char *err = !done ? "No answer within 4 s: the receiver may be unreachable. The test goes on in the background; read_log shows its result." :
+	                  st == -1 ? "The address is not an http:// address (https is not supported)." : st == -2 ? "The address's host name could not be resolved." :
+	                  st == -3 ? "No connection could be opened." : st == -4 ? "The receiver could not be reached (the connection was refused or timed out)." :
+	                  st == -5 ? "The receiver did not answer." : st < 0 ? "The test failed." : NULL;
+	if (err) snprintf(out, n, "{\"sent\":false,\"status\":null,\"error\":\"%s\"}", err);
+	else snprintf(out, n, "{\"sent\":true,\"status\":%d,\"ok\":%s}", st, st >= 200 && st < 300 ? "true" : "false");
+	return 0;
+}
+
 static const McpHooks g_mcp_hooks = {mcp_state, remote_jpeg, mcp_drives, mcp_list_settings, mcp_set_setting, mcp_ui, mcp_read_log,
-                                     mcp_list_games, mcp_get_game, mcp_game, mcp_app_info, mcp_audit_log, mcp_preview_name};
+                                     mcp_list_games, mcp_get_game, mcp_game, mcp_app_info, mcp_audit_log, mcp_preview_name,
+                                     mcp_audit_undo, mcp_webhook_test};
 
 static void event_json(char *js, size_t n, const char *event)
 {

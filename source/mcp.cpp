@@ -298,9 +298,11 @@ static void w_base64(W *w, const unsigned char *d, int n)
 enum ArgType { A_DRIVE, A_SCREEN, A_BUTTON, A_KEY, A_VALUE, A_FROM, A_MAX, A_SOURCE, A_FILTER, A_OFFSET, A_LIMIT, A_ID, A_PATTERN, A_CONFIRM,
                A_SOURCE1 /* one source: not all */, A_EXPECT, A_QUERY,
                A_FSET /* show_games' filter: the criteria to set, or "clear" */,
-               A_DOMAIN /* the audit log's domain */, A_DISC /* a disc's key in the audit log */, A_JOBID /* an audit job's number */ };
+               A_DOMAIN /* the audit log's domain */, A_DISC /* a disc's key in the audit log */, A_JOBID /* an audit job's number */,
+               A_ROWID /* an audit row's id */, A_BOOL };
 struct Arg { const char *name; ArgType type; bool required; const char *desc; };
-enum ToolKind { T_STATE, T_SHOT, T_DRIVES, T_LIST, T_SET, T_SCREEN, T_UI, T_LOG, T_GAMES, T_GAME, T_GACT, T_INFO, T_AUDIT, T_PREVIEW };
+enum ToolKind { T_STATE, T_SHOT, T_DRIVES, T_LIST, T_SET, T_SCREEN, T_UI, T_LOG, T_GAMES, T_GAME, T_GACT, T_INFO, T_AUDIT, T_PREVIEW,
+                T_UNDO, T_RESET, T_RDDL, T_WHTEST };
 #define NARGS 5   // a tool's arguments at most
 struct Tool { const char *name; ToolKind kind; bool reads; const char *desc; Arg args[NARGS]; };
 
@@ -333,15 +335,24 @@ static const Tool k_tools[] = {
 	{"get_screenshot", T_SHOT, true, "A JPEG picture of the app's screen (system dialogs drawn by the console are not in it).", {}},
 	{"get_drives", T_DRIVES, true, "Every drive with its disc and job, as status.json shows them.", {}},
 	{"list_settings", T_LIST, true, "Every setting with its key, labels (en, sv), value, allowed values and scope; secret values are left out.", {}},
-	{"set_setting", T_SET, false, "Changes a setting as its screen would (same checks and side effects) and returns the new value.", {
+	{"set_setting", T_SET, false, "Changes a setting as its screen would (same checks and side effects) and returns the new value. "
+		"A smaller audit_mb deletes the oldest kept sector copies at once: their changes can then never be undone.", {
 		{"key", A_KEY, true, "The setting's key, as list_settings gives it"},
 		{"value", A_VALUE, true, "The new value, one of the setting's allowed values (any text for free-text settings); numbers and true/false are taken as their text (true = 1)"},
 		{"drive", A_DRIVE, false, "The drive for a per-drive setting; leave out for the standard settings"}}},
-	{"go_screen", T_SCREEN, false, "Opens one of the app's screens, the way the pad goes there, and returns the screen state. To change a setting use set_setting; to rip, check and so on use the action tools; for the game list, list_games, get_game and the game tools (show_games to show it with a source and filter, check_game, rename_game, trash_game, ...).", {
+	{"go_screen", T_SCREEN, false, "Opens one of the app's screens, the way the pad goes there, and returns the screen state. To change a setting use set_setting "
+		"(reset_settings for the defaults); to rip, check and so on use the action tools; for the game list, list_games, get_game and the game tools (show_games "
+		"to show it with a source and filter, show_game for a game's details, check_game, rename_game, trash_game, ...); for the audit log, audit_log, "
+		"audit_undo and audit_redo; for About and the Redump copy, get_app_info and redump_download; for the webhooks' test, webhook_test; for the file "
+		"name preview, preview_name.", {
 		{"screen", A_SCREEN, true, "The screen to open"},
 		{"drive", A_DRIVE, false, "The drive, only with drive_settings (and required there)"}}},
 	{"go_tab", T_UI, false, "Shows a drive's tab on the home screen (going there first) and returns the screen state.", {DRIVE_ARG}},
-	{"press_button", T_UI, false, "Fallback: presses one pad button in the app, as the pad would, and returns the screen state. Use it only to answer a dialog (cross = yes/OK, circle = no) or to move around a screen; rip, check, repair, cancel, skip_rereads, eject, set_setting and the game list's tools (check_game, check_games, cancel_check, rename_game, trash_game, restore_game, empty_trash, show_games) do their work directly. It never presses into the console's own on-screen keyboard, and circle on the home screen is refused (it would exit the app, and MCP with it).", {
+	{"press_button", T_UI, false, "Fallback: presses one pad button in the app, as the pad would, and returns the screen state. Use it only to answer "
+		"a dialog (cross = yes/OK, circle = no) or to move around a screen; rip, check, repair, cancel, skip_rereads, eject, set_setting, reset_settings, "
+		"audit_log, audit_undo, audit_redo, redump_download, webhook_test, preview_name, get_app_info and the game list's tools (check_game, check_games, "
+		"cancel_check, rename_game, trash_game, restore_game, empty_trash, show_games, show_game) do their work directly. It never presses into "
+		"the console's own on-screen keyboard, and circle on the home screen is refused (it would exit the app, and MCP with it).", {
 		{"button", A_BUTTON, true, "The button"}}},
 	{"rip", T_UI, false, "Starts ripping the disc in the drive (same checks as the pad, on its tab); returns the screen state or why not. Like the pad's cross, it replaces an existing rip at the drive's destination without asking. Use this instead of press_button.", {DRIVE_ARG}},
 	{"repair", T_UI, false, "Re-reads the sectors the drive's rip lists as bad (same checks as the pad, on its tab); returns the screen state or why not. Use this instead of press_button.", {DRIVE_ARG}},
@@ -413,6 +424,42 @@ static const Tool k_tools[] = {
 		{"pattern", A_PATTERN, true, PATTERN_DESC},
 		{"drive", A_DRIVE, false, "Only this drive's disc (leave out for every drive)"},
 		{"id", A_ID, false, "A game's id, as list_games gives it: its discs' new names (not with drive)"}}},
+	{"audit_undo", T_UNDO, false, "Undoes a change from the audit log, as triangle and yes on its screen do: a row (row: its id, e.g. a setting), a job "
+		"(job: its number, e.g. a repair's sectors or a rename's files) or every kept change of a rip's disc (disc: its key in the domain rips; "
+		"only with confirm: true, as it rewrites the image's sectors and checks the rip again). The call is the confirmation for a row or a job. "
+		"Refused with the audit screen's reason when it cannot be undone now, and when it is undone already: audit_redo applies it again. "
+		"A long undo answers started: get_state shows its progress (screen audit_undo) and audit_log the result. Logged in the audit log with the "
+		"source MCP. Use this instead of press_button.", {
+		{"row", A_ROWID, false, "An audit row's id, as audit_log gives it"},
+		{"job", A_JOBID, false, "A job's number, as audit_log gives it"},
+		{"disc", A_DISC, false, "A disc's key in the domain rips, as audit_log gives it: all its kept changes"},
+		{"confirm", A_CONFIRM, false, "Must be true with disc"}}},
+	{"audit_redo", T_UNDO, false, "Applies an undone change from the audit log again, as triangle (Redo) and yes on its screen do: the same items as "
+		"audit_undo (row, job, or disc with confirm: true). Refused when the item is not undone (audit_undo undoes it) and with the audit screen's "
+		"reason when it cannot be redone now. Use this instead of press_button.", {
+		{"row", A_ROWID, false, "An audit row's id, as audit_log gives it"},
+		{"job", A_JOBID, false, "A job's number, as audit_log gives it"},
+		{"disc", A_DISC, false, "A disc's key in the domain rips, as audit_log gives it"},
+		{"confirm", A_CONFIRM, false, "Must be true with disc"}}},
+	{"reset_settings", T_RESET, false, "Sets settings back to their defaults, as triangle does. With drive: that drive's own settings go back to the "
+		"standard, as triangle in its settings (its destination stays); refused while a job runs on the drive. Without drive: every setting, as "
+		"triangle and yes in the settings, only with confirm: true; the webhook address, headers and events, the Redump copy and the drives' own "
+		"settings and destinations are kept, and over MCP so are the Remote control switches (remote view, MCP, status.json): MCP stays on. Returns "
+		"the settings as list_settings gives them. Logged in the audit log and undoable there. Use this instead of press_button.", {
+		{"drive", A_DRIVE, false, "The drive whose own settings go back to the standard; leave out for every setting"},
+		{"confirm", A_CONFIRM, false, "Must be true without drive"}}},
+	{"redump_download", T_RDDL, false, "Downloads Redump's list of PS1 discs to the console and indexes it (the local copy that Redump: local copy "
+		"checks against), as cross on Redump local copy in the settings does. Answers at once with started; follow it with get_state "
+		"(redump_download: phase, percent), and get_app_info gives the result (redump_copy.last_download): no dialog waits on the screen. A failed "
+		"download keeps the copy there was. cancel: true stops a download that runs, as circle does. Use this instead of press_button.", {
+		{"cancel", A_BOOL, false, "true: stop the download that runs"}}},
+	{"webhook_test", T_WHTEST, false, "Sends a test event to the webhook address (with its headers when they are on), as Test in the webhook settings "
+		"does, and answers with the HTTP status, or why it failed. It waits at most 4 seconds and does not touch the screen. Refused when no address "
+		"is set. The address and the headers are never shown.", {}},
+	{"show_game", T_GACT, false, "Shows a game's detail view on the screen, as cross in the game list does: the list goes to the game's source as the "
+		"game tools do (the source chosen with SELECT or show_games stays). Refused when the list's filter hides the game (show_games filter clear "
+		"shows every game), while the game list checks, and while a dialog is open. To read the details, use get_game. Use this instead of "
+		"press_button.", {ID_ARG}},
 };
 static const int k_ntools = sizeof(k_tools) / sizeof(k_tools[0]);
 
@@ -467,7 +514,8 @@ static void w_tools_list(W *w)
 			case A_CONFIRM: w_str(w, "\"type\":\"boolean\""); break;
 			case A_DOMAIN: w_str(w, "\"type\":\"string\","); w_enum(w, k_domains); break;
 			case A_DISC: w_fmt(w, "\"type\":\"string\",\"minLength\":1,\"maxLength\":%d", MCP_MAX_DISC); break;
-			case A_JOBID: w_str(w, "\"type\":\"integer\",\"minimum\":1"); break;
+			case A_JOBID: case A_ROWID: w_str(w, "\"type\":\"integer\",\"minimum\":1"); break;
+			case A_BOOL: w_str(w, "\"type\":\"boolean\""); break;
 			}
 			w_str(w, ",\"description\":");
 			w_esc(w, g.desc);
@@ -627,7 +675,7 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			continue;
 		}
 		a->given[i] = true;
-		if (g.type == A_FROM || g.type == A_MAX || g.type == A_OFFSET || g.type == A_LIMIT || g.type == A_JOBID) {
+		if (g.type == A_FROM || g.type == A_MAX || g.type == A_OFFSET || g.type == A_LIMIT || g.type == A_JOBID || g.type == A_ROWID) {
 			// a plain non-negative integer: no sign, fraction or exponent
 			const char *end = j_skip(v, e);
 			int n = 0, top = g.type == A_MAX ? MCP_MAX_LOG_LINES : MCP_MAX_GAMES;
@@ -636,10 +684,10 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 				if (*p < '0' || *p > '9') ok = false;
 				else n = n * 10 + (*p - '0');
 			}
-			if (g.type == A_JOBID) {   // an id: 1 or more
+			if (g.type == A_JOBID || g.type == A_ROWID) {   // an id: 1 or more
 				if (!ok || n < 1) return set_err(er, -32602, g.name, "must be an integer of 1 or more");
 				a->num[i] = n;
-				a->aq.job = (uint32_t)n;
+				if (g.type == A_JOBID) a->aq.job = (uint32_t)n; else a->aq.row = (uint32_t)n;
 				continue;
 			}
 			if (ranged && ok && (n < 1 || n > top)) ok = false;
@@ -667,9 +715,10 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			if (check_expect(v, e, &a->q, er)) return -1;
 			continue;
 		}
-		if (g.type == A_CONFIRM) {
+		if (g.type == A_CONFIRM || g.type == A_BOOL) {
 			if (*v != 't' && *v != 'f') return set_err(er, -32602, g.name, "must be true or false");
 			a->num[i] = *v == 't';
+			if (g.type == A_CONFIRM) a->aq.confirm = a->num[i];
 			continue;
 		}
 		if (g.type == A_VALUE && *v != '"') {
@@ -738,6 +787,8 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 		if (q.disc[0] && !strcmp(q.domain, "settings")) return set_err(er, -32602, "disc", "only with the domain rips or files");
 	}
 	if (t.kind == T_PREVIEW && a->given[1] && a->given[2]) return set_err(er, -32602, "id", "give drive or id, not both");
+	if (t.kind == T_UNDO && (a->given[0] + a->given[1] + a->given[2]) != 1)
+		return set_err(er, -32602, "row", "give exactly one of row, job and disc (as audit_log gives them)");
 	return 0;
 }
 
@@ -819,6 +870,30 @@ static int tools_call(const char *params, const char *e, W *w, Err *er)
 	case T_PREVIEW:
 		if ((have = g_hooks.preview_name)) r = g_hooks.preview_name(a->str[0], a->given[1] ? a->str[1] : NULL, a->given[2] ? a->str[2] : NULL, buf, n);
 		break;
+	case T_UNDO: {
+		if (!(have = g_hooks.audit_undo)) break;
+		int redo = !strcmp(t->name, "audit_redo");
+		if (a->aq.disc[0] && !a->aq.confirm) {   // a whole disc rewrites an image: never on a call that did not say so
+			snprintf(buf, n, "Not %s: %s a whole disc rewrites the sectors of its rip and checks it again. Call %s again with confirm: true to do it.",
+			         redo ? "redone" : "undone", redo ? "redoing" : "undoing", t->name);
+			r = -1;
+			break;
+		}
+		r = g_hooks.audit_undo(redo, &a->aq, buf, n);
+		break;
+	}
+	case T_RESET:
+		if (!(have = g_hooks.ui)) break;
+		if (!a->given[0] && !(a->given[1] && a->num[1])) {   // every setting: as the pad's question, only when the agent says so
+			snprintf(buf, n, "Not reset: without drive every setting goes back to its default (the webhook address and headers, the Redump copy, "
+			         "the drives' own settings and destinations and the Remote control switches stay). Call reset_settings again with confirm: true to reset them.");
+			r = -1;
+			break;
+		}
+		r = g_hooks.ui(t->name, a->given[0] ? a->str[0] : "", buf, n);
+		break;
+	case T_RDDL: if ((have = g_hooks.ui)) r = g_hooks.ui(t->name, a->given[0] && a->num[0] ? "cancel" : "", buf, n); break;
+	case T_WHTEST: if ((have = g_hooks.webhook_test)) r = g_hooks.webhook_test(buf, n); break;
 	case T_GACT: {
 		if (!(have = g_hooks.game)) break;
 		const char *id = NULL, *pat = NULL;
@@ -910,11 +985,11 @@ int mcp_handle(const char *body, int len, char *out, int n)
 	if (!strcmp(method, "initialize")) {
 		w_str(&w, "{\"protocolVersion\":\"" MCP_PROTOCOL_VERSION "\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"psx-ripper\",\"version\":");
 		w_esc(&w, g_version);
-		w_str(&w, "},\"instructions\":\"PSX RiPPER on a PS3. get_* tools, list_settings and read_log only read; "
-		          "the actions (rip, check, repair, cancel, skip_rereads, eject) and set_setting do the work directly; list_games and get_game read the game list, "
-		          "and check_game, check_games, cancel_check, rename_game, trash_game, restore_game and empty_trash change it as its screen would; show_games shows it "
-		          "on the screen with a source and filter; go_* and press_button "
-		          "move around the screens and answer dialogs. Each tool that changes the screen returns the screen state.\"}");
+		w_str(&w, "},\"instructions\":\"PSX RiPPER on a PS3. get_* tools, list_settings, read_log, audit_log and preview_name only read; "
+		          "the actions (rip, check, repair, cancel, skip_rereads, eject), set_setting, reset_settings, redump_download and webhook_test do the work directly; "
+		          "list_games and get_game read the game list, and check_game, check_games, cancel_check, rename_game, trash_game, restore_game and empty_trash change "
+		          "it as its screen would; show_games and show_game show it on the screen; audit_undo and audit_redo undo and redo changes from the audit log; "
+		          "go_* and press_button move around the screens and answer dialogs. Each tool that changes the screen returns the screen state.\"}");
 	} else if (!strcmp(method, "ping")) {
 		w_str(&w, "{}");
 	} else if (!strcmp(method, "tools/list")) {

@@ -88,11 +88,15 @@ void sysThreadExit(u64) { pthread_exit(NULL); }   // only the server's threads c
 #include <pthread.h>
 int host_webman_calls = 0;   // webMAN requests the app started (a popup, ...): counted, not sent
 int host_thread_gc = 0;
+int host_thread_rd = 0;      // the Redump download's thread runs (rd_download below)
+static pthread_t g_rd_thread;
 int sysThreadCreate(sys_ppu_thread_t *id, void (*entry)(void *), void *arg, int, u64, u64, char *name)
 {
 	*id = 0;
 	if (name && !strcmp(name, "psxwebman")) __sync_fetch_and_add(&host_webman_calls, 1);
-	if (host_thread_gc && name && !strcmp(name, "psxgcheck")) {
+	if (host_thread_rd && name && !strcmp(name, "psxredump"))   // joined by the screen (sysThreadJoin)
+		return pthread_create(&g_rd_thread, NULL, (void *(*)(void *))entry, arg) ? -1 : (*id = 1, 0);
+	if ((host_thread_gc && name && !strcmp(name, "psxgcheck")) || (name && !strcmp(name, "psxwhtest"))) {
 		pthread_t t;
 		if (pthread_create(&t, NULL, (void *(*)(void *))entry, arg)) return -1;
 		pthread_detach(t);
@@ -102,7 +106,11 @@ int sysThreadCreate(sys_ppu_thread_t *id, void (*entry)(void *), void *arg, int,
 }
 void sysThreadExit(u64) {}
 #endif
+#ifdef HOST_REMOTE
 int sysThreadJoin(sys_ppu_thread_t, u64 *) { return 0; }
+#else
+int sysThreadJoin(sys_ppu_thread_t id, u64 *) { if (id == 1) pthread_join(g_rd_thread, NULL); return 0; }
+#endif
 // Real mutexes, recursive when the attributes say so (as lv2's): a test can run a screen and MCP's
 // hooks on two threads. A handle is an index; 0 was never created (a lock on it fails, as on the console).
 #include <pthread.h>
@@ -269,7 +277,7 @@ int vf_drive_present(int port)
 int vf_label(int port, char *out, size_t n) { if (port < 0 || port > 7) return -1; snprintf(out, n, "%s", host_label[port]); return 0; }
 
 // Redump, the remote view and webhooks: no network on the host
-int rd_local_info(char *ver, size_t n, time_t *when) { snprintf(ver, n, "2026-06-15"); *when = 0; return 1; }
+int rd_local_info(char *ver, size_t n, time_t *when) { snprintf(ver, n, "2026-06-15"); if (when) *when = 0; return 1; }   // (when may be NULL, as on the console)
 int rd_local_by_size(uint64_t, int, char (*)[RD_NAME], int) { return -1; }
 int host_rd_local;
 unsigned char host_rd_md5[16];
@@ -282,7 +290,16 @@ int rd_local_verify(const uint8_t (*md5)[16], int n, char *name, size_t nn)
 	return 1;
 }
 int rd_online(const char *, RdDisc *, int) { return -1; }
-int rd_download(volatile uint32_t *, volatile uint32_t *, volatile int *, volatile int *) { return -1; }
+// The download: while host_rd_dl_hold it reports progress and waits (an abort ends it, -7), then
+// answers host_rd_dl_result (the discs, or a failure < 0)
+volatile int host_rd_dl_hold, host_rd_dl_result = -1, host_rd_dl_calls;
+int rd_download(volatile uint32_t *done, volatile uint32_t *total, volatile int *phase, volatile int *abort)
+{
+	__sync_fetch_and_add(&host_rd_dl_calls, 1);
+	*phase = 0; *total = 4096 * 1024; *done = 1024 * 1024;
+	while (host_rd_dl_hold && !*abort) usleep(1000);
+	return *abort ? -7 : host_rd_dl_result;
+}
 #ifdef HOST_REMOTE
 int netCtlInit() { return 0; }
 int netCtlGetInfo(int, union net_ctl_info *info)   // this computer's first LAN address
@@ -308,5 +325,16 @@ int remote_jpeg(unsigned char **jpg, int *len) { *jpg = NULL; *len = 0; return -
 void json_str(char *out, size_t n, const char *s) { size_t o = strlen(out); snprintf(out + o, n - o, "\"%s\"", s); }
 int webhook_event_index(const char *) { return -1; }
 void webhook_host(const char *url, char *out, size_t n) { snprintf(out, n, "%s", url); }
-int webhook_post(const char *, const char *, const char *) { return -1; }
+// a test's POST: host_webhook_status after host_webhook_ms; the last address and headers it got (the
+// tests check that the app sent them, never that an answer shows them)
+volatile int host_webhook_status = -1, host_webhook_ms, host_webhook_posts;
+char host_webhook_url[512], host_webhook_hdrs[1024];
+int webhook_post(const char *url, const char *, const char *hdrs)
+{
+	snprintf(host_webhook_url, sizeof host_webhook_url, "%s", url);
+	snprintf(host_webhook_hdrs, sizeof host_webhook_hdrs, "%s", hdrs ? hdrs : "");
+	if (host_webhook_ms) usleep(host_webhook_ms * 1000);
+	__sync_fetch_and_add(&host_webhook_posts, 1);
+	return host_webhook_status;
+}
 void webhook_send_async(const char *, const char *, const char *) {}

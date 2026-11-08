@@ -3884,6 +3884,7 @@ static void mcp_games_scenarios()
 // ---------------------------------------------------------------- MCP: the app's other tools (ruling M11)
 // get_app_info, audit_log, preview_name and get_drives' events and free space: reading tools, on this
 // thread (as the web server's); nothing on the screen changes.
+static uint32_t job_row_id(uint32_t job) { AuditRow r; return audit_job_row(job, &r) ? r.id : 0; }
 static void mcp_app_scenarios()
 {
 	int bad = 0;
@@ -4084,6 +4085,326 @@ static void mcp_app_scenarios()
 	reset_all();
 	#undef O
 	if (bad) g_fail += bad; else printf("ok   MCP: get_app_info, audit_log, preview_name, get_drives' events and free space\n");
+}
+
+// ---------------------------------------------------------------- MCP: the app's other changing tools
+// reset_settings (D1), redump_download (D2), webhook_test, show_game, audit_undo and audit_redo (D3):
+// requests the UI thread (home_screen here, on a thread of its own) takes as the pad would.
+static void mcp_app_ui_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp app ui: %s%s%.700s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log out/au_img.bin");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
+	audit_set_retired(cfg_retired);
+	reset_all(); usb(0, 0); usb(1, 2);
+	for (int c = 0; c < 3; c++) g_cards[c].tried = 1;
+	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
+	g_webhook[0] = 0; g_webhook_hdr[0][0] = 0; g_webhook_hdr_on = 0; g_webhook_on = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5;
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	g_remote = g_mcp = g_status_json = 1; g_audit_mb = 256;
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();
+	const McpHooks &h = g_mcp_hooks;
+	mcp_init(&g_mcp_hooks, APP_VERSION);
+	static char outb[MCP_MAX_RESPONSE];
+	std::string out;
+	std::vector<std::string> said;
+	auto call = [&](const char *tool, const char *arg) { int rc = h.ui(tool, arg, outb, sizeof outb); out = outb; said.push_back(out); return rc; };
+	auto set = [&](const char *k, const char *v, const char *d = NULL) { int rc = h.set_setting(k, v, d, outb, sizeof outb); out = outb; return rc; };
+	auto has = [&](const char *t) { return out.find(t) != std::string::npos; };
+	auto state = [&]() { int rc = h.state(outb, sizeof outb); out = outb; return rc; };
+	auto info = [&]() { int rc = h.app_info(outb, sizeof outb); out = outb; return rc; };
+	auto undo = [&](int redo, uint32_t row, uint32_t job, const char *disc = "", int confirm = 0) {
+		McpAuditQuery q;
+		memset(&q, 0, sizeof q);
+		q.row = row; q.job = job; q.confirm = confirm;
+		snprintf(q.disc, sizeof q.disc, "%s", disc);
+		int rc = h.audit_undo(redo, &q, outb, sizeof outb);
+		out = outb;
+		said.push_back(out);
+		return rc;
+	};
+	auto newest_row = [&](AuditDom dom, const char *kind, const char *what) {
+		static AuditRow r[64];
+		int n = audit_events(dom, NULL, r, 64);
+		for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, kind) && !strcmp(r[i].what, what)) return r[i].id;
+		return (uint32_t)0;
+	};
+	auto wait_for = [&](std::function<bool()> ok) { uint64_t t0 = now_ms(); while (!ok() && now_ms() - t0 < 3000) usleep(1000); return ok(); };
+	const char *o = NULL;
+	#define O (o = out.c_str())
+	bg_start();
+
+	// reset_settings, all of them: the defaults, as the settings' triangle and yes; over MCP the Remote
+	// control switches stay on (D1), so the agent keeps its connection
+	{
+		set("speed", "3"); set("redump", "1"); set("audit_mb", "64"); set("name_pattern", "%N"); set("webhook_on", "1");
+		set("webhook", "http://192.0.2.10/hook");
+		int sp = setting_rows("speed", AU_MCP);
+		host_remote_flags = -1;
+		int rc = call("reset_settings", "");
+		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"reset\":\"all\",\"note\":\"Every setting is back to its default.") &&
+		     has("{\"key\":\"speed\",\"scope\":\"standard\"") && has("{\"key\":\"mcp\",\"scope\":\"standard\"") && !has("\"scope\":\"usb0\"") &&
+		     has("\"state\":{\"screen\":\"settings\""), "reset_settings: the standard settings as list_settings gives them, on the settings screen", O);
+		need(g_std.speed == 0 && g_redump == RD_OFF && g_audit_mb == 256 && !strcmp(g_name_pat, FN_PRESETS[0]) && g_webhook_on == 0 && g_webhook[0],
+		     "reset_settings: the defaults; the webhook address is kept");
+		need(g_remote == 1 && g_mcp == 1 && g_status_json == 1 && host_remote_flags == -1, "reset_settings over MCP: the Remote control switches stay on (D1)");
+		need(setting_rows("speed", AU_MCP) == sp + 1 && setting_rows("mcp", AU_MCP) == 0 && setting_rows("redump", AU_MCP) == 2,
+		     "reset_settings: logged with source mcp, nothing for the switches");
+		need(read_file("out/psxrip.cfg").find("\nmcp=1\n") != std::string::npos, "reset_settings: saved with MCP on");
+		// the same over press_button (triangle and yes) keeps them too; the pad's own reset turns them off
+		set("speed", "3");
+		rc = call("press_button", "triangle");
+		need(rc == 0 && has("\"screen\":\"dialog\"") && has("Reset all settings"), "the settings' triangle asks first", O);
+		rc = call("press_button", "cross");
+		need(rc == 0 && g_std.speed == 0 && g_mcp == 1 && g_remote == 1 && g_status_json == 1, "press_button's reset: the switches stay on", O);
+		pad(B_TRIANGLE);
+		pad(B_CROSS);
+		need(g_mcp == 0 && g_remote == 0 && g_status_json == 0, "the pad's reset turns the switches off");
+		set("remote", "1"); set("mcp", "1"); set("status_json", "1");
+	}
+	// reset_settings with a drive: its own settings back to the standard, as triangle in its settings
+	{
+		set("speed", "1", "usb2"); set("eject", "0", "usb2");
+		bg_frames(3);   // (the UI thread's cards take them)
+		int dr = setting_rows("drive_usb2", AU_MCP);
+		int rc = call("reset_settings", "usb2");
+		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"reset\":\"usb2\"") && has("{\"key\":\"speed\",\"scope\":\"usb2\"") &&
+		     !has("\"key\":\"destination\"") && !has("\"scope\":\"standard\"") && has("\"state\":{\"screen\":\"drive_settings\"") && has("\"drive\":\"usb2\""),
+		     "reset_settings usb2: its settings, on its settings screen", O);
+		need(g_cards[2].speed == -1 && g_cards[2].eject == -1 && g_usbcfg[2].speed == -1 && g_usbcfg[2].eject == -1, "usb2 is all standard");
+		need(setting_rows("drive_usb2", AU_MCP) == dr + 1, "one audit row with source mcp");
+		g_cards[1].job = 1;
+		rc = call("reset_settings", "usb0");
+		need(rc != 0 && has(T_en(STR_CAN_SETTINGS_BUSY)), "reset_settings: refused while a job runs on the drive (as its settings)", O);
+		g_cards[1].job = 0;
+		rc = call("reset_settings", "usb5");
+		need(rc != 0 && has("No drive \"usb5\""), "reset_settings: a drive that is not there", O);
+		call("go_tab", "internal");
+	}
+	// a dialog open: the changing tools are refused with its text, as the others are
+	{
+		g_bg_tell = "A test message from tell.";
+		bg_frames(4);
+		int rc = call("reset_settings", "usb2");
+		need(rc != 0 && has("A dialog is open"), "reset_settings: refused while a dialog is open", O);
+		rc = call("redump_download", "");
+		need(rc != 0 && has("A dialog is open"), "redump_download: refused while a dialog is open", O);
+		rc = undo(0, 1, 0);
+		need(rc != 0 && has("A dialog is open"), "audit_undo: refused while a dialog is open", O);
+		snprintf(g_webhook, sizeof g_webhook, "http://192.0.2.10/hook");
+		rc = h.webhook_test(outb, sizeof outb); out = outb;
+		need(rc != 0 && has("A dialog is open"), "webhook_test: refused while a dialog is open", O);
+		call("press_button", "cross");
+	}
+	// redump_download: answered at once (started), the progress in get_state; cancel stops it; no
+	// dialog at the end over MCP (D2): get_app_info has the result
+	{
+		host_thread_rd = 1; host_rd_dl_hold = 1; host_rd_dl_result = 21000;
+		uint64_t t0 = now_ms();
+		int rc = call("redump_download", "");
+		need(rc == 0 && now_ms() - t0 < 2000 && has("\"result\":{\"started\":true") && has("\"state\":{\"screen\":\"redump_download\"") &&
+		     has("\"redump_download\":{\"phase\":\"download\",\"percent\":25,\"kb\":1024,\"kb_total\":4096,\"cancelling\":false}"), "redump_download: started, with its progress", O);
+		info();
+		need(has("\"downloading\":true"), "get_app_info: downloading", O);
+		rc = call("redump_download", "");
+		need(rc != 0 && has("runs already"), "redump_download: one at a time", O);
+		rc = call("go_screen", "home");
+		need(rc != 0 && has("downloading"), "other requests wait for it (refused at once)", O);
+		rc = call("redump_download", "cancel");
+		need(rc == 0 && has("\"result\":{\"cancelled\":true}"), "redump_download cancel: stops it", O);
+		need(wait_for([] { return !g_dl_running; }), "the download ends");
+		bg_frames(4);
+		state();
+		need(has("\"screen\":\"settings\"") && has("\"dialog\":null") && !has("\"redump_download\":{"), "after it: the settings, no dialog", O);
+		info();
+		need(has("\"last_download\":{\"result\":\"cancelled\"") && has("\"source\":\"mcp\""), "get_app_info: cancelled by mcp", O);
+		rc = call("redump_download", "cancel");
+		need(rc != 0 && has("No Redump download runs"), "redump_download cancel: nothing runs", O);
+		host_rd_dl_hold = 0;
+		rc = call("redump_download", "");
+		need(rc == 0 && has("\"started\":true"), "redump_download: a second one", O);
+		need(wait_for([] { return !g_dl_running; }), "it ends");
+		bg_frames(4);
+		state();
+		need(has("\"screen\":\"settings\"") && has("\"dialog\":null"), "D2: no dialog after a download MCP started", O);
+		info();
+		need(has("\"last_download\":{\"result\":\"done\",\"discs\":21000,\"error\":null,\"version\":\"2026-06-15\"") && has("\"source\":\"mcp\""), "get_app_info: done", O);
+		host_rd_dl_result = -3;
+		call("redump_download", "");
+		need(wait_for([] { return !g_dl_running; }), "a failing one ends");
+		bg_frames(4);
+		state();
+		need(has("\"dialog\":null"), "D2: no dialog after a failed download either", O);
+		info();
+		need(has("\"last_download\":{\"result\":\"failed\",\"discs\":null,\"error\":-3"), "get_app_info: failed (-3)", O);
+		// the pad's download still tells its result in a dialog
+		host_rd_dl_result = 5;
+		call("go_screen", "home");
+		call("go_screen", "settings");   // (opened again: its first row)
+		call("press_button", "r2"); call("press_button", "up");
+		state();
+		need(has("\"row\":8"), "the Redump copy's row", O);
+		pad(B_CROSS);
+		need(wait_for([] { return !g_dl_running; }), "the pad's download ends");
+		bg_frames(6);
+		state();
+		need(has("\"screen\":\"dialog\"") && has("downloaded"), "the pad's download: its dialog", O);
+		info();
+		need(has("\"source\":\"remote\""), "get_app_info: the pad's download (remote view's pad)", O);
+		call("press_button", "cross");
+		host_thread_rd = 0;
+		call("go_screen", "home");
+	}
+	// webhook_test: the HTTP status, never the address or headers; off the UI thread, at most 4 s
+	{
+		const char *SECRET_URL = "http://10.0.0.9:8123/api/webhook/SECRETWEBHOOKID", *SECRET_HDR = "Authorization: Bearer TOPSECRETTOKEN";
+		g_webhook[0] = 0;
+		int rc = h.webhook_test(outb, sizeof outb); out = outb;
+		need(rc != 0 && has("No webhook address is set"), "webhook_test: no address", O);
+		snprintf(g_webhook, sizeof g_webhook, "%s", SECRET_URL);
+		snprintf(g_webhook_hdr[0], sizeof g_webhook_hdr[0], "%s", SECRET_HDR);
+		g_webhook_hdr_on = 1;
+		host_webhook_status = 204; host_webhook_ms = 0;
+		int posts = host_webhook_posts;
+		rc = h.webhook_test(outb, sizeof outb); out = outb; said.push_back(out);
+		need(rc == 0 && json_ok(out.c_str()) && has("{\"sent\":true,\"status\":204,\"ok\":true}"), "webhook_test: the status", O);
+		need(host_webhook_posts == posts + 1 && !strcmp(host_webhook_url, SECRET_URL) && strstr(host_webhook_hdrs, SECRET_HDR), "webhook_test: sent to the address with its headers");
+		host_webhook_status = -2;
+		rc = h.webhook_test(outb, sizeof outb); out = outb; said.push_back(out);
+		need(rc == 0 && has("\"sent\":false") && has("host name could not be resolved"), "webhook_test: the host does not resolve", O);
+		host_webhook_status = 200; host_webhook_ms = 5000;
+		int f0 = g_bg_frames;
+		uint64_t t0 = now_ms();
+		rc = h.webhook_test(outb, sizeof outb); out = outb; said.push_back(out);
+		uint64_t took = now_ms() - t0;
+		need(rc == 0 && has("No answer within 4 s") && took >= 3900 && took < 4800, "webhook_test: at most 4 s", O);
+		need(g_bg_frames - f0 > 50, "webhook_test: the UI thread goes on meanwhile");
+		rc = h.webhook_test(outb, sizeof outb); out = outb;
+		need(rc != 0 && has("still waiting"), "webhook_test: one at a time", O);
+		need(wait_for([&] { return !g_wh_testing; }), "the slow test ends in the background");
+		host_webhook_ms = 0;
+		rc = h.webhook_test(outb, sizeof outb); out = outb;
+		need(rc == 0 && has("\"status\":200"), "webhook_test: again", O);
+		need(read_file("out/psxrip.log").find("webhook test -> 204 (mcp)") != std::string::npos, "webhook_test: logged, without the address");
+		g_webhook[0] = 0; g_webhook_hdr[0][0] = 0; g_webhook_hdr_on = 0;
+	}
+	// show_game: the detail view on the screen (the list goes to the game's source; the filter must
+	// show it)
+	{
+		char keep_root[256];
+		snprintf(keep_root, sizeof keep_root, "%s", host_root);
+		gs_library();
+		g_gl_stale = 1;
+		snprintf(g_games_source, sizeof g_games_source, "hdd");
+		g_games_filter = GameFilter{0, 0, 0, 0};
+		const char *ALUNDRA = "hdd:/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35]";
+		const char *CROC_USB = "usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]";
+		McpGameQuery q = gq();
+		int rc = h.game("show_game", ALUNDRA, NULL, &q, outb, sizeof outb); out = outb;
+		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"shown\":\"Alundra (Europe)\",\"discs\":1") && has("\"state\":{\"screen\":\"game_detail\""),
+		     "show_game: the detail view", O);
+		rc = h.game("show_game", CROC_USB, NULL, &q, outb, sizeof outb); out = outb;
+		need(rc == 0 && has("\"shown\":\"Croc 2 (Europe)\"") && has("\"screen\":\"game_detail\"") && !strcmp(g_games_source, "hdd"),
+		     "show_game: another source's game; the list's own source stays", O);
+		q.redump = 1; q.fgiven = 2;
+		h.game("show_games", NULL, NULL, &q, outb, sizeof outb);
+		q = gq();
+		rc = h.game("show_game", "hdd:/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15]", NULL, &q, outb, sizeof outb); out = outb;
+		need(rc != 0 && has("filter hides this game"), "show_game: refused when the filter hides it", O);
+		rc = h.game("show_game", "hdd:/dev_hdd0/PSXISO/Nope", NULL, &q, outb, sizeof outb); out = outb;
+		need(rc != 0 && has("No game with the id"), "show_game: an unknown game", O);
+		q.fclear = 1;
+		h.game("show_games", NULL, NULL, &q, outb, sizeof outb);
+		call("go_screen", "home");
+		snprintf(host_root, sizeof host_root, "%s", keep_root);
+		mg_free();
+	}
+	// audit_undo and audit_redo: the call is the confirmation for a row or a job (D3); never the
+	// pad's toggle: undo on an undone item is refused, and redo on one that is not
+	{
+		set("speed", "2");
+		uint32_t row = newest_row(AU_SETTINGS, "setting", "speed");
+		char rw[48];
+		snprintf(rw, sizeof rw, "\"result\":{\"undone\":\"row %u\"", (unsigned)row);
+		int rc = undo(0, row, 0);
+		need(rc == 0 && json_ok(out.c_str()) && has(rw) && has("\"label\":\"Read speed: Max \xe2\x86\x92 4\xc3\x97\"") && has("\"state\":{\"screen\":\"audit_log\""),
+		     "audit_undo row: undone, on the audit screen", O);
+		need(g_std.speed == 0, "audit_undo row: the setting is back");
+		rc = undo(0, row, 0);
+		need(rc != 0 && has("is undone already. audit_redo applies it again.") && g_std.speed == 0, "audit_undo on an undone row: refused, not toggled", O);
+		rc = undo(1, row, 0);
+		need(rc == 0 && has("\"result\":{\"redone\":") && g_std.speed == 2, "audit_redo row: applied again", O);
+		rc = undo(1, row, 0);
+		need(rc != 0 && has("is not undone. audit_undo undoes it.") && g_std.speed == 2, "audit_redo on a row that is not undone: refused", O);
+		set("webhook", "http://192.0.2.10/hook");
+		rc = undo(0, newest_row(AU_SETTINGS, "setting", "webhook"), 0);
+		need(rc != 0 && has(T_en(STR_AW_SECRET)), "audit_undo of a secret: refused with the screen's reason", O);
+		rc = undo(0, 999999, 0);
+		need(rc != 0 && has("No row 999999"), "audit_undo: an unknown row", O);
+		rc = undo(0, 0, 999999);
+		need(rc != 0 && has("No job 999999"), "audit_undo: an unknown job", O);
+		// a repair's sectors: by its job, and the whole disc (with confirm)
+		uint8_t a[2352], b[2352];
+		memset(a, 0x11, sizeof a); memset(b, 0x22, sizeof b);
+		{ FILE *f = fopen("out/au_img.bin", "wb"); for (int i = 0; i < 200; i++) fwrite(b, 1, sizeof b, f); fclose(f); }
+		uint32_t job = audit_job_begin(AU_PAD, "SLES_011.35", "Alundra", "repair");
+		audit_sector(job, "out/au_img.bin", 2, a, b);
+		audit_sector(job, "out/au_img.bin", 3, a, b);
+		audit_job_end(job, "finished");
+		auto sector = [&](int lba) { uint8_t x[2352]; FILE *f = fopen("out/au_img.bin", "rb"); fseek(f, (long)lba * 2352, SEEK_SET); fread(x, 1, sizeof x, f); fclose(f); return x[0]; };
+		rc = undo(0, job_row_id(job), 0);
+		need(rc != 0 && has("give job:"), "audit_undo of a job's own row: give the job", O);
+		rc = undo(0, 0, job);
+		need(rc == 0 && has("\"undone\":\"job") && has("\"label\":\"Repair \xc2\xb7 Alundra\"") && sector(2) == 0x11 && sector(3) == 0x11, "audit_undo job: its sectors back", O);
+		rc = undo(0, 0, job);
+		need(rc != 0 && has("undone already"), "audit_undo job again: refused", O);
+		rc = undo(1, 0, 0, "SLES_011.35", 1);
+		need(rc == 0 && has("\"redone\":\"disc SLES_011.35\"") && sector(2) == 0x22, "audit_redo disc (confirmed): redone", O);
+		rc = undo(0, 0, 0, "SLES_011.35", 0);
+		need(rc != 0 && has("confirm: true") && sector(2) == 0x22, "audit_undo disc without confirm: refused", O);
+		rc = undo(0, 0, 0, "SLES_011.35", 1);
+		need(rc == 0 && sector(2) == 0x11, "audit_undo disc: undone", O);
+		uint32_t mv = audit_job_begin(AU_PAD, "SCES_011.15", "Ape Escape", "rename", AU_FILES);
+		audit_job_end(mv, "finished");
+		rc = undo(0, 0, 0, "SCES_011.15", 1);
+		need(rc != 0 && has("undone by its jobs"), "audit_undo of a Files disc: by its jobs", O);
+		rc = undo(0, 0, 0, "SLUS_999.99", 1);
+		need(rc != 0 && has("No disc \"SLUS_999.99\""), "audit_undo: an unknown disc", O);
+		// a long undo: answered with started once it runs long; get_state shows it, and nothing else is taken meanwhile
+		uint32_t big = audit_job_begin(AU_PAD, "SLES_011.35", "Alundra", "repair");
+		for (int i = 4; i < 200; i++) audit_sector(big, "out/au_img.bin", i, a, b);
+		audit_job_end(big, "finished");
+		audit_set_progress(audit_undo_tick);
+		g_undo_early_ms = 0;
+		rc = undo(0, 0, big);
+		need(rc == 0 && has("\"result\":{\"started\":true,\"what\":\"job") && has("\"screen\":\"audit_undo\"") && has("\"audit_undo\":{\"what\":"),
+		     "a long undo: answered started, get_state shows it", O);
+		need(wait_for([] { UiState u; ui_snapshot(u); return u.scr == SCR_AUDIT_LOG; }), "the long undo ends");
+		need(sector(150) == 0x11 && sector(4) == 0x11, "the long undo undid every sector");
+		rc = call("go_screen", "home");
+		need(rc == 0 && has("\"screen\":\"home\""), "the slot is free after it", O);
+		g_undo_early_ms = 3000;
+		audit_set_progress(NULL);
+	}
+	bg_stop();
+	for (const std::string &t : said)
+		if (t.find("SECRETWEBHOOKID") != std::string::npos || t.find("TOPSECRETTOKEN") != std::string::npos || t.find("10.0.0.9") != std::string::npos)
+			need(false, "a secret in an answer", t.c_str());
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log out/au_img.bin");
+	audit_init("out/audit", &vf_io);
+	audit_set_retired(NULL);
+	g_remote = g_mcp = g_status_json = 0;
+	reset_all();
+	#undef O
+	if (bad) g_fail += bad; else printf("ok   MCP: reset_settings (D1), redump_download (D2), webhook_test, show_game, audit_undo and audit_redo (D3)\n");
 }
 
 int main()
@@ -4745,6 +5066,7 @@ int main()
 	mcp_ui_scenarios();
 	mcp_games_scenarios();
 	mcp_app_scenarios();
+	mcp_app_ui_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

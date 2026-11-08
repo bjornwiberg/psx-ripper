@@ -52,9 +52,11 @@ struct McpHooks {
 	int (*drives)(char *out, int n);                                  // get_drives
 	int (*list_settings)(char *out, int n);                           // list_settings
 	int (*set_setting)(const char *key, const char *value, const char *drive, char *out, int n);   // drive NULL = standard
-	// tool: go_screen, go_tab, press_button, rip, repair, check, cancel, skip_rereads, eject.
-	// arg: go_screen the screen ("drive_settings:usb0" for a drive's settings), go_tab and the
-	// actions the drive ("internal", "usb0", ...), press_button the button ("cross", "l2", ...).
+	// tool: go_screen, go_tab, press_button, rip, repair, check, cancel, skip_rereads, eject,
+	// reset_settings, redump_download. arg: go_screen the screen ("drive_settings:usb0" for a drive's
+	// settings), go_tab and the actions the drive ("internal", "usb0", ...), press_button the button
+	// ("cross", "l2", ...), reset_settings the drive or "" for all settings (only when the agent
+	// confirmed it), redump_download "cancel" to stop it or "" to start it.
 	int (*ui)(const char *tool, const char *arg, char *out, int n);
 	// from: first line (0 = the first line of the log), or -1 for the last max lines
 	int (*read_log)(int from, int max, char *out, int n);
@@ -62,8 +64,8 @@ struct McpHooks {
 	int (*list_games)(const McpGameQuery *q, char *out, int n);
 	int (*get_game)(const char *id, char *out, int n);
 	// tool: check_game, check_games, cancel_check, rename_game, trash_game, restore_game, empty_trash,
-	// show_games, carried out by the game list screen as the pad would. id: the game (check_game, rename_game,
-	// trash_game, restore_game); pattern: rename_game's; q: check_games' and empty_trash's source and
+	// show_games, show_game, carried out by the game list screen as the pad would. id: the game (check_game,
+	// rename_game, trash_game, restore_game, show_game); pattern: rename_game's; q: check_games' and empty_trash's source and
 	// filter, empty_trash's expect, show_games' source ("" = keep) and filter (fgiven, fclear). empty_trash is called only when the agent confirmed it (confirm:
 	// true) and named one source (never all).
 	int (*game)(const char *tool, const char *id, const char *pattern, const McpGameQuery *q, char *out, int n);
@@ -74,6 +76,10 @@ struct McpHooks {
 	// preview_name: the names pattern gives, as the File name view shows them for the drives' discs
 	// (drive: that drive's only) or the rename view for a game (id). drive and id are NULL when not given.
 	int (*preview_name)(const char *pattern, const char *drive, const char *id, char *out, int n);
+	// audit_undo (redo 0) and audit_redo (redo 1) of one item: q's row, job or disc (a rips disc, called
+	// only with confirm), carried out by the audit screen as triangle and yes would.
+	int (*audit_undo)(int redo, const McpAuditQuery *q, char *out, int n);
+	int (*webhook_test)(char *out, int n);                            // webhook_test: the HTTP status
 };
 
 void mcp_init(const McpHooks *hooks, const char *version);

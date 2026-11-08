@@ -28,3 +28,10 @@ extern const char *host_listdir_extra;   // a name vf_listdir adds to every fold
 extern int host_rd_local;
 extern unsigned char host_rd_md5[16];
 extern char host_rd_name[160];
+// The Redump download (thread "psxredump" when host_thread_rd): while host_rd_dl_hold it waits (an
+// abort ends it), then answers host_rd_dl_result. The webhook test's POST answers host_webhook_status
+// after host_webhook_ms; host_webhook_url and host_webhook_hdrs are what it was given.
+extern int host_thread_rd;
+extern volatile int host_rd_dl_hold, host_rd_dl_result, host_rd_dl_calls;
+extern volatile int host_webhook_status, host_webhook_ms, host_webhook_posts;
+extern char host_webhook_url[512], host_webhook_hdrs[1024];
