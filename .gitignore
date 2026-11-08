@@ -9,3 +9,4 @@ third_party/
 .ps3host
 psxripper-*.pkg
 announce/
+_site/

@@ -32,11 +32,12 @@ discs at the same time. They run on the PS3's USB power; no Y-cable is needed.
 1. Download `psxripper-<version>.pkg` from the [releases](https://github.com/bjornwiberg/psx-ripper/releases/latest).
 2. Copy it to the PS3: a USB stick, FTP, or webMAN's *Install PKG*.
 3. Install it with *Package Manager → Install Package Files* and start **PSX RiPPER** from the
-   Game column. Installing a newer version over an older one keeps your settings.
+   XMB, under *Game* (webMAN may list it under *Unknown*). Installing a newer version over an older
+   one keeps your settings.
 
 ## The screen
 
-![A drive's tab](images/tabs.png)
+![The internal drive's tab ripping Lunar - Silver Star Story Complete (Disc 2) at 11 %, next to the tabs USB 0 at 23 % and USB 1 at 16 %. Below: the destination, the file name, a progress bar, 34816 of 309530 sectors, time left and speed, and Cancel rip on the circle button](images/tabs.jpg)
 
 Every drive has a **tab**: *Internal* (the PS3's drive), and *USB 0* / *USB 1* for SuperDrives,
 named after the USB port. **L1 / R1** (or up / down) move between the tabs. The tab shows the
@@ -165,7 +166,7 @@ marks: *Duplicate*, when the same disc is there twice (the same disc ID and size
 Redump name; with *All*, also on another source), and *.sbi missing*, for a PAL game that uses
 LibCrypt and has no `.sbi`. The line under the list names the other copy of a duplicate.
 
-**Filter** (R1): four criteria, all of which must match; a game of several discs matches when one
+**Filter**, opened with R1: four criteria, all of which must match; a game of several discs matches when one
 of its discs matches them all. ↑↓ select a row, ← → change it, L1 sets all to *Any*, ○ closes and
 applies. The filter lasts until the app restarts: each start shows every game.
 
@@ -180,7 +181,7 @@ applies. The filter lasts until the app restarts: each start shows every game.
 The criteria set are shown above the list (for example *2048 · Not checked*) with *n of m*, the
 rows shown of all.
 
-**Details** (✕): for each disc its status, format, disc ID, Redump's name, when and on which drive
+**Details**, opened with ✕: for each disc its status, format, disc ID, Redump's name, when and on which drive
 it was ripped, the size, the place, whether there is a cover picture, when it was last checked,
 LibCrypt, the other copy of a duplicate, every track with its MD5, the sectors with errors and the
 set's files. ↑↓ and L2/R2 scroll, □ checks the game, △ moves it to the trash, ✕ renames it, ○ goes
@@ -229,7 +230,7 @@ drive or a check is using the game, or when the `.cue` is too big to be rewritte
 ### The trash
 
 **△** moves the game, all its files, to `.trash` in the same `PSXISO` folder. Nothing is deleted.
-To see the trash, open the filter (R1) and set *Show* to *Trash*. There, **△** restores the
+To see the trash, open the filter with R1 and set *Show* to *Trash*. There, **△** restores the
 selected game to its folder, and **START** empties the trash after a question that names the
 number of games and their size: ✕ deletes, ○ keeps them.
 
@@ -347,7 +348,7 @@ everything, ○ goes back.
 ## Audit log
 
 PSX RiPPER writes down every change it makes, so you can see what changed, when, and what
-started it, and undo it. Open it from the settings (*Audit log*; *Ändringslogg* in Swedish).
+started it, and undo it. Open it from the settings (*Audit log*; *<span lang="sv">Ändringslogg</span>* in Swedish).
 
 **What is logged**
 
@@ -395,7 +396,7 @@ undo shows how far it got; closing the app stops it, and what was undone until t
 undone.
 
 **Redo**: every undo is itself logged, as its own row. A row marked *(undone)* can be redone:
-select it and △ says *Redo* (*Gör om* in Swedish); it applies the change again and the row is no
+select it and △ says *Redo* (*<span lang="sv">Gör om</span>* in Swedish); it applies the change again and the row is no
 longer undone, so △ undoes it again, as often as you like. (The undo rows stay in the list as
 history; △ on the newest one does the same.) A setting gets the value the change gave
 it, as long as it still has the value the undo put back. A sector gets the repaired bytes again,
@@ -416,7 +417,7 @@ be undone.
 
 | Row | What it does |
 |---|---|
-| Remote view | Open `http://<the PS3's address>:8090/` on a computer or phone on the same network. It shows the app's screen and, under it, a pad: its buttons press the console's, so you can switch tabs or start a rip from the sofa | Open it by the console's address (as shown on the TV), not by a host name such as `ps3.local`: the buttons only work from a page opened by the address.
+| Remote view | Open `http://<the PS3's address>:8090/` on a computer or phone on the same network. It shows the app's screen and, under it, a pad: its buttons press the console's, so you can switch tabs or start a rip from the sofa Open it by the console's address (as shown on the TV), not by a host name such as `ps3.local`: the buttons only work from a page opened by the address. |
 | MCP | An AI agent (an MCP client such as Claude Code) can read and control the app at `http://<the PS3's address>:8090/mcp`. While it is on, *[MCP]* is shown at the left of the title. See [MCP](mcp.md) |
 | status.json | `http://<the PS3's address>:8090/status.json` gives the state of every drive for scripts |
 

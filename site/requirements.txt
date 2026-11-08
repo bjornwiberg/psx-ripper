@@ -1,0 +1,2 @@
+# The site build (site/build.py). One pinned dependency.
+markdown==3.7

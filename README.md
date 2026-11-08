@@ -5,6 +5,8 @@
 [![CI](https://github.com/bjornwiberg/psx-ripper/actions/workflows/ci.yml/badge.svg)](https://github.com/bjornwiberg/psx-ripper/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
+**Website: [psxripper.bjrn.nu](https://psxripper.bjrn.nu/)**: download, screenshots and the docs.
+
 A PS3 homebrew app that rips your own PlayStation 1 discs to bit-perfect `.bin`/`.cue` images,
 ready to play with webMAN MOD / Cobra. It reads from the PS3's own Blu-ray drive and from up to
 two Apple USB SuperDrives, all three at the same time, and checks every rip against
@@ -14,10 +16,10 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
 > is a trademark of Sony Interactive Entertainment. Only rip discs you own.
 
 <p align="center">
-  <img src="docs/images/tabs.png" alt="A tab per drive: a disc already ripped and verified against Redump" width="49%">
-  <img src="docs/images/ripping.png" alt="A rip in progress on a USB SuperDrive" width="49%">
-  <img src="docs/images/settings.png" alt="The settings" width="49%">
-  <img src="docs/images/about.png" alt="About PSX RiPPER" width="49%">
+  <img src="docs/images/tabs.jpg" alt="Three rips at once: a tab per drive, each with its own progress" width="49%">
+  <img src="docs/images/ripping.jpg" alt="A rip in progress on an Apple USB SuperDrive" width="49%">
+  <img src="docs/images/settings.jpg" alt="The settings" width="49%">
+  <img src="docs/images/about.jpg" alt="About PSX RiPPER" width="49%">
 </p>
 
 ## Features
