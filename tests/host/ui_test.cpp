@@ -336,28 +336,34 @@ static void game_source_tests()
 		int n = gl_take("usb1");
 		if (n != GL_MAX || !g_gl.more) { printf("FAIL more than %d sets: %d discs, more %d\n", GL_MAX, n, g_gl.more); bad++; }
 	}
-	{   // the config keys round-trip, and wrong values change nothing
-		snprintf(g_games_source, sizeof g_games_source, "all");
+	{   // the game list's source and filter are not settings (M12, M13): an old games_source= or games_filter=
+		// line is accepted and ignored (never a failure), neither is written, and a start shows the hard disk, no filter
+		snprintf(g_games_source, sizeof g_games_source, "usb1");
 		g_games_filter = GameFilter{0, 0, 0, 0};
-		int ok = cfg_apply_line("games_source=usb3") && cfg_apply_line("games_filter=1,2,0,3");
-		int rej = !cfg_apply_line("games_source=usb9") && !cfg_apply_line("games_source=dvd") && !cfg_apply_line("games_filter=3,0,0,0") &&
-		          !cfg_apply_line("games_filter=0,5,0,0") && !cfg_apply_line("games_filter=0,0,3,0") && !cfg_apply_line("games_filter=0,0,0,4") &&
-		          !cfg_apply_line("games_filter=1,2");
+		int old = cfg_apply_line("games_source=usb3") && cfg_apply_line("games_source=usb9") && cfg_apply_line("games_source=dvd") &&
+		          cfg_apply_line("games_source=") && cfg_apply_line("games_filter=1,2,0,3") && cfg_apply_line("games_filter=3,0,0,0") &&
+		          cfg_apply_line("games_filter=1,2") && cfg_apply_line("games_filter=");
 		char txt[4096];
 		cfg_text(txt, sizeof txt);
-		if (!ok || !rej || strcmp(g_games_source, "usb3") || g_games_filter.fmt != 1 || g_games_filter.redump != 2 || g_games_filter.other != 3 ||
-		    !strstr(txt, "\ngames_source=usb3\n") || !strstr(txt, "\ngames_filter=1,2,0,3\n"))
-			{ printf("FAIL games_source/games_filter: ok %d, rejected %d, %s\n", ok, rej, txt); bad++; }
-		snprintf(g_games_source, sizeof g_games_source, "hdd");
-		g_games_filter = GameFilter{0, 0, 0, 0};
-		int back = cfg_apply_line("games_source=usb3") && cfg_apply_line("games_source=all") && cfg_apply_line("games_source=hdd") && cfg_apply_line("games_filter=0,0,0,0");
-		if (!back || strcmp(g_games_source, "hdd")) { printf("FAIL games_source back to hdd\n"); bad++; }
+		if (!old || strcmp(g_games_source, "usb1") || g_games_filter.fmt || g_games_filter.redump || g_games_filter.other ||
+		    strstr(txt, "games_source") || strstr(txt, "games_filter"))
+			{ printf("FAIL old games_source/games_filter lines: ignored %d, source %s, %s\n", old, g_games_source, txt); bad++; }
+		// a restart: the file read again (with old lines) gives the hard disk and an empty filter
+		g_games_filter = GameFilter{2, 1, 1, 2};
+		FILE *f = fopen(CFG_PATH, "w");
+		if (f) { fputs(txt, f); fputs("games_source=usb3\ngames_filter=1,2,0,3\n", f); fclose(f); }
+		int loaded = cfg_load();
+		cfg_text(txt, sizeof txt);
+		if (!loaded || strcmp(g_games_source, "hdd") || g_games_filter.fmt || g_games_filter.redump || g_games_filter.errors || g_games_filter.other ||
+		    strstr(txt, "games_source") || strstr(txt, "games_filter"))
+			{ printf("FAIL a restart: source %s, filter %d,%d,%d,%d\n", g_games_source, g_games_filter.fmt, g_games_filter.redump, g_games_filter.errors, g_games_filter.other); bad++; }
+		remove(CFG_PATH);
 	}
 	host_root[0] = 0;
 	memset(host_exfat, 0, sizeof(int) * 8);
 	gl_take("hdd");   // nothing (the console's paths do not exist here)
 	host_lang = PS3_LANG_SWEDISH; lang_init();
-	if (bad) g_fail += bad; else printf("ok   game list sources, labels, All, the cache, a source that goes, games_* config keys\n");
+	if (bad) g_fail += bad; else printf("ok   game list sources, labels, All, the cache, a source that goes, old games_* config lines\n");
 }
 
 // ---------------------------------------------------------------- game list: the screen
@@ -508,13 +514,13 @@ static void games_scenarios()
 	gv_refilter(v);
 	gframe("games-no-match", v);
 	want(v.nshown == 0 && has_text(sv ? "Inga spel matchar filtret" : "No games match the filter"), "nothing matches");
-	gv_input(v, B_L1);   // L1: every criterion back to any, saved
+	gv_input(v, B_L1);   // L1: every criterion back to any (not saved: M12)
 	{
 		char txt[4096];
 		cfg_text(txt, sizeof txt);
-		want(v.nshown == 21 && !g_games_filter.fmt && !g_games_filter.other && strstr(txt, "\ngames_filter=0,0,0,0\n"), "L1 resets and saves");
+		want(v.nshown == 21 && !g_games_filter.fmt && !g_games_filter.other && !strstr(txt, "games_filter"), "L1 resets, not saved");
 	}
-	// the filter panel: R1 opens, right increases, O applies and saves
+	// the filter panel: R1 opens, right increases, O applies (not saved)
 	gv_input(v, B_R1);
 	want(v.mode == GV_FILTER, "R1 opens the filter panel");
 	gv_input(v, B_RIGHT); gv_input(v, B_RIGHT);   // Format: 2048
@@ -526,7 +532,7 @@ static void games_scenarios()
 	{
 		char txt[4096];
 		cfg_text(txt, sizeof txt);
-		want(v.mode == GV_LIST && g_games_filter.fmt == 2 && g_games_filter.redump == 2 && strstr(txt, "\ngames_filter=2,2,0,0\n"), "O applies and saves");
+		want(v.mode == GV_LIST && g_games_filter.fmt == 2 && g_games_filter.redump == 2 && !strstr(txt, "games_filter"), "O applies, not saved");
 	}
 	gframe("games-criteria-two", v);
 	want(has_text(sv ? "2048 · Ej kontrollerad" : "2048 · Not checked"), "the criteria line");
@@ -563,7 +569,11 @@ static void games_scenarios()
 	gv_input(v, B_CIRCLE);
 	// SELECT: the next source (USB 1 (RIPS)), then All: each row with its place
 	gv_input(v, B_SELECT);
-	want(!strcmp(v.key, "usb1") && !strcmp(g_games_source, "usb1"), "SELECT: USB 1, remembered");
+	{
+		char txt[4096];
+		cfg_text(txt, sizeof txt);
+		want(!strcmp(v.key, "usb1") && !strcmp(g_games_source, "usb1") && !strstr(txt, "games_source"), "SELECT: USB 1, remembered until a restart, not saved");
+	}
 	gv_poll(v);
 	gframe("games-usb", v);
 	want(v.nshown == 1 && has_text("USB 1 (RIPS)"), "the stick's list and name");
@@ -608,7 +618,8 @@ static void games_scenarios()
 	want(gv_poll(v) && gv_ready(v) && !strcmp(g_gl.key, "hdd") && v.nshown == 21, "the screen asks for its source again");
 	want(v.mode == GV_LIST, "a new result closes the detail view");
 	want(!gv_poll(v) && !gv_poll(v), "no redraw without a new result");
-	// the two settings in the audit log: by their name, values in words
+	// the two settings in the audit log: by their name, values in words (games_filter: rows from a
+	// version that saved the filter stay readable)
 	{
 		char av[160];
 		want(!strcmp(av_key_label("games_source"), sv ? "Spellistan: källa" : "Game list: source") &&
@@ -3460,18 +3471,18 @@ static void mcp_games_scenarios()
 		     "restore_game: back in its folder", O);
 		need(src_rows(AU_FILES, "restore", AU_MCP) == 1, "restore_game: an audit job with source mcp");
 		// a game on another source: the list shows that source on the way (All shows every source: it
-		// stays), but only SELECT remembers a source: MCP never saves games_source
+		// stays), but only SELECT and show_games remember a source (until a restart: never saved, M13)
 		auto saved_src = [&]() { FILE *f = fopen(CFG_PATH, "r"); char b[8192] = ""; if (f) { b[fread(b, 1, sizeof b - 1, f)] = 0; fclose(f); }
 		                         const char *s = strstr(b, "\ngames_source="); return std::string(s ? s + 14 : "", s ? strcspn(s + 14, "\n") : 0); };
 		rc = act("check_games", NULL, NULL, gq("hdd"));
 		need(rc != 0 && !strcmp(g_games_source, "hdd"), "check_games on the hard disk: the list shows it", O);
 		rc = act("trash_game", "usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]");
-		need(rc == 0 && vf_exists("/dev_usb001/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin") && !strcmp(g_games_source, "hdd") && saved_src() == "hdd",
+		need(rc == 0 && vf_exists("/dev_usb001/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin") && !strcmp(g_games_source, "hdd") && saved_src() == "",
 		     "trash_game on the stick: the list switched to it, the source is not remembered", O);
 		rc = act("restore_game", "usb1:/dev_usb001/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88]");
 		need(rc == 0 && vf_exists("/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88].bin"), "restore_game on the stick", O);
 		rc = act("check_games", NULL, NULL, gq("all"));
-		need(rc != 0 && !strcmp(g_games_source, "hdd") && saved_src() == "hdd", "check_games on All: not remembered either", O);
+		need(rc != 0 && !strcmp(g_games_source, "hdd") && saved_src() == "", "check_games on All: not remembered either", O);
 		h.ui("go_screen", "home", outb, sizeof outb);
 		h.ui("go_screen", "games", outb, sizeof outb);
 		bg_frames(4);
@@ -3710,18 +3721,18 @@ static void mcp_games_scenarios()
 		rc = act("restore_game", APE_T);
 		need(rc == 0, "restore_game", O);
 	}
-	// show_games (M10): the list's source and filter in one step, saved as SELECT and the filter panel
-	// save them (source mcp); criteria not given keep their value, "clear" clears them as L1 does
+	// show_games (M10): the list's source and filter in one step, as SELECT and the filter panel set them.
+	// Both last until the app restarts: never saved, no audit rows (M12, M13). Criteria not given keep
+	// their value, "clear" clears them as L1 does
 	{
-		auto saved = [&](const char *key) { FILE *f = fopen(CFG_PATH, "r"); char b[8192] = ""; if (f) { b[fread(b, 1, sizeof b - 1, f)] = 0; fclose(f); }
-		                                    std::string k = std::string("\n") + key + "="; const char *s = strstr(b, k.c_str());
-		                                    return std::string(s ? s + k.size() : "", s ? strcspn(s + k.size(), "\n") : 0); };
 		auto show = [&](const char *src, int mask, GameFilter f, int trash = 0, int clear = 0) {
 			McpGameQuery q = gq(src);
 			q.fmt = f.fmt; q.redump = f.redump; q.errors = f.errors; q.other = f.other; q.trash = trash;
 			q.fgiven = mask; q.fclear = clear;
 			return act("show_games", NULL, NULL, q);
 		};
+		auto saved_has = [&](const char *key) { FILE *f = fopen(CFG_PATH, "r"); char b[8192] = ""; if (f) { b[fread(b, 1, sizeof b - 1, f)] = 0; fclose(f); }
+		                                        return strstr(b, (std::string("\n") + key + "=").c_str()) != NULL; };
 		auto filter_is = [&](int a, int b, int c, int d) { return g_games_filter.fmt == a && g_games_filter.redump == b && g_games_filter.errors == c && g_games_filter.other == d; };
 		void (*keep_trace)(int, int, int, int, int, const char *, int) = ui_trace;
 		ui_trace = trace_drawn;
@@ -3738,9 +3749,10 @@ static void mcp_games_scenarios()
 		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"source\":\"all\",\"label\":\"All\",\"trash\":false,") &&
 		     has("\"filter\":{\"format\":\"any\",\"redump\":\"any\",\"errors\":\"any\",\"other\":\"duplicates\",\"show\":\"games\"}") &&
 		     has("\"summary\":{\"text\":\"22 games") && has(shown) && has("\"state\":{\"screen\":\"games\""), "show_games all, duplicates: the list and its summary", O);
-		need(dups >= 3 && !strcmp(g_games_source, "all") && saved("games_source") == "all" && filter_is(0, 0, 0, 2) && saved("games_filter") == "0,0,0,2",
-		     "show_games: the source and filter are saved", O);
-		need(setting_rows("games_source", AU_MCP) == s0 + 1 && setting_rows("games_filter", AU_MCP) == f0 + 1, "show_games: audit rows with source mcp");
+		need(dups >= 3 && !strcmp(g_games_source, "all") && !saved_has("games_source") && filter_is(0, 0, 0, 2) && !saved_has("games_filter"),
+		     "show_games: the source and filter are set, not saved", O);
+		need(has("\"note\":\"The source and filter last until the app restarts"), "show_games: the answer says they are not kept", O);
+		need(setting_rows("games_source", AU_MCP) == s0 && setting_rows("games_filter", AU_MCP) == f0 && s0 == 0 && f0 == 0, "show_games: no audit rows");
 		std::string ft = frame_texts();
 		char of[24];
 		snprintf(of, sizeof of, "%d of 22", dups);
@@ -3748,29 +3760,29 @@ static void mcp_games_scenarios()
 		     ft.find("Croc 2") != std::string::npos, "show_games: the screen shows All with the duplicates", ft.c_str());
 		// each criterion on its own: the others keep their value
 		rc = show("", 2, GameFilter{0, 1, 0, 0});
-		need(rc == 0 && filter_is(0, 1, 0, 2) && saved("games_filter") == "0,1,0,2" && !strcmp(g_games_source, "all"), "show_games redump: the other criteria and the source kept", O);
+		need(rc == 0 && filter_is(0, 1, 0, 2) && !saved_has("games_filter") && !strcmp(g_games_source, "all"), "show_games redump: the other criteria and the source kept", O);
 		rc = show("", 1, GameFilter{1, 0, 0, 0});
-		need(rc == 0 && filter_is(1, 1, 0, 2) && saved("games_filter") == "1,1,0,2", "show_games format", O);
+		need(rc == 0 && filter_is(1, 1, 0, 2), "show_games format", O);
 		rc = show("", 4, GameFilter{0, 0, 2, 0});
-		need(rc == 0 && filter_is(1, 1, 2, 2) && saved("games_filter") == "1,1,2,2" && has("\"errors\":\"without\""), "show_games errors", O);
+		need(rc == 0 && filter_is(1, 1, 2, 2) && has("\"errors\":\"without\""), "show_games errors", O);
 		rc = show("", 8, GameFilter{0, 0, 0, 3});
 		need(rc == 0 && filter_is(1, 1, 2, 3) && has("\"other\":\"sbi_missing\""), "show_games other", O);
 		rc = show("", 0, GameFilter{0, 0, 0, 0}, 0, 1);
-		need(rc == 0 && filter_is(0, 0, 0, 0) && saved("games_filter") == "0,0,0,0" && has("\"shown\":22,\"shown_text\":\"22 of 22\""), "show_games clear: as L1", O);
+		need(rc == 0 && filter_is(0, 0, 0, 0) && !saved_has("games_filter") && has("\"shown\":22,\"shown_text\":\"22 of 22\""), "show_games clear: as L1", O);
 		ft = frame_texts();
 		need(ft.find("Alundra") != std::string::npos && ft.find("All games") != std::string::npos, "show_games clear: the screen shows every game", ft.c_str());
 		// the source alone; then show: trash (the view only, as the panel's Show: not saved)
 		int f1 = setting_rows("games_filter", AU_MCP);
 		rc = show("hdd", 0, GameFilter{0, 0, 0, 0});
-		need(rc == 0 && !strcmp(g_games_source, "hdd") && saved("games_source") == "hdd" && !strcmp(g_gl.key, "hdd") && has("\"label\":\"Hard disk\"") &&
-		     setting_rows("games_filter", AU_MCP) == f1, "show_games hdd: the source saved, the filter untouched", O);
+		need(rc == 0 && !strcmp(g_games_source, "hdd") && !saved_has("games_source") && !strcmp(g_gl.key, "hdd") && has("\"label\":\"Hard disk\"") &&
+		     setting_rows("games_filter", AU_MCP) == f1, "show_games hdd: the source set, the filter untouched", O);
 		rc = show("", 16, GameFilter{0, 0, 0, 0}, 1);
-		need(rc == 0 && has("\"trash\":true") && has("\"show\":\"trash\"") && !strcmp(g_gl.key, "t:hdd") && saved("games_filter") == "0,0,0,0", "show_games show trash", O);
+		need(rc == 0 && has("\"trash\":true") && has("\"show\":\"trash\"") && !strcmp(g_gl.key, "t:hdd") && !saved_has("games_filter"), "show_games show trash", O);
 		rc = show("", 16, GameFilter{0, 0, 0, 0}, 0);
 		need(rc == 0 && has("\"trash\":false") && !strcmp(g_gl.key, "hdd"), "show_games show games", O);
-		// the stick: shown and remembered; the source a game tool switched to is saved by show_games too
+		// the stick: shown and remembered (until a restart)
 		rc = show("usb1", 0, GameFilter{0, 0, 0, 0});
-		need(rc == 0 && !strcmp(g_games_source, "usb1") && saved("games_source") == "usb1" && has("\"label\":\"USB 1 (RIPS)\""), "show_games usb1", O);
+		need(rc == 0 && !strcmp(g_games_source, "usb1") && !saved_has("games_source") && has("\"label\":\"USB 1 (RIPS)\""), "show_games usb1", O);
 		// refused: a source that is not connected (at once, nothing changed)
 		uint64_t t0 = now_ms();
 		int s1 = setting_rows("games_source", AU_MCP);
@@ -3801,14 +3813,24 @@ static void mcp_games_scenarios()
 		bg_frames(4);
 		g_gc_after = NULL;
 		host_thread_gc = 0;
-		// the pad's filter panel as before: R1, right (2352), circle applies and saves it; L1 clears
+		// the pad's filter panel as before: R1, right (2352), circle applies it (not saved, no audit row); L1 clears
 		int f2 = setting_rows("games_filter", AU_MCP);
 		h.ui("press_button", "r1", outb, sizeof outb);
 		h.ui("press_button", "right", outb, sizeof outb);
 		h.ui("press_button", "circle", outb, sizeof outb); out = outb;
-		need(filter_is(1, 0, 0, 0) && saved("games_filter") == "1,0,0,0" && setting_rows("games_filter", AU_MCP) == f2 + 1 && has("\"screen\":\"games\""), "the filter panel: applied and saved", O);
+		need(filter_is(1, 0, 0, 0) && !saved_has("games_filter") && setting_rows("games_filter", AU_MCP) == f2 && has("\"screen\":\"games\""), "the filter panel: applied, not saved", O);
 		h.ui("press_button", "l1", outb, sizeof outb);
-		need(filter_is(0, 0, 0, 0) && saved("games_filter") == "0,0,0,0", "L1 clears the filter");
+		need(filter_is(0, 0, 0, 0) && !saved_has("games_filter"), "L1 clears the filter");
+		need(setting_rows("games_source", AU_MCP) == 0 && setting_rows("games_filter", AU_MCP) == 0, "the pad and show_games: no audit rows");
+		// old games_source/games_filter rows in the log (from a version that saved them): a start adds no
+		// row for the lines that are gone, and their undo is refused (there is no setting to put back)
+		audit_setting(AU_APP, "games_source", "hdd", "usb1");
+		audit_setting(AU_APP, "games_filter", "0,0,0,0", "1,0,0,0");
+		int sa = setting_rows("games_source", AU_APP), fa = setting_rows("games_filter", AU_APP);
+		cfg_audit_boot();
+		need(setting_rows("games_source", AU_APP) == sa && setting_rows("games_filter", AU_APP) == fa, "a start: no audit rows for the old lines");
+		need(set_setting_hook("games_filter", "0,0,0,0") != 0 && set_setting_hook("games_source", "hdd") != 0 && filter_is(0, 0, 0, 0) &&
+		     !strcmp(g_games_source, "hdd") && !saved_has("games_filter") && !saved_has("games_source"), "the undo of an old row is refused");
 		ui_trace = keep_trace;
 	}
 	h.ui("go_screen", "home", outb, sizeof outb);

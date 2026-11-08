@@ -143,7 +143,7 @@ list says that Redump must be turned on. START is offered only while a game show
 
 **Sources**: SELECT steps through *Hard disk*, *USB 0*, *USB 1*, … (with the drive's name when the
 app can read it) and *All*, every source at once. In *All* the line under the list says where the
-selected game is. The choice is remembered. A USB drive that is pulled out shows *… is not
+selected game is. The choice lasts until the app restarts: each start shows the hard disk. A USB drive that is pulled out shows *… is not
 connected*.
 
 **The summary** at the top counts the whole source, not only the rows a filter shows, for
@@ -167,7 +167,7 @@ LibCrypt and has no `.sbi`. The line under the list names the other copy of a du
 
 **Filter** (R1): four criteria, all of which must match; a game of several discs matches when one
 of its discs matches them all. ↑↓ select a row, ← → change it, L1 sets all to *Any*, ○ closes and
-applies. The filter is remembered.
+applies. The filter lasts until the app restarts: each start shows every game.
 
 | Row | Values |
 |---|---|

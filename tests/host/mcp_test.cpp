@@ -679,6 +679,8 @@ static void games(int &bad)
 	// show_games: the list's source and filter set in one step (M10). Criteria not given keep their
 	// value (fgiven says which were given); "clear" or {} clears them, as L1 in the panel
 	CHECK(has_desc("show_games", "instead of press_button") && has_desc("list_games", "use show_games"));
+	// the source and filter are not saved (M12, M13): the description says they last until the app restarts
+	CHECK(has_desc("show_games", "last until the app restarts") && !has_desc("show_games", "saved as they save"));
 	{
 		call("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}");
 		const char *d = strstr(g_out, "{\"name\":\"show_games\",");

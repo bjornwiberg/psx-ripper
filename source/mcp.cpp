@@ -384,8 +384,8 @@ static const Tool k_tools[] = {
 		{"source", A_SOURCE1, true, "The source whose trash is emptied: hdd or usbN (the USB drive's port)"},
 		{"confirm", A_CONFIRM, false, "Must be true: emptying the trash is final"},
 		{"expect", A_EXPECT, false, "What list_games showed in that trash: the number of its games, or the id of every disc in it (a game's id, and for a game of several discs each id in its discs list; any order)"}}},
-	{"show_games", T_GACT, false, "Shows the game list on the screen with a source and filter, set in one step as SELECT and the filter panel set them, and "
-		"saved as they save them (the list opens so next time). The criteria left out keep their value; filter \"clear\" (or {}) clears them, as L1 does. "
+	{"show_games", T_GACT, false, "Shows the game list on the screen with a source and filter, set in one step as SELECT and the filter panel set them. "
+		"The source and filter last until the app restarts: they are not saved, and each start shows the hard disk with no filter. The criteria left out keep their value; filter \"clear\" (or {}) clears them, as L1 does. "
 		"Returns what the list shows (source, filter, the summary line, how many games the filter shows: \"22 of 156\") and the screen state. "
 		"Refused for a source that is not connected, while the game list checks, and while a dialog is open. To read the games, use list_games. "
 		"Use this instead of press_button.", {

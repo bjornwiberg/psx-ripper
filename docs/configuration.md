@@ -27,14 +27,16 @@ app writes the whole file again.
 | `webhook_header1` … `3` | `Name: value` | Extra headers (e.g. authentication) |
 | `webhook_events` | bit mask, bit n = event n below | Events that are sent |
 | `webhook_step` | 1, 2, 5, 10, 15, 25, 50 | Progress every N percent |
-| `games_source` | `hdd`, `usb0` … `7`, `all` | The game list's source (SELECT in the list); default `all` |
-| `games_filter` | `format,redump,errors,other`, e.g. `0,2,0,0` | The game list's filter: format 0 any, 1 2352, 2 2048; Redump 0 any, 1 verified, 2 not checked, 3 does not match, 4 not verified; errors 0 any, 1 with, 2 without; other 0 any, 1 broken sets, 2 duplicates, 3 LibCrypt .sbi missing |
 | `audit_mb` | 1, 2, 4, 8, 16, 32, 64, 128, 256 | Size limit in MB of the audit log's sector copies (default 256) |
 
 The web server on port 8090 runs while any of `remote`, `mcp` and `status_json` is on, and each
 path answers only while its own switch is on. A config file from before these switches (with
 `remote` but no `status_json` line) keeps what it had: `status_json` gets the value of `remote`,
 and `mcp` stays 0.
+
+The game list's source and filter are not settings: they last until the app restarts, and each
+start shows the hard disk with no filter. Older versions saved them as `games_source` and
+`games_filter`; such lines are ignored when the file is read and dropped at the next save.
 
 Webhook event bits: 0 `disc_identified`, 1 `rip_started`, 2 `rip_progress`, 3 `rip_finished`,
 4 `rip_cancelled`, 5 `rip_failed`, 6 `repair_finished`, 7 `disc_ejected`,

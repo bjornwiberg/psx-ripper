@@ -131,9 +131,14 @@ static int g_webhook_hdr_on = 0;               // send them (off keeps them stor
 // File name of a rip: %T title (Redump's name without the language list, else the app's title;
 // with "(Disc 1)" for a disc of several), %R region, %D disc ID, %N Redump's whole name. Text in [ ] does not show in webMAN's game list.
 static char g_name_pat[96] = "%T [%D]";
-static char g_games_source[8] = "all";   // the game list's source: hdd, usbN (USB port) or all
-static GameFilter g_games_filter = {0, 0, 0, 0};   // the game list's filter (games_filter=fmt,redump,errors,other)
-// games_filter's value: four numbers (format, Redump, errors, other) in their ranges; 0 when not.
+// The game list's source (hdd, usbN by USB port, or all) and filter: they last until the app restarts
+// and are never saved (M12, M13). Each start shows the hard disk with no filter.
+static char g_games_source[8] = "hdd";
+static GameFilter g_games_filter = {0, 0, 0, 0};
+// Config keys an older version saved and this one ignores: an old line is read without complaint and
+// dropped on the next save; the audit log's old rows stay readable but have nothing to undo.
+static bool cfg_key_retired(const char *key) { return !strcmp(key, "games_source") || !strcmp(key, "games_filter"); }
+// A filter as four numbers (format, Redump, errors, other) in their ranges (old audit rows); 0 when not.
 static int games_filter_parse(const char *v, GameFilter *f)
 {
 	char end;
@@ -308,16 +313,7 @@ static int cfg_apply_line(const char *line)
 		if (v <= 0 || opt_index(OPTS(o_progress), v) < 0) return 0;
 		g_webhook_step = v;
 	}
-	else if (!strncmp(line, "games_source=", 13)) {
-		const char *v = line + 13;
-		if (strcmp(v, "hdd") && strcmp(v, "all") && !(!strncmp(v, "usb", 3) && v[3] >= '0' && v[3] <= '7' && !v[4])) return 0;
-		snprintf(g_games_source, sizeof(g_games_source), "%s", v);
-	}
-	else if (!strncmp(line, "games_filter=", 13)) {
-		GameFilter f;
-		if (!games_filter_parse(line + 13, &f)) return 0;
-		g_games_filter = f;
-	}
+	else if (!strncmp(line, "games_source=", 13) || !strncmp(line, "games_filter=", 13)) {}   // retired: ignored, whatever the value
 	else if (!strncmp(line, "audit_mb=", 9)) {
 		int v = atoi(line + 9);   // anything but a listed size is the default
 		g_audit_mb = opt_index(OPTS(o_audit_mb), v) >= 0 ? v : 256;
@@ -334,6 +330,8 @@ static int cfg_load()
 	if (!f) return 0;
 	char line[640];
 	g_cfg_status_seen = 0;
+	snprintf(g_games_source, sizeof(g_games_source), "hdd");   // a start: the game list as new (not saved)
+	g_games_filter = GameFilter{0, 0, 0, 0};
 	while (fgets(line, sizeof(line), f)) {
 		line[strcspn(line, "\r\n")] = 0;
 		cfg_apply_line(line);
@@ -421,19 +419,18 @@ static void cfg_text(char *txt, size_t cap)
 	for (int i = 0; i < WH_HEADERS; i++) put("webhook_header%d=%s\n", i + 1, g_webhook_hdr[i]);
 	put("audit_mb=%d\n", g_audit_mb);
 	put("mcp=%d\nstatus_json=%d\n", g_mcp, g_status_json);
-	put("games_source=%s\n", g_games_source);
-	put("games_filter=%d,%d,%d,%d\n", g_games_filter.fmt, g_games_filter.redump, g_games_filter.errors, g_games_filter.other);
 }
 
 // At start: the file may have been edited (over FTP) while the app was off. Every setting whose
 // value differs from the last one the audit log knows gets an `app` row, so an undo compares with
-// the real value. A setting the log never saw has nothing to differ from.
+// the real value. A setting the log never saw has nothing to differ from; a retired key is no setting.
 static void cfg_audit_boot()
 {
 	static char keys[96][48], vals[96][192];
 	int n = audit_setting_values(keys, vals, 96);
 	char v[512];
 	for (int i = 0; i < n; i++) {
+		if (cfg_key_retired(keys[i])) continue;
 		if (!cfg_find(g_cfg_last, keys[i], v, sizeof(v))) v[0] = 0;   // a line that is gone: empty
 		if (cfg_key_secret(keys[i])) {
 			const char *now = v[0] ? "set" : "cleared";
@@ -490,6 +487,7 @@ static void remote_apply()
 static int set_setting_hook(const char *key, const char *value)
 {
 	if (cfg_key_secret(key)) return -1;   // its row holds only set / cleared: there is no text to put back
+	if (cfg_key_retired(key)) return -1;  // no longer a setting: nothing to put it back into
 	CfgLock lock;
 	char line[700];
 	snprintf(line, sizeof(line), "%s=%s", key, value);
@@ -6381,25 +6379,21 @@ static void games_draw(const GamesView &v)
 // ---- input
 static int gv_filter_active() { return g_games_filter.fmt || g_games_filter.redump || g_games_filter.errors || g_games_filter.other; }
 
+// The filter (the panel's O, L1, show_games): in memory until the app restarts, never saved (M12).
 static void gv_set_filter(GamesView &v, const GameFilter &f, AuditSrc src)
 {
 	if (!memcmp(&f, &g_games_filter, sizeof(f))) return;
-	{
-		CfgLock lock;   // the value and its save together: MCP's set_setting saves on its own thread
-		g_games_filter = f;
-		cfg_save_src(src);
-	}
+	g_games_filter = f;
 	logf("game list filter: %d,%d,%d,%d%s", f.fmt, f.redump, f.errors, f.other, src == AU_MCP ? " by mcp" : "");
 	gv_refilter(v);
 }
-// The source shown by SELECT, remembered with source src. The caller reads it (gv_switch). (MCP on
-// its way to a game switches only the view: gv_mcp_wait.)
+// The source shown by SELECT and show_games, remembered until the app restarts (never saved: M13).
+// The caller reads it (gv_switch). (MCP on its way to a game switches only the view: gv_mcp_wait.)
 static void gv_set_source(GamesView &v, const char *key, AuditSrc src)
 {
 	snprintf(v.key, sizeof(v.key), "%s", key);
-	CfgLock lock;   // the value and its save together, as gv_set_filter
 	snprintf(g_games_source, sizeof(g_games_source), "%s", key);
-	cfg_save_src(src);
+	logf("game list source: %s%s", key, src == AU_MCP ? " by mcp" : "");
 }
 
 // The check job over games (indices into g_gl.g), with source src: all = 0 as □ (each disc of them
@@ -8334,7 +8328,7 @@ static int gl_in_trash(const char *path)
 	const char *sl = strrchr(path, '/');
 	return sl && sl - path >= 7 && !strncmp(sl - 7, "/.trash", 7);
 }
-// An id's source key ("hdd", "all", "usbN" as the config's games_source) into key; 0 when it has none.
+// An id's source key ("hdd", "all", "usbN" as g_games_source) into key; 0 when it has none.
 static int gl_id_key(const char *id, char *key, size_t n)
 {
 	const char *c = strchr(id, ':');
@@ -8707,9 +8701,9 @@ static GameFilter gv_show_filter(const UiReq &r)
 }
 // A game request waits while the list goes to the source and the games or trash it needs (as SELECT
 // and the filter panel's Show) and while that is read. For an action only the view switches: SELECT
-// alone remembers a source (games_source), so the list opens on the user's own next time; show_games
-// is SELECT and the filter panel themselves, so it sets and saves the source and filter as they do
-// (source mcp), at once: when the read takes longer than MCP waits, they stay set. A source that is
+// alone remembers a source (g_games_source), so the list opens on the user's own next time; show_games
+// is SELECT and the filter panel themselves, so it sets the source and filter as they do (in memory
+// until the app restarts, never saved), at once: when the read takes longer than MCP waits, they stay set. A source that is
 // not connected cannot be chosen (SELECT offers only the connected ones): refused at once, nothing
 // changed. 1: it waits (not taken yet), or it was refused.
 static int gv_mcp_wait(GamesView &v)
@@ -8736,7 +8730,7 @@ static int gv_mcp_wait(GamesView &v)
 		}
 	}
 	int sw = strcmp(key, v.key) || trash != v.trash;
-	if (show) {   // as the filter panel's O and SELECT: each saved when it changes
+	if (show) {   // as the filter panel's O and SELECT: each set when it changes (not saved)
 		gv_set_filter(v, gv_show_filter(r), AU_MCP);
 		if (r.gsrc[0] && strcmp(g_games_source, key)) gv_set_source(v, key, AU_MCP);
 	}
@@ -8822,7 +8816,7 @@ static int gv_mcp_do(GamesView &v, const UiReq &r, char *why, size_t wn, char **
 		js_put(j, ",\"games\":%d,\"verified\":%d,\"errors\":%d,\"rerip\":%d,\"broken\":%d},\"shown\":%d,\"shown_text\":",
 		       g_gl.ng, c[GS_VERIFIED], c[GS_ERRORS], c[GS_RERIP], c[GS_BROKEN], v.nshown);
 		js_str(j, shown);
-		js_put(j, "}");
+		js_put(j, ",\"note\":\"The source and filter last until the app restarts; they are not saved (each start shows the hard disk with no filter).\"}");
 		logf("game list shown by mcp: %s%s, %s", v.key, v.trash ? " (trash)" : "", shown);
 		*res = strdup(j.over ? "{}" : b);
 		return 0;
