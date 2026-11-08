@@ -5,6 +5,8 @@
 [![CI](https://github.com/bjornwiberg/psx-ripper/actions/workflows/ci.yml/badge.svg)](https://github.com/bjornwiberg/psx-ripper/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
 
+**Website: [psxripper.bjrn.nu](https://psxripper.bjrn.nu/)**: download, screenshots and the docs.
+
 A PS3 homebrew app that rips your own PlayStation 1 discs to bit-perfect `.bin`/`.cue` images,
 ready to play with webMAN MOD / Cobra. It reads from the PS3's own Blu-ray drive and from up to
 two Apple USB SuperDrives, all three at the same time, and checks every rip against
