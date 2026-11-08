@@ -5,6 +5,13 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.2](https://github.com/bjornwiberg/psx-ripper/compare/v1.4.1...v1.4.2) (2026-11-08)
+
+
+### Documentation
+
+* project site at psxripper.bjrn.nu ([#37](https://github.com/bjornwiberg/psx-ripper/issues/37)) ([c861345](https://github.com/bjornwiberg/psx-ripper/commit/c861345a3dd875326386b1c33a37e1536ccb2ee4))
+
 ## [1.4.1](https://github.com/bjornwiberg/psx-ripper/compare/v1.4.0...v1.4.1) (2026-11-08)
 
 
