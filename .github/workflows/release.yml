@@ -1,7 +1,9 @@
 # Releases. release-please keeps a release pull request open with the next version (from the
 # Conventional Commits since the last release: fix = patch, feat = minor, ! or BREAKING CHANGE =
 # major) and the changelog. Merging that pull request tags the release, and the package job
-# builds psxripper-<version>.pkg and attaches it to the GitHub release.
+# builds psxripper-<version>.pkg and attaches it to the GitHub release, together with an
+# unversioned copy psxripper.pkg: the site's download button links to
+# releases/latest/download/psxripper.pkg, which always gives the newest one.
 name: Release
 
 on:
@@ -61,4 +63,6 @@ jobs:
           test "$v" = "$(cat version.txt)" || { echo "version.txt ($(cat version.txt)) does not match $TAG"; exit 1; }
           cp psxripper.pkg "psxripper-${v}.pkg"
           sha256sum "psxripper-${v}.pkg" > "psxripper-${v}.pkg.sha256"
-          gh release upload "$TAG" "psxripper-${v}.pkg" "psxripper-${v}.pkg.sha256" --clobber
+          sha256sum psxripper.pkg > psxripper.pkg.sha256
+          gh release upload "$TAG" "psxripper-${v}.pkg" "psxripper-${v}.pkg.sha256" \
+            psxripper.pkg psxripper.pkg.sha256 --clobber
