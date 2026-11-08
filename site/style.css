@@ -312,3 +312,5 @@ img { max-width: 100%; height: auto; display: block; }
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; transition: none !important; }
 }
+
+.foot .made { color: var(--text); font-size: 0.95rem; }
