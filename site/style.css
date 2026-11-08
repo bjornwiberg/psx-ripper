@@ -146,8 +146,10 @@ img { max-width: 100%; height: auto; display: block; }
   border: 1.5px solid #e8ecff; color: var(--cross); font-size: 0.9em;   /* every button's ring is white, as on the console */
   background: rgb(157 183 255 / 0.12);
 }
-.g-square { color: var(--square); vertical-align: -0.3em; }
-.g-square svg { width: 1.35em; height: 1.35em; display: block; }
+/* a pad button inside a sentence: an SVG the size of the text, on its baseline like a letter */
+.g-btn { display: inline-block; vertical-align: -0.28em; line-height: 1; }
+.g-btn svg { width: 1.3em; height: 1.3em; display: block; }
+.g-square { color: var(--square); }
 .g-pill {
   padding: 0.22em 0.6em; border-radius: 999px;
   border: 1px solid #8b90b8; color: var(--text);
@@ -335,7 +337,7 @@ img { max-width: 100%; height: auto; display: block; }
 
 /* a link that leaves the site (an absolute http(s) address; the site's own links are relative)
    opens in a new tab: a small arrow says so. Buttons and the Octocat carry no arrow. */
-a:is([href^="http://"], [href^="https://"]):not(.btn, .gh)::after {
+a:is([href^="http://"], [href^="https://"]):not(.btn, .gh, [href*="/download/"])::after {
   content: ""; display: inline-block; width: 0.7em; height: 0.7em; margin-left: 0.22em;
   vertical-align: 0.05em; background-color: currentColor; opacity: 0.75;
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M4.5 1.5h6v6M10.5 1.5 4 8M8.5 7v3.5h-7v-7H5' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
