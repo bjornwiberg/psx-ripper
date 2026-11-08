@@ -37,7 +37,7 @@ discs at the same time. They run on the PS3's USB power; no Y-cable is needed.
 
 ## The screen
 
-![A drive's tab](images/tabs.png)
+![A drive's tab](images/tabs.jpg)
 
 Every drive has a **tab**: *Internal* (the PS3's drive), and *USB 0* / *USB 1* for SuperDrives,
 named after the USB port. **L1 / R1** (or up / down) move between the tabs. The tab shows the
