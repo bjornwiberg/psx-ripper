@@ -521,7 +521,6 @@ struct Track {
 };
 struct LcEntry { uint32_t lba; uint8_t q[10]; };
 struct RipEvent { char text[120]; uint32_t col; };
-struct ResLine { char text[240]; uint32_t col; };
 struct Ctx {
 	// the drive
 	int g_fd;
@@ -601,9 +600,7 @@ struct Ctx {
 	volatile int g_state;          // ST_HOME / ST_RIPPING
 	time_t g_rip_t0;
 	char g_done_msg[768];          // summary of the last successful rip
-	ResLine g_res[8];
-	int g_nres;
-	char g_res_title[160], g_res_path[300];
+	char g_res_title[160];         // the rip's title and disc ID (its log names them)
 	// scratch buffers (were function statics)
 	uint8_t er_b[64] __attribute__((aligned(128)));
 	uint8_t er_w[20] __attribute__((aligned(128)));
@@ -720,10 +717,7 @@ static void ctx_init(int c)
 #define g_state (CX.g_state)
 #define g_rip_t0 (CX.g_rip_t0)
 #define g_done_msg (CX.g_done_msg)
-#define g_res (CX.g_res)
-#define g_nres (CX.g_nres)
 #define g_res_title (CX.g_res_title)
-#define g_res_path (CX.g_res_path)
 
 // Card c's context from any thread: the field names are macros for the current thread's context,
 // so these switch the thread's card for a moment.
@@ -731,7 +725,6 @@ struct OnCard { int keep; OnCard(int c) : keep(t_card) { t_card = c; } ~OnCard()
 static int ctx_ripping(int c) { OnCard o(c); return g_state == ST_RIPPING; }
 static int any_ripping() { for (int c = 0; c < NCARDS; c++) if (ctx_ripping(c)) return 1; return 0; }
 
-#define disc_inserted (g_cards[cur_card()].inserted)
 #define disc_present (g_cards[cur_card()].present)
 
 
@@ -3486,10 +3479,10 @@ static volatile int g_remote_btn = 0;
 // What the screen shows, for MCP's get_state: each screen's loop says where it is every frame; a
 // dialog, the on-screen keyboard and the hint bar's buttons are noted where they are drawn.
 enum { SCR_HOME, SCR_SETTINGS, SCR_DRIVE_SETTINGS, SCR_FILENAME, SCR_WEBHOOKS, SCR_WEBHOOK_HEADERS, SCR_ABOUT, SCR_AUDIT_LOG,
-       SCR_REMOTE_CONTROL, SCR_REDUMP_DOWNLOAD, SCR_RESULT, SCR_GAMES, SCR_GAME_FILTER, SCR_GAME_DETAIL, SCR_GAME_RENAME,
+       SCR_REMOTE_CONTROL, SCR_REDUMP_DOWNLOAD, SCR_GAMES, SCR_GAME_FILTER, SCR_GAME_DETAIL, SCR_GAME_RENAME,
        SCR_GAME_CHECK };
 static const char *const SCR_NAMES[] = {"home", "settings", "drive_settings", "filename", "webhooks", "webhook_headers", "about", "audit_log",
-                                        "remote_control", "redump_download", "result", "games", "game_filter", "game_detail",
+                                        "remote_control", "redump_download", "games", "game_filter", "game_detail",
                                         "game_rename", "game_check"};
 #define HINTS 8
 struct UiState {
@@ -3623,7 +3616,7 @@ static int ui_req_route(int me, int card)
 	for (int s = t; s >= 0; s = scr_parent(s)) if (scr_parent(s) == me) return s;
 	return RR_BACK;
 }
-// A dialog or a screen that is not left by a request (the result, the Redump download): anything
+// A dialog or a screen that is not left by a request (the Redump download): anything
 // but a button is answered at once with what is in the way.
 static void ui_req_refuse(const char *why)
 {
@@ -7585,13 +7578,9 @@ static void home_draw(const int *list, int nc, int sel)
 }
 
 // Home screen: a card per drive. Up/down picks a card; left/right its destination; X, square and
-// triangle act on it. Returns 1 = rip the disc in g_card's drive, 2 = rip a freshly inserted disc,
-// 3 = repair, 0 = exit.
-static volatile int g_insert_pending = 0;   // a disc was inserted on the result screen (auto-rip off)
+// triangle act on it; rips, repairs and checks run on their cards from here. Returns 0 = exit.
 static int home_screen()
 {
-	if (g_insert_pending) g_cards[g_card].inserted = 1;   // treat it as freshly inserted: identify (and report) it
-	g_insert_pending = 0;
 	g_redraw = 2;
 	pad_pressed();   // swallow buttons still held from a previous screen
 	static int sel = 0;
@@ -7791,17 +7780,6 @@ static int home_screen()
 }
 
 // ---------------------------------------------------------------- one disc
-// The same summary for the own result screen: coloured lines
-static void res_add(uint32_t col, const char *fmt, ...)
-{
-	if (g_nres >= 8) return;
-	va_list ap;
-	va_start(ap, fmt);
-	vsnprintf(g_res[g_nres].text, sizeof(g_res[g_nres].text), fmt, ap);
-	va_end(ap);
-	g_res[g_nres++].col = col;
-}
-
 // Returns 1 when the disc was ripped successfully. `autorip` skips the confirmation.
 // Opens the drive, unlocks raw reads, reads the TOC and identifies the disc (g_serial, g_name, g_base).
 // Leaves g_fd open on success (returns 0). On failure g_fd is closed and *err/*code describe why;
@@ -9646,22 +9624,7 @@ static int rip_disc_inner(int fresh, int autorip)
 	     g_badsect, g_recovered, g_secure, g_unstable);
 	snprintf(msg, sizeof(msg), T(STR_DONE),
 	         g_base, lcline, g_readerrs);
-	// result screen
-	g_nres = 0;
-	snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", name, g_serial[0] ? g_serial : T(STR_UNKNOWN));
-	snprintf(g_res_path, sizeof(g_res_path), "%s.bin", g_base);
-	if (rdinfo[0]) res_add(g_rd_result == 1 ? 0x7CE0A0 : g_rd_result == 0 ? 0xFF8A80 : 0xA8B0C8, "%s", rdinfo);
-	if (lcinfo[0]) res_add(0xE8E8F0, "%s", lcinfo);
-	if (g_secure) res_add(g_unstable ? 0xF0C060 : 0xA8B0C8, T(STR_VERIFY_RESULT), g_secure, g_unstable);
-	if (g_nsuspect && g_confirmed == g_nsuspect) res_add(0x7CE0A0, T(STR_FIXED_ALL_CONFIRMED), g_nsuspect);
-	else if (g_nsuspect) res_add(0xF0C060, T(STR_CONFIRMED), g_nsuspect, g_confirmed);
-	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
-	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);
-	{
-		char d[24];
-		fmt_dur(d, sizeof(d), (long)(time(NULL) - g_rip_t0));
-		res_add(0xA8B0C8, T(STR_TOTAL_TIME), d);
-	}
+	snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", name, g_serial[0] ? g_serial : T(STR_UNKNOWN));   // for the rip's log
 	write_riplog();
 	logf("done: %s errs=%u", g_base, g_readerrs);
 	snprintf(g_done_msg, sizeof(g_done_msg), "%s", msg);
@@ -10517,19 +10480,7 @@ static int repair_disc_inner()
 		vf_close(g_out);
 		sys_storage_close(g_fd);
 		if (g_use == SRC_BD) lv1_storage_unpatch();
-		g_nres = 0;
 		snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", g_name, g_serial);
-		snprintf(g_res_path, sizeof(g_res_path), "%s.bin", g_base);
-		const char *rd = strstr(buf, "redump=");
-		if (rd) {   // "redump=verified Alundra (Europe)" -> the same line as after a rip
-			char code[16] = "", name[RD_NAME] = "";
-			sscanf(rd + 7, "%15[^ \n] %159[^\n]", code, name);
-			if (!strcmp(code, "verified")) res_add(0x7CE0A0, T(STR_RD_VERIFIED), name);
-			else if (!strcmp(code, "no_match")) res_add(0xFF8A80, "%s", T(STR_RD_NOMATCH));
-			else if (!strcmp(code, "not_found")) res_add(0xA8B0C8, "%s", T(STR_RD_NOTFOUND));
-			else if (!strcmp(code, "unchecked")) res_add(0xA8B0C8, "%s", T(STR_RD_UNCHECKED));
-		}
-		res_add(0x7CE0A0, "%s", T(STR_NOTHING_TO_REPAIR));
 		logf("repair %s: nothing to repair", g_base);
 		snprintf(g_state_title, sizeof(g_state_title), "%s", g_name);
 		snprintf(g_state_serial, sizeof(g_state_serial), "%s", g_serial);
@@ -10608,14 +10559,8 @@ static int repair_disc_inner()
 	for (int t = 0; t < g_ntracks; t++) md5_hex(g_track_md5bin[t], g_track_md5[t]);   // fresh when patched
 	char rdinfo[RD_NAME + 80] = "";
 	if (g_redump != RD_OFF) { redump_verify(rdinfo, sizeof(rdinfo)); audit_card_redump(cur_card()); }
-	// results, the .md5 file and the log as after a rip
-	g_nres = 0;
+	// the .md5 file and the log as after a rip
 	snprintf(g_res_title, sizeof(g_res_title), "%s  ·  %s", g_name, g_serial);
-	snprintf(g_res_path, sizeof(g_res_path), "%s.bin", g_base);
-	if (rdinfo[0]) res_add(g_rd_result == 1 ? 0x7CE0A0 : g_rd_result == 0 ? 0xFF8A80 : 0xA8B0C8, "%s", rdinfo);
-	res_add(0xE8E8F0, T(STR_REPAIRED), g_recovered + g_changed, g_pass2_total);
-	if (g_badsect) res_add(0xFF8A80, T(STR_BAD_SECTORS), g_badsect);
-	res_add(g_readerrs ? 0xFF8A80 : 0xA8B0C8, T(STR_UNREADABLE_N), g_readerrs);
 	{
 		char mpath[340];
 		own_adopt(g_base, ".bin");
@@ -10732,61 +10677,6 @@ static int own_dialog(const char *msg, int yesno)
 	return a;
 }
 
-// Own result screen after a rip (instead of the system dialog). Returns 0 for O or a new disc:
-// the start screen then identifies it (and rips it when "rip immediately" is on and it is not
-// ripped to this destination yet).
-static void eject_disc();
-static int result_screen()
-{
-	int ejected = !disc_present;   // from the system's disc callback: is the disc still in the drive?
-	disc_inserted = 0;
-	pad_pressed();
-	g_redraw = 2;
-	while (!exit_requested) {
-		if (g_redraw > 0) {
-			g_redraw = 0;
-			draw_backdrop();
-			int lb = ui_line(UI_BODY), ls = ui_line(UI_SMALL);
-			int y = ui_h() / 10 + ui_line(UI_TITLE) + lb;
-			ui_text(UI_TITLE, ui_w() / 2, y, 0x7CE0A0, T(STR_RES_DONE), UI_CENTER);
-			y += ui_line(UI_TITLE) + lb / 2;
-			ui_text(UI_BODY, ui_w() / 2, y, 0xFFFFFF, g_res_title, UI_CENTER);
-			y += lb + ls / 2;
-			ui_text(UI_SMALL, ui_w() / 2, y, 0x8890A8, g_res_path, UI_CENTER);
-			y += ls * 2;
-			for (int i = 0; i < g_nres; i++) {
-				ui_text(UI_BODY, ui_w() / 2, y, g_res[i].col, g_res[i].text, UI_CENTER);
-				y += lb * 13 / 10;
-			}
-			y += lb / 2;
-			if (g_autostart)   // only then does a new disc start a rip from here
-				ui_text(UI_SMALL, ui_w() / 2, y, 0xA8B0C8, T(ejected ? STR_RES_NEXT : STR_RES_NEXT_NOEJECT), UI_CENTER);
-			if (ejected) {
-				const char *b[] = {"circle"};
-				const char *l[] = {T(STR_HINT_BACK)};
-				hint_bar(b, l, 1);
-			} else {   // the disc is still in the drive: offer to eject it
-				const char *b[] = {"triangle", "circle"};
-				const char *l[] = {T(STR_HINT_EJECT), T(STR_HINT_BACK)};
-				hint_bar(b, l, 2);
-			}
-			g_drawn = 2;
-			g_backdrop_shown = 0;
-		}
-		ui_at(SCR_RESULT);
-		flip_frame();
-		if (disc_inserted) {   // always via the home screen: it identifies the disc, rips it when
-			g_insert_pending = 1;  // "rip immediately" is on and it is not ripped here yet, else waits
-			return 0;
-		}
-		int p = pad_pressed();
-		ui_req_refuse("The rip's result is shown: press_button circle goes back to the drives.");
-		if ((p & B_TRIANGLE) && !ejected) { eject_disc(); ejected = 1; disc_inserted = 0; g_redraw = 2; }
-		if (p & B_CIRCLE) return 0;
-	}
-	return 0;
-}
-
 // The app's locks (the UI tests create them too).
 static void locks_init()
 {
@@ -10893,16 +10783,7 @@ int main(int argc, char *argv[])
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	webman_unmount();   // a game image webMAN mounted earlier would hide the internal drive's disc
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
-	while (!exit_requested) {
-		int a = home_screen();   // rips run on their cards, from the home screen
-		if (exit_requested || a == 0) break;
-		if (a == 3) {
-			repair_disc();
-			result_screen();
-			g_disc_state = DISC_NONE;
-			g_cards[g_card].tried = 0;   // identify it again (the log changed)
-		}
-	}
+	if (!exit_requested) home_screen();   // rips run on their cards, from the home screen; it returns to exit
 	// cancel what still rips and wait for it: the files are cleaned up and lv1 unpatched
 	for (int c = 0; c < NCARDS; c++) if (g_cards[c].job) { OnCard o(c); g_abort = 1; }
 	for (int c = 0; c < NCARDS; c++) while (g_cards[c].job) usleep(50 * 1000);

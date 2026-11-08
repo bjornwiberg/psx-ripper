@@ -486,7 +486,6 @@ Refusals:
 | `audit_log` | The audit log |
 | `remote_control` | The Remote control menu |
 | `redump_download` | Downloading the local Redump copy |
-| `result` | The result screen after a rip |
 | `games` | The game list |
 | `game_filter` | The game list's filter panel |
 | `game_detail` | A game's details |

@@ -3953,6 +3953,18 @@ int main()
 		if (missing) g_fail += missing; else printf("ok   every text in both languages\n");
 	}
 
+	{   // the old result screen is gone (it could not be reached: the drives' tabs show each result):
+		// no screen name for it and none of its texts
+		int left = 0;
+		for (const char *nm : SCR_NAMES) if (!strcmp(nm, "result")) { printf("FAIL the screen name \"result\" is still there\n"); left++; }
+		static const char *const gone[] = {"Done!", "Klart!", "Time: %s", "Tid: %s", "Unreadable sectors: %u", "Oläsbara sektorer: %u",
+		                                   "No sectors to repair: the previous rip is complete.", "Fixed sectors: %u, all confirmed"};
+		for (int i = 0; i < STR_COUNT; i++)
+			for (const char *g : gone)
+				if (!strcmp(T_en((StrId)i), g) || !strcmp(T_sv((StrId)i), g)) { printf("FAIL the result screen's text \"%s\" is still there\n", g); left++; }
+		if (left) g_fail += left; else printf("ok   the result screen is gone, with its texts\n");
+	}
+
 	// three drives, nothing ripping: the three kinds of earlier rip
 	reset_all(); usb(0, 0); usb(1, 1);
 	disc(0, "Motorhead", "", "SLUS_007.17", 647); ripped(0, 0, 277);
