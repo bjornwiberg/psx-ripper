@@ -169,10 +169,11 @@ if (typeof document === "undefined") {
     // the options that can be seen: not those in a closed "more on this page"
     const options = () => [...list.querySelectorAll("[role=option]")].filter((o) => o.checkVisibility());
     const current = () => document.getElementById(q.getAttribute("aria-activedescendant"));
-    const setActive = (o) => {
-      current()?.setAttribute("aria-selected", "false");
+    const setActive = (o, scroll = true) => {
+      list.querySelectorAll("[aria-selected=true]").forEach((x) => x.setAttribute("aria-selected", "false"));
       o.setAttribute("aria-selected", "true");
       q.setAttribute("aria-activedescendant", o.id);
+      if (!scroll) return;
       // keep it in view by scrolling the list only, never the page
       const r = o.getBoundingClientRect();
       const lr = list.getBoundingClientRect();
@@ -322,6 +323,11 @@ if (typeof document === "undefined") {
       }
     });
     list.addEventListener("click", (e) => pick(e.target.closest("[role=option]")));
+    // the pointer and the arrow keys move one and the same active result
+    list.addEventListener("mousemove", (e) => {
+      const o = e.target.closest("[role=option]");
+      if (o && o !== current()) setActive(o, false);
+    });
   }
 
   // ---------------------------------------------------------------- "On this page"

@@ -477,16 +477,16 @@ html:has(.search-dlg[open]) { overflow: hidden; }
 .r-group { padding: 0.4rem 0; border-bottom: 1px solid var(--rule); }
 .r-group:last-child { border-bottom: 0; }
 .search-list ul { list-style: none; margin: 0; padding: 0; }
-/* each result is at least 44 px high (WCAG 2.5.5); the active one (↑ ↓) and the one under the
-   pointer get the selection colour and an amber bar, so colour is not the only cue */
+/* each result is at least 44 px high (WCAG 2.5.5); the active one (moved by ↑ ↓ and by the
+   pointer, one state) gets the selection colour and an amber bar, so colour is not the only cue */
 .search-list [role="option"] {
   display: block; min-height: 44px; padding: 0.5rem 0.75rem 0.5rem 2.6rem;
   border-left: 3px solid transparent; cursor: pointer;
 }
-.search-list [role="option"]:hover, .search-list [aria-selected="true"] {
+.search-list [aria-selected="true"] {
   background: var(--select); border-left-color: var(--amber);
 }
-.search-list [role="option"]:hover *, .search-list [aria-selected="true"] * { color: var(--ink); }
+.search-list [aria-selected="true"] * { color: var(--ink); }
 .r-page { position: relative; }
 .r-icon { position: absolute; left: 0.75rem; top: 0.7rem; color: var(--dim); }
 .r-icon svg { width: 1.1rem; height: 1.1rem; display: block; }
@@ -500,7 +500,7 @@ html:has(.search-dlg[open]) { overflow: hidden; }
 /* a match: a highlighter box, amber with dark text (10:1), never underlined, so it cannot be
    taken for a link; the box shape is the cue, not the colour alone. It stays the same in the
    active row. */
-.search-list mark, .search-list [role="option"]:hover mark, .search-list [aria-selected="true"] mark {
+.search-list mark, .search-list [aria-selected="true"] mark {
   padding: 0 0.12em; border-radius: 2px; background: var(--amber); color: #0b0e24;
   text-decoration: none; -webkit-box-decoration-break: clone; box-decoration-break: clone;
 }
