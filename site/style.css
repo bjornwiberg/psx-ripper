@@ -23,8 +23,9 @@
   --square: #f3a0dc;
   --sans: "DejaVu Sans", "Bitstream Vera Sans", Verdana, "Segoe UI", sans-serif;
   --mono: "DejaVu Sans Mono", "Bitstream Vera Sans Mono", Menlo, Consolas, monospace;
-  --measure: 37rem;    /* at most about 80 characters a line (WCAG 1.4.8) */
-  --wide: 62rem;
+  --measure: 80ch;    /* at most about 80 characters a line (WCAG 1.4.8) */
+  --wide: 64rem;
+  --head-h: 0px;      /* the sticky header's height, set below and by site.js; 0 when not sticky */
   color-scheme: dark;
 }
 
@@ -34,6 +35,11 @@ html {
   background: var(--navy-bottom);
   -webkit-text-size-adjust: 100%;
 }
+/* an anchored heading or a focused element never ends up under the sticky header (WCAG 2.4.11,
+   2.4.12). On the page's own elements, not on the header's: focusing the search field must not
+   scroll the page. */
+main *, .foot * { scroll-margin-top: calc(var(--head-h) + 0.75rem); }
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
@@ -72,12 +78,16 @@ img { max-width: 100%; height: auto; display: block; }
 
 /* ------------------------------------------------------------------ header: the drive tabs */
 
+/* The header bar spans the window; its content keeps the shared width. It stays at the top while
+   the page scrolls (see "sticky" below), so it has a solid background of the gradient's top. */
+.bar { position: relative; z-index: 5; background: var(--navy-top); }
 .top {
-  max-width: var(--wide);
+    max-width: var(--wide);
   margin: 0 auto;
-  padding: 1.1rem 1rem 0;
-  display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem 1.5rem;
+  padding: 0.7rem 1rem 0;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem 1.5rem;
 }
+.menu { display: contents; }   /* the tabs and the search button are items of the header row */
 .brand {
   display: inline-flex; align-items: center; min-height: 44px;
   color: var(--ink); text-decoration: none; font-weight: 700; letter-spacing: 0.01em;
@@ -213,8 +223,7 @@ img { max-width: 100%; height: auto; display: block; }
   display: grid; grid-template-columns: 11rem 1fr; gap: 0.2rem 1.5rem; align-items: center;
   padding: 0.2rem 0; border-bottom: 1px solid #262b55;
 }
-.doclist a { color: var(--ink); text-decoration: none; display: inline-flex; align-items: center; min-height: 44px; }
-.doclist a:hover { text-decoration: underline; }
+.doclist a { display: inline-flex; align-items: center; min-height: 44px; }
 .doclist span { color: var(--dim); font-size: 0.92rem; }
 
 /* ------------------------------------------------------------------ docs pages */
@@ -233,11 +242,13 @@ img { max-width: 100%; height: auto; display: block; }
 }
 .prose h3 { margin: 2rem 0 0.6rem; color: var(--ink); font-size: 1.1rem; line-height: 1.35; }
 .prose h4 { margin: 1.5rem 0 0.5rem; color: var(--ink); font-size: 1rem; }
-.prose h2 a, .prose h3 a { color: inherit; }
+.prose h2 a, .prose h3 a { color: var(--link); }
 .prose p, .prose ul, .prose ol { margin: 0 0 0.9rem; }
 .prose li { margin-bottom: 0.3rem; }
-/* "On this page": a compact list in columns, read top to bottom, column by column. Each row is
-   32 px: at least 24 by 24 with no overlap (WCAG 2.5.8 AA), not 44 (2.5.5 AAA; see the statement) */
+/* "On this page": on a narrow screen a compact list in columns under the summary, read top to
+   bottom, column by column; on a wide one a column on the right that stays in view (below). Each
+   row is 32 px: at least 24 by 24 with no overlap (WCAG 2.5.8 AA), not 44 (2.5.5 AAA; see the
+   statement) */
 .toc { margin: 0 0 1.6rem; }
 .prose .toc-h {
   margin: 0 0 0.3rem; padding: 0; border: 0; color: var(--dim); font-size: 0.9rem; font-weight: 400;
@@ -246,8 +257,31 @@ img { max-width: 100%; height: auto; display: block; }
   max-width: none; margin: 0; padding: 0; list-style: none;
   columns: 3 15rem; column-gap: 2rem;
 }
+.prose .toc ul ul { columns: auto; padding-left: 1rem; }
 .prose .toc li { margin: 0; break-inside: avoid; }
 .prose .toc a { display: inline-flex; align-items: center; min-height: 32px; min-width: 24px; }
+/* the section being read (site.js): white, with a bar beside it, so colour is not the only cue */
+.prose .toc a[aria-current="true"] { color: var(--ink); box-shadow: inset 3px 0 0 var(--amber); }
+.prose .toc a[aria-current="true"] { padding-left: 0.6rem; }
+
+@media (min-width: 61rem) {
+  .has-toc {
+    display: grid; grid-template-columns: minmax(0, 1fr) 13rem; column-gap: 2.5rem;
+    grid-template-areas: "head toc" "body toc"; grid-template-rows: auto 1fr;
+  }
+  .doc-head { grid-area: head; }
+  .doc-body { grid-area: body; min-width: 0; }
+  .has-toc > .toc {
+    grid-area: toc; align-self: start; position: sticky; top: calc(var(--head-h) + 1rem);
+    max-height: calc(100vh - var(--head-h) - 2rem); overflow-y: auto;
+    margin: 0.4rem 0 0; padding: 0.4rem 0.5rem;   /* room for the focus ring inside the box */
+    font-size: 0.86rem; line-height: 1.35;
+  }
+  .prose .has-toc > .toc ul, .prose.has-toc > .toc ul { columns: auto; }
+  .prose.has-toc > .toc a { display: flex; text-decoration: none; padding: 0.15rem 0 0.15rem 0.6rem; box-shadow: inset 1px 0 0 var(--rule); }
+  .prose.has-toc > .toc a:hover { color: var(--ink); text-decoration: underline; }
+  .prose.has-toc > .toc a[aria-current="true"] { box-shadow: inset 3px 0 0 var(--amber); }
+}
 .prose li > ul, .prose li > ol { margin: 0.3rem 0 0; }
 .prose strong { color: var(--ink); }
 .prose blockquote {
@@ -279,21 +313,32 @@ pre { position: relative; }   /* keeps a hidden text inside the scrolling box, n
 .prose td:first-child { color: var(--ink); white-space: nowrap; }
 
 .changelog h2 a {
-  color: var(--label); display: inline-flex; align-items: center; min-height: 44px; min-width: 44px;
+  display: inline-flex; align-items: center; min-height: 44px; min-width: 44px;
 }
-.changelog h3 { color: var(--dim); font-weight: 400; font-size: 0.95rem; margin-top: 1rem; }
-.changelog li a { color: var(--dim); }
+/* each version is a block: the version and date, then release-please's categories as sub-headings,
+   each with a small marker whose shape differs by category (the text names it; the marker only
+   helps to scan, so colour is never the only cue) */
+.changelog .release { margin: 0 0 2.2rem; }
+.changelog h3.cat {
+  display: flex; align-items: center; gap: 0.55rem; margin: 1.4rem 0 0.5rem;
+  color: var(--ink); font-size: 1.1rem; font-weight: 700;
+}
+.cat::before { content: ""; flex: none; width: 0.7rem; height: 0.7rem; background: var(--dim); }
+.cat-features::before { background: var(--ok); border-radius: 50%; }
+.cat-bug-fixes::before { background: var(--circle); clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+.cat-documentation::before { background: var(--label); }
+.cat-performance-improvements::before { background: var(--amber); transform: rotate(45deg) scale(0.85); }
 
 .edit { margin: 2.5rem 0 0; font-size: 0.86rem; color: var(--dim); }
-.edit a { color: var(--dim); display: inline-flex; align-items: center; min-height: 44px; }
+.edit a { display: inline-flex; align-items: center; min-height: 44px; }
 
 /* the plain-language summary under a page's title (WCAG 3.1.5) */
 .prose .summary {
   margin: 0 0 1.8rem; padding: 0.7rem 1rem; border-left: 3px solid var(--label);
   background: rgb(255 255 255 / 0.04); color: var(--text);
 }
-/* a glossary word's first use: a dotted underline, the text's own colour */
-a.gl { color: inherit; text-decoration-style: dotted; text-decoration-thickness: 1px; }
+/* every link in the text has the one link colour; a glossary link is told apart by its dotted line */
+a.gl { text-decoration-style: dotted; text-decoration-thickness: 1px; }
 a.gl:hover { color: var(--ink); text-decoration-style: solid; }
 .glossary dt { margin: 1.4rem 0 0.2rem; color: var(--ink); font-weight: 700; }
 .glossary dd { margin: 0; }
@@ -306,7 +351,6 @@ a.gl:hover { color: var(--ink); text-decoration-style: solid; }
   color: var(--dim); font-size: 0.84rem;
 }
 .foot p { margin: 0 0 0.5rem; max-width: 46rem; }
-.foot a { color: var(--dim); }
 .footnav { list-style: none; margin: 0 0 0.5rem; padding: 0; display: flex; flex-wrap: wrap; gap: 0 1.5rem; }
 .footnav a { display: inline-flex; align-items: center; min-height: 44px; }
 
@@ -361,10 +405,150 @@ a:is([href^="http://"], [href^="https://"]):not(.btn, .gh, [href*="/download/"])
 .gh:hover { color: var(--ink); }
 .gh svg { width: 1.45rem; height: 1.45rem; }
 
+/* Without JavaScript the tabs are always shown. On a phone: brand and Octocat on one row, the
+   tabs under, wrapped over as many rows as they need. */
 @media (max-width: 760px) {
-  .top nav { order: 3; flex-basis: 100%; }   /* on a phone: brand and Octocat on one row, the tabs under */
-  .gh { order: 2; }
-  .top::after { order: 4; }
+  html:not(.js) .top nav { order: 3; flex-basis: 100%; }
+  html:not(.js) .gh { order: 2; }
+  html:not(.js) .top::after { order: 4; }
+}
+
+/* ------------------------------------------------------------------ search (site.js, lunr) */
+
+/* The header's search: on a wide screen it looks like a field (it opens the search dialog); on a
+   narrower one it is a 44 by 44 magnifier button named "Search". Its border has 3:1 or more
+   against the header and the field (WCAG 1.4.11), its text 7:1 (WCAG 1.4.6). */
+.search-open {
+  display: inline-flex; align-items: center; gap: 0.55rem; flex: 1 1 11rem; max-width: 16rem;
+  min-height: 44px; margin: 0; padding: 0 0.8rem;
+  border: 1px solid #8b90b8; border-radius: 0; background: var(--panel); color: var(--dim);
+  font: inherit; font-size: 0.9rem; text-align: left; cursor: text;
+}
+.search-open:hover { color: var(--ink); border-color: var(--ink); }
+.search-open svg, .search-box > svg { width: 1rem; height: 1rem; flex: none; }
+
+/* the search dialog: a wide panel at the top right, over a dimmed page that does not scroll */
+html:has(.search-dlg[open]) { overflow: hidden; }
+.search-dlg {
+  position: fixed; inset: 0.5rem max(1rem, calc((100vw - var(--wide)) / 2 + 1rem)) auto auto;
+  width: min(48rem, calc(100vw - 2rem)); max-height: calc(100vh - 1rem); margin: 0; padding: 0;
+  border: 1px solid #8b90b8; background: var(--panel); color: var(--text);
+  box-shadow: 0 1.5rem 4rem -1rem rgb(0 0 0 / 0.8);
+}
+.search-dlg[open] { display: flex; flex-direction: column; }
+.search-dlg::backdrop { background: rgb(5 6 18 / 0.72); }
+.search-box {
+  display: flex; align-items: center; gap: 0.6rem; padding: 0.5rem 0.5rem 0.5rem 1rem;
+  border-bottom: 1px solid var(--rule); color: var(--dim);
+}
+.search-box input {
+  flex: 1; min-width: 0; min-height: 44px; margin: 0; padding: 0 0.4rem;
+  border: 0; background: transparent; color: var(--ink); font: inherit; font-size: 1.05rem;
+}
+.search-box input::placeholder { color: var(--dim); opacity: 1; }
+.search-box input::-webkit-search-cancel-button { filter: invert(1); }
+.search-close {
+  display: inline-grid; place-items: center; width: 44px; height: 44px; flex: none; margin: 0;
+  padding: 0; border: 1px solid var(--rule); border-radius: 0; background: none; color: var(--text);
+  cursor: pointer;
+}
+.search-close:hover { color: var(--ink); border-color: #8b90b8; }
+.search-close svg { width: 1.1rem; height: 1.1rem; }
+.search-status { margin: 0; padding: 0.6rem 1rem; color: var(--dim); font-size: 0.86rem; }
+.search-status:empty { display: none; }
+/* the results scroll inside the dialog, never the page behind it */
+.search-list {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding: 0 0.6rem 0.6rem; border-top: 1px solid var(--rule);
+}
+.r-group { padding: 0.4rem 0; border-bottom: 1px solid var(--rule); }
+.r-group:last-child { border-bottom: 0; }
+.search-list ul { list-style: none; margin: 0; padding: 0; }
+/* each result is at least 44 px high (WCAG 2.5.5); the active one (↑ ↓) and the one under the
+   pointer get the selection colour and an amber bar, so colour is not the only cue */
+.search-list [role="option"] {
+  display: block; min-height: 44px; padding: 0.5rem 0.75rem 0.5rem 2.6rem;
+  border-left: 3px solid transparent; cursor: pointer;
+}
+.search-list [role="option"]:hover, .search-list [aria-selected="true"] {
+  background: var(--select); border-left-color: var(--amber);
+}
+.search-list [role="option"]:hover *, .search-list [aria-selected="true"] * { color: var(--ink); }
+.r-page { position: relative; }
+.r-icon { position: absolute; left: 0.75rem; top: 0.7rem; color: var(--dim); }
+.r-icon svg { width: 1.1rem; height: 1.1rem; display: block; }
+.r-title { display: block; color: var(--link); font-weight: 600; }
+.r-page .r-title { color: var(--ink); font-weight: 700; font-size: 1.02rem; }
+.r-ex { display: block; margin-top: 0.15rem; color: var(--text); font-size: 0.86rem; line-height: 1.5; }
+/* a match: white, bold and underlined, so colour is not the only cue */
+.search-list mark {
+  background: none; color: var(--ink); font-weight: 700;
+  text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 0.15em;
+}
+.search-list summary {
+  display: flex; align-items: center; min-height: 44px; margin-left: 2.6rem; padding: 0 0.5rem;
+  color: var(--link); font-size: 0.86rem; cursor: pointer; width: fit-content;
+}
+.search-list summary:hover { color: var(--ink); text-decoration: underline; }
+.search-list :focus-visible { outline-offset: -3px; }   /* inside the scrolling box */
+
+/* ------------------------------------------------------------------ the menu button (site.js) */
+
+.menu-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.45rem;
+  min-width: 44px; min-height: 44px; margin: 0; padding: 0 0.8rem;
+  border: 0; border-radius: 0; background: var(--tab-idle); color: var(--ink);
+  font: inherit; font-size: 0.9rem; cursor: pointer;
+}
+.menu-btn:hover { background: #4a5084; }
+.menu-btn[aria-expanded="true"] { background: var(--tab); box-shadow: inset 0 -3px 0 var(--ink); }
+.menu-btn svg { width: 1.2rem; height: 1.2rem; }
+
+/* Wide: one row. The brand and the tabs on the left, the search and the Octocat on the right. */
+@media (min-width: 63rem) {
+  .menu-btn { display: none; }
+  .top { column-gap: 1rem; }
+  .top nav { margin-right: auto; }
+  .tabs { gap: 0.3rem; }
+  .tabs a { padding: 0.3rem 0.55rem; }
+  .gh { margin-left: 0; }
+}
+/* Narrower, with JavaScript: the tabs no longer fit on the header's row, so they fold into the
+   Menu button; the open menu is a column of the same links under the row. The search becomes a
+   magnifier button. */
+@media (max-width: 62.99rem) {
+  html.js .top { column-gap: 0.75rem; }
+  html.js .brand { margin-right: auto; }
+  html.js .gh { margin-left: 0; }
+  html.js .top::after { order: 5; }
+  html.js .top nav { order: 6; flex-basis: 100%; }
+  html.js .menu-btn[aria-expanded="false"] + .menu nav { display: none; }
+  html.js .tabs { flex-direction: column; gap: 0.3rem; padding-bottom: 0.7rem; }
+  html.js .tabs a { justify-content: flex-start; font-size: 0.9rem; padding: 0.3rem 0.8rem; }
+  .search-open { flex: none; min-width: 44px; justify-content: center; padding: 0; }
+  .search-open svg { width: 1.2rem; height: 1.2rem; }
+  .search-open .search-label {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+  }
+}
+/* Too narrow for the magnifier beside the Menu button: the search moves into the menu, under the
+   links, as a full-width field. */
+@media (max-width: 29.99rem) {
+  html.js .menu-btn[aria-expanded="false"] + .menu .search-open { display: none; }
+  html.js .search-open { order: 7; flex-basis: 100%; justify-content: flex-start; padding: 0 0.8rem; margin-bottom: 0.9rem; }
+  html.js .search-open .search-label { position: static; width: auto; height: auto; clip-path: none; }
+}
+
+/* The header stays at the top while the page scrolls, where there is room for it: a window at
+   least 30rem high, and a header of one row (with JavaScript, or wide enough without). */
+@media (min-height: 30rem) {
+  html.js .bar { position: sticky; top: 0; }
+  html.js { --head-h: 4.4rem; }   /* site.js measures the real height */
+  html.js .bar:has(.menu-btn[aria-expanded="true"]) { max-height: 100vh; overflow-y: auto; }
+}
+@media (min-height: 30rem) and (min-width: 63rem) {
+  .bar { position: sticky; top: 0; }
+  :root { --head-h: 4.4rem; }
 }
 
 /* START, SELECT and the shoulder buttons in running text: a pill as on the console */

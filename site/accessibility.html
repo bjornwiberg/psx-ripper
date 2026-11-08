@@ -1,4 +1,3 @@
-<article class="prose">
 <h1>Accessibility statement</h1>
 <p class="summary"><strong>In short:</strong> this website aims to be usable by everyone, with a
   keyboard, a screen reader, zoomed in or on a small screen. Most of it meets the strictest level
@@ -50,7 +49,28 @@
   <li>The pages work at a width of 320 CSS pixels (400&nbsp;% zoom) without sideways scrolling,
     and with larger line, letter, word and paragraph spacing. Nothing on the site moves or
     flashes.</li>
-  <li>Lines of text are at most about 80 characters long, with a line height of 1.6.</li>
+  <li>Text reflows: when the window is made narrower or the page is zoomed, lines get shorter and
+    nothing has to be scrolled sideways (WCAG 1.4.8, met through reflow, technique G204). At full
+    width a line of running text holds up to about 100 characters, with a line height of
+    1.6.</li>
+  <li>The header, with the tabs, the search and the GitHub link, stays at the top of the window
+    while the page scrolls, where the window is at least 30rem (480 CSS pixels) high. It never
+    covers the element that has keyboard focus or a heading reached by a link (WCAG 2.4.11 and
+    2.4.12). In a lower window it scrolls away with the page.</li>
+  <li>Where the tabs do not fit on one row, they fold into a <strong>Menu</strong> button. It is
+    a real button that says whether the menu is open, the menu holds the same links with the
+    current page marked, and Escape closes it and puts focus back on the button. Without
+    JavaScript all the tabs are shown instead.</li>
+  <li>Docs pages, the changelog and this page have an &ldquo;On this page&rdquo; list of their
+    sections: a column beside the text on a wide screen, which marks the section you are reading
+    (for screen readers too), and a list under the summary on a narrow one.</li>
+  <li><strong>Search</strong> opens in a dialog. The field keeps focus while the arrow keys move
+    through the results, which are grouped by page; Enter opens a result, Escape first empties
+    the field and then closes the dialog, and focus goes back to the Search button. The number of
+    results is announced to screen readers. While the dialog is open the page behind it cannot be
+    reached or scrolled. Matches are shown in bold and underlined, not only in colour. Search runs
+    entirely in your browser with lunr, a search library served from this site: what you type is
+    not sent anywhere, and no third party is involved.</li>
   <li>The current page is marked in the navigation, for screen readers too, and by a bold label
     and a white bar, not only by colour.</li>
   <li>The pad buttons in the text (the cross, circle, triangle and square symbols) are read out as
@@ -76,10 +96,18 @@
     text. <em>Alternative:</em> each screenshot has a text alternative and a caption, and the
     <a href="docs/user-guide.html">user guide</a> describes every screen in text.</li>
   <li><strong>Colours and layout cannot be chosen on the site</strong> (WCAG 1.4.8). The site has
-    one dark colour scheme and no setting of its own for colours or text width. <em>Alternative:</em>
+    one dark colour scheme and no setting of its own for colours or text width; the text width
+    requirement is met through reflow (see above). <em>Alternative:</em>
     the site uses no fixed colours that block your browser&rsquo;s or system&rsquo;s own colour,
     contrast and reading-view settings. The forced-colours (high contrast) modes of Windows and
     other systems have not been tested.</li>
+  <li><strong>Search needs JavaScript.</strong> Without it, the Search button is not shown.
+    <em>Alternative:</em> every page is reachable from the tabs, and each page&rsquo;s sections from
+    its &ldquo;On this page&rdquo; list.</li>
+  <li><strong>The search dialog</strong> is the browser&rsquo;s own modal dialog. Tab moves
+    between the field, the &ldquo;more on this page&rdquo; buttons and the Close button; after the
+    last of them some browsers move focus to their own address bar before coming back. The page
+    behind the dialog cannot be reached while it is open.</li>
   <li><strong>Reading level</strong> (WCAG 3.1.5). The docs pages, most of all &ldquo;How it
     works&rdquo;, MCP and Configuration, explain technical things and need more than a
     lower-secondary reading level. <em>Alternative:</em> a plain-language summary at the top of
@@ -94,9 +122,8 @@
     because it is data, not prose.</li>
   <li><strong>Links in sentences</strong> are as large as the text around them, not 44 by 44
     pixels. WCAG allows this (2.5.5, inline exception).</li>
-  <li><strong>The &ldquo;On this page&rdquo; lists</strong> at the top of the user guide and the
-    MCP page are compact: each link is 32 pixels high. That meets the 24 pixel minimum of WCAG
-    2.5.8 (level AA), but not the 44 pixels of 2.5.5 (level AAA). <em>Alternative:</em> every
+  <li><strong>The &ldquo;On this page&rdquo; lists</strong> are compact: each link is 32 pixels
+    high. That meets the 24 pixel minimum of WCAG 2.5.8 (level AA), but not the 44 pixels of 2.5.5 (level AAA). <em>Alternative:</em> every
     entry is also a heading on the page, so you can reach it with a screen reader&rsquo;s heading
     navigation, or by scrolling.</li>
 </ul>
@@ -126,6 +153,11 @@
   <li>a script that moves through every page with the Tab key and checks the skip link, the
     order, traps, the focus ring and target sizes, and checks 320 pixel width, text spacing and
     line length;</li>
+  <li>a script that moves forwards and backwards through every page at 1280, 768 and 375 pixels
+    wide and checks that the sticky header never covers the focused element, and one that drives
+    the Menu button and the search dialog with the keyboard (the arrow keys, Enter, Escape, Tab,
+    &ldquo;more on this page&rdquo;) at 1280, 768, 375 and 320 pixels, with axe run while each is
+    open;</li>
   <li>a review of the page structure, headings, names, text alternatives and language by
     hand.</li>
 </ul>
@@ -145,4 +177,3 @@
 <p>PSX RiPPER is a private hobby project. It is not a public sector body, so the EU Web
   Accessibility Directive does not apply to it and there is no public enforcement body to turn to.
   Problems are fixed through the contacts above.</p>
-</article>

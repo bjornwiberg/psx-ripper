@@ -11,6 +11,7 @@ the changelog from CHANGELOG.md and the docs from docs/*.md.
 """
 
 import html
+import json
 import posixpath
 import re
 import shutil
@@ -233,13 +234,11 @@ def mark_external(content):
 def scrollables(body):
     """Code blocks and tables can scroll sideways on a narrow screen; a keyboard user reaches them
     with Tab and scrolls them with the arrow keys (WCAG 2.1.1). A table sits in a named region,
-    named after the heading it is under. A list of links to the page's own sections becomes an
-    "On this page" navigation."""
+    named after the heading it is under. A list of nothing but links to the page's own sections
+    is the markdown's own table of contents (for GitHub); the site builds its own from the
+    headings (with_toc), so that list is dropped."""
     body = body.replace("<pre>", '<pre tabindex="0">')
-    # a list of nothing but links to this page's sections is its table of contents
-    body = re.sub(r'<ul>\n((?:<li><a href="#[^"]*">[^<]*</a></li>\n)+)</ul>',
-                  r'<nav class="toc" aria-labelledby="toc-h"><h2 id="toc-h" class="toc-h">On this page</h2>'
-                  r'\n<ul>\n\1</ul></nav>', body)
+    body = re.sub(r'<ul>\n(?:<li><a href="#[^"]*">[^<]*</a></li>\n)+</ul>\n?', "", body)
     out, heading, pos, used = [], "", 0, {}
     for m in re.finditer(r"<h[1-6][^>]*>(.*?)</h[1-6]>|<table>.*?</table>", body, re.S):
         out.append(body[pos:m.start()])
@@ -259,6 +258,36 @@ def scrollables(body):
     return "".join(out)
 
 
+def with_toc(body, classes="prose", h3=True):
+    """Wraps a page's article: its title and "In short" summary, then an "On this page"
+    navigation built from the h2 headings (and the h3s under them, if h3 is true), then the rest.
+    On a wide screen the navigation is a sticky column on the right; on a narrow one it is a
+    compact list under the summary. The DOM order is the same for both, so the reading and
+    focus order never differ from what is shown."""
+    m = re.search(r'<p class="summary">.*?</p>\n?', body, re.S)
+    head, rest = (body[:m.end()], body[m.end():]) if m else ("", body)
+    items = []   # [h2 entry, [h3 entries]]
+    for hm in re.finditer(r'<h([23]) id="([^"]+)"[^>]*>(.*?)</h\1>', rest, re.S):
+        level, hid, inner = hm.groups()
+        text = re.sub(r'<span class="sr-only">.*?</span>', "", inner)
+        text = re.sub(r"<[^>]+>", "", text).strip()
+        link = f'<a href="#{hid}">{text}</a>'
+        if level == "2":
+            items.append([link, []])
+        elif h3 and items:
+            items[-1][1].append(link)
+    if not items:
+        return f'<article class="{classes}">\n{body}\n</article>'
+    lis = []
+    for link, subs in items:
+        sub = ("\n<ul>" + "".join(f"<li>{s}</li>" for s in subs) + "</ul>") if subs else ""
+        lis.append(f"<li>{link}{sub}</li>")
+    nav = ('<nav class="toc" aria-labelledby="toc-h">'
+           '<h2 id="toc-h" class="toc-h">On this page</h2>\n<ul>\n' + "\n".join(lis) + "\n</ul></nav>")
+    return (f'<article class="{classes} has-toc">\n<div class="doc-head">\n{head}</div>\n{nav}\n'
+            f'<div class="doc-body">\n{rest}\n</div>\n</article>')
+
+
 def name_changelog_links(body):
     """The changelog's links are a version, an issue number or a commit hash. A hidden text says
     where each goes, so the link makes sense on its own (WCAG 2.4.9)."""
@@ -268,6 +297,17 @@ def name_changelog_links(body):
                   r'\1<span class="sr-only">GitHub issue or pull request </span>#\2</a>', body)
     return re.sub(r'(<a href="[^"]*/commit/[0-9a-f]+">)([0-9a-f]{7,})</a>',
                   r'\1<span class="sr-only">commit </span>\2</a>', body)
+
+
+def changelog_blocks(body):
+    """Each version of the changelog becomes a block: its heading with the date, then its
+    categories (release-please's "Features", "Bug fixes", "Documentation" and so on) as h3s, each
+    with a class for its marker."""
+    body = re.sub(r'<h3 id="([^"]+)">([^<]+)</h3>',
+                  lambda m: f'<h3 id="{m.group(1)}" class="cat cat-{slugify(m.group(2))}">'
+                            f'{m.group(2)}</h3>', body)
+    parts = re.split(r"(?=<h2\b)", body)
+    return parts[0] + "".join(f'<section class="release">\n{p}</section>\n' for p in parts[1:])
 
 
 GLOSSARY_SKIP = ("a", "code", "pre", "script", "style", "svg", "h1", "h2", "h3", "h4", "h5", "h6",
@@ -345,6 +385,59 @@ def buttonize(content):
     return "".join(out)
 
 
+def ensure_ids(content):
+    """Gives every h2 and h3 an id, so each can be linked to and found by search."""
+    used = set(re.findall(r'\bid="([^"]+)"', content))
+
+    def fix(m):
+        if re.search(r'\bid="', m.group(2)):
+            return m.group(0)
+        hid = base = slugify(m.group(3)) or "section"
+        i = 1
+        while hid in used:
+            hid, i = f"{base}-{i}", i + 1
+        used.add(hid)
+        return f'<h{m.group(1)}{m.group(2)} id="{hid}">{m.group(3)}</h{m.group(1)}>'
+
+    return re.sub(r"<h([23])([^>]*)>(.*?)</h\1>", fix, content, flags=re.S)
+
+
+SYMBOL = {name: ch for ch, (name, _) in GLYPH.items()}
+
+
+def plain(fragment):
+    """The text of an HTML fragment, as one line."""
+    text = html.unescape(re.sub(r"<[^>]+>", " ", fragment))
+    text = re.sub(r"\s+", " ", text).strip()
+    return re.sub(r"\s+([,.;:!?)\]])", r"\1", re.sub(r"([(\[])\s+", r"\1", text))
+
+
+def search_docs(rel, content):
+    """The search index entries of one page, the way MkDocs writes them: one for the page (its
+    text before the first section heading) and one per h2 and h3 section. Only the main area
+    counts: not the header, the footer or "On this page"; and not the texts that only screen
+    readers hear, such as "(glossary)" and "(opens in a new tab)". A pad button counts as its
+    symbol."""
+    m = re.search(r"<main\b[^>]*>(.*)</main>", content, re.S)
+    body = m.group(1) if m else ""
+    body = re.sub(r'<nav class="toc".*?</nav>', "", body, flags=re.S)
+    body = re.sub(r'<span class="sr-only">.*?</span>', "", body, flags=re.S)
+    body = re.sub(r'<span class="g g-btn" role="img" aria-label="(\w+)">.*?</svg></span>',
+                  lambda g: SYMBOL.get(g.group(1), ""), body, flags=re.S)
+    h1 = re.search(r"<h1\b[^>]*>(.*?)</h1>", body, re.S)
+    page_title = plain(h1.group(1)) if h1 else "PSX RiPPER"
+    if h1:
+        body = body[:h1.start()] + body[h1.end():]
+    url = "" if rel == "index.html" else rel
+    parts = re.split(r'(<h[23]\b[^>]*\bid="[^"]+"[^>]*>.*?</h[23]>)', body, flags=re.S)
+    docs = [{"location": url, "title": page_title, "page": page_title, "text": plain(parts[0])}]
+    for i in range(1, len(parts), 2):
+        hm = re.match(r'<h[23]\b[^>]*\bid="([^"]+)"[^>]*>(.*?)</h[23]>', parts[i], re.S)
+        docs.append({"location": f"{url}#{hm.group(1)}", "title": plain(hm.group(2)),
+                     "page": page_title, "text": plain(parts[i + 1])})
+    return docs
+
+
 def main():
     version = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+([-+][\w.]+)?", version):
@@ -358,6 +451,8 @@ def main():
 
     # static files
     shutil.copy2(SITE / "style.css", OUT / "style.css")
+    shutil.copy2(SITE / "site.js", OUT / "site.js")
+    shutil.copytree(SITE / "vendor", OUT / "vendor")
     shutil.copy2(SITE / "CNAME", OUT / "CNAME")
     shutil.copytree(SITE / "img", OUT / "img")
     shutil.copytree(ROOT / "docs" / "images", OUT / "docs" / "images")
@@ -381,7 +476,7 @@ def main():
         title = first_heading(text)
         body = body.replace("</h1>", f'</h1>\n<p class="summary"><strong>In short:</strong> '
                                      f"{html.escape(summary, quote=False)}</p>", 1)
-        body = glossarize(f'<article class="prose">\n{body}\n</article>', "../")
+        body = glossarize(with_toc(body, h3=body.count("<h3") <= 10), "../")
         body += (f'\n<p class="edit"><a href="{REPO}/blob/main/docs/{src}">'
                  f"docs/{src} on GitHub</a></p>")
         pages.append((f"docs/{name}.html", page(
@@ -393,7 +488,7 @@ def main():
     body = name_changelog_links(scrollables(rewrite_links(render_md(text), "", "")))
     body = body.replace("</h1>", '</h1>\n<p class="summary"><strong>In short:</strong> what changed '
                         "in each version of the app, newest first.</p>", 1)
-    body = glossarize(f'<article class="prose changelog">\n{body}\n</article>', "")
+    body = glossarize(with_toc(changelog_blocks(body), "prose changelog"), "")
     pages.append(("changelog.html", page(
         shell, title="Changelog | PSX RiPPER", current="changelog", to_root="", body=body,
         version=version, main_class="doc", description="What changed in each PSX RiPPER release.")))
@@ -424,14 +519,23 @@ def main():
         version=version, main_class="doc",
         description="How accessible the PSX RiPPER website is, what is not yet, and how to report "
                     "a problem.",
-        body=(SITE / "accessibility.html").read_text(encoding="utf-8"))))
+        body=with_toc((SITE / "accessibility.html").read_text(encoding="utf-8")))))
 
+    docs = []
     for rel, content in pages:
         if "{{" in content:
             sys.exit(f"{rel}: a placeholder was not filled: "
                      f"{re.search(r'{{[^}]*}}', content).group(0)}")
-        (OUT / rel).write_text(mark_external(buttonize(content)), encoding="utf-8")
+        content = ensure_ids(mark_external(buttonize(content)))
+        (OUT / rel).write_text(content, encoding="utf-8")
+        if rel != "404.html":
+            docs += search_docs(rel, content)
         print(f"_site/{rel}")
+
+    # the search index, read by site.js (lunr, in a worker) the first time someone searches
+    (OUT / "search_index.json").write_text(
+        json.dumps({"docs": docs}, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    print(f"_site/search_index.json ({len(docs)} entries)")
 
 
 if __name__ == "__main__":

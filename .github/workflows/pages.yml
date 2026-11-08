@@ -1,6 +1,7 @@
-# The project site, psxripper.bjrn.nu. Every push to main builds it (site/build.py) and deploys it
-# to GitHub Pages. The version comes from version.txt and the changelog from CHANGELOG.md, so
-# merging release-please's release pull request publishes the new version without a hand edit.
+# The project site, psxripper.bjrn.nu. Every push to main builds it (site/build.py, which also
+# writes the search index) and deploys it to GitHub Pages. The version comes from version.txt and
+# the changelog from CHANGELOG.md, so merging release-please's release pull request publishes the
+# new version without a hand edit.
 name: Pages
 
 on:
