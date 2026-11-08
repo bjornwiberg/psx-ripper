@@ -771,7 +771,7 @@ by the tools (`show_game`, `redump_download`, `audit_undo`) or by the app itself
 - **Nothing else is reachable.** The app's debug commands are not part of MCP.
 - **Connection limits**, so a slow or stuck client cannot hold the app: at most 4 requests at once
   (one more gets *503, try again*), a request must arrive whole within 10 seconds and be at most
-  16 KB, a client that reads nothing for 10 seconds is dropped, and an answer is at most 512 KB.
+  16 KB, a client that has not taken an answer within 10 seconds is dropped, and an answer is at most 512 KB.
   The web server runs at a low priority: a rip does not slow down because MCP is on.
 
 ## Limits

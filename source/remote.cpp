@@ -88,10 +88,20 @@ int remote_jpeg(unsigned char **jpg, int *len)
 	return 0;
 }
 
+// send that gives up after REMOTE_SEND_SECONDS in all: each wait is cut to the time left, so a client
+// that reads a little now and then (or a kernel that accepts part of it) cannot stretch it
 static int send_all(int s, const void *p, int n)
 {
 	const char *c = (const char *)p;
+	struct timeval t0, now;
+	gettimeofday(&t0, NULL);
+	const long long end = (long long)t0.tv_sec * 1000000 + t0.tv_usec + (long long)REMOTE_SEND_SECONDS * 1000000;
 	while (n > 0) {
+		gettimeofday(&now, NULL);
+		long long left = end - ((long long)now.tv_sec * 1000000 + now.tv_usec);
+		if (left <= 0) return -1;
+		struct timeval tv = {(time_t)(left / 1000000), (suseconds_t)(left % 1000000)};
+		setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 		int r = send(s, c, n, 0);
 		if (r <= 0) return -1;
 		c += r; n -= r;

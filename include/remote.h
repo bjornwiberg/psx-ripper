@@ -9,7 +9,7 @@
 #define REMOTE_READ_SECONDS 10   // a request (headers and body) must have come whole by then
 #endif
 #ifndef REMOTE_SEND_SECONDS
-#define REMOTE_SEND_SECONDS 10   // a client that reads nothing for this long is dropped
+#define REMOTE_SEND_SECONDS 10   // a client that has not taken a send within this long is dropped
 #endif
 #define REMOTE_MAX_CLIENTS 4     // requests served at once; one more gets 503
 #define REMOTE_MAX_STREAMS 3     // remote view streams (/stream), counted apart: open tabs never block the requests
