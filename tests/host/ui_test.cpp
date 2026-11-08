@@ -6,6 +6,7 @@
 // Run: make -C tests/host   (exit status 1 when a check fails)
 #include "host.h"
 #define CFG_PATH "out/psxrip.cfg"   // not the console's path
+#define LOG_PATH "out/psxrip.log"
 #define main psx_main
 #include "../../source/main.cpp"
 #undef main
@@ -13,6 +14,9 @@
 #include "stb_image_write.h"
 #include <vector>
 #include <string>
+#include <functional>
+#include <set>
+#include <pthread.h>
 
 struct Box { int kind, x, y, w, h, extra; std::string text; };
 static std::vector<Box> g_boxes;
@@ -332,28 +336,34 @@ static void game_source_tests()
 		int n = gl_take("usb1");
 		if (n != GL_MAX || !g_gl.more) { printf("FAIL more than %d sets: %d discs, more %d\n", GL_MAX, n, g_gl.more); bad++; }
 	}
-	{   // the config keys round-trip, and wrong values change nothing
-		snprintf(g_games_source, sizeof g_games_source, "all");
+	{   // the game list's source and filter are not settings (M12, M13): an old games_source= or games_filter=
+		// line is accepted and ignored (never a failure), neither is written, and a start shows the hard disk, no filter
+		snprintf(g_games_source, sizeof g_games_source, "usb1");
 		g_games_filter = GameFilter{0, 0, 0, 0};
-		int ok = cfg_apply_line("games_source=usb3") && cfg_apply_line("games_filter=1,2,0,3");
-		int rej = !cfg_apply_line("games_source=usb9") && !cfg_apply_line("games_source=dvd") && !cfg_apply_line("games_filter=3,0,0,0") &&
-		          !cfg_apply_line("games_filter=0,5,0,0") && !cfg_apply_line("games_filter=0,0,3,0") && !cfg_apply_line("games_filter=0,0,0,4") &&
-		          !cfg_apply_line("games_filter=1,2");
+		int old = cfg_apply_line("games_source=usb3") && cfg_apply_line("games_source=usb9") && cfg_apply_line("games_source=dvd") &&
+		          cfg_apply_line("games_source=") && cfg_apply_line("games_filter=1,2,0,3") && cfg_apply_line("games_filter=3,0,0,0") &&
+		          cfg_apply_line("games_filter=1,2") && cfg_apply_line("games_filter=");
 		char txt[4096];
 		cfg_text(txt, sizeof txt);
-		if (!ok || !rej || strcmp(g_games_source, "usb3") || g_games_filter.fmt != 1 || g_games_filter.redump != 2 || g_games_filter.other != 3 ||
-		    !strstr(txt, "\ngames_source=usb3\n") || !strstr(txt, "\ngames_filter=1,2,0,3\n"))
-			{ printf("FAIL games_source/games_filter: ok %d, rejected %d, %s\n", ok, rej, txt); bad++; }
-		snprintf(g_games_source, sizeof g_games_source, "hdd");
-		g_games_filter = GameFilter{0, 0, 0, 0};
-		int back = cfg_apply_line("games_source=usb3") && cfg_apply_line("games_source=all") && cfg_apply_line("games_source=hdd") && cfg_apply_line("games_filter=0,0,0,0");
-		if (!back || strcmp(g_games_source, "hdd")) { printf("FAIL games_source back to hdd\n"); bad++; }
+		if (!old || strcmp(g_games_source, "usb1") || g_games_filter.fmt || g_games_filter.redump || g_games_filter.other ||
+		    strstr(txt, "games_source") || strstr(txt, "games_filter"))
+			{ printf("FAIL old games_source/games_filter lines: ignored %d, source %s, %s\n", old, g_games_source, txt); bad++; }
+		// a restart: the file read again (with old lines) gives the hard disk and an empty filter
+		g_games_filter = GameFilter{2, 1, 1, 2};
+		FILE *f = fopen(CFG_PATH, "w");
+		if (f) { fputs(txt, f); fputs("games_source=usb3\ngames_filter=1,2,0,3\n", f); fclose(f); }
+		int loaded = cfg_load();
+		cfg_text(txt, sizeof txt);
+		if (!loaded || strcmp(g_games_source, "hdd") || g_games_filter.fmt || g_games_filter.redump || g_games_filter.errors || g_games_filter.other ||
+		    strstr(txt, "games_source") || strstr(txt, "games_filter"))
+			{ printf("FAIL a restart: source %s, filter %d,%d,%d,%d\n", g_games_source, g_games_filter.fmt, g_games_filter.redump, g_games_filter.errors, g_games_filter.other); bad++; }
+		remove(CFG_PATH);
 	}
 	host_root[0] = 0;
 	memset(host_exfat, 0, sizeof(int) * 8);
 	gl_take("hdd");   // nothing (the console's paths do not exist here)
 	host_lang = PS3_LANG_SWEDISH; lang_init();
-	if (bad) g_fail += bad; else printf("ok   game list sources, labels, All, the cache, a source that goes, games_* config keys\n");
+	if (bad) g_fail += bad; else printf("ok   game list sources, labels, All, the cache, a source that goes, old games_* config lines\n");
 }
 
 // ---------------------------------------------------------------- game list: the screen
@@ -504,13 +514,13 @@ static void games_scenarios()
 	gv_refilter(v);
 	gframe("games-no-match", v);
 	want(v.nshown == 0 && has_text(sv ? "Inga spel matchar filtret" : "No games match the filter"), "nothing matches");
-	gv_input(v, B_L1);   // L1: every criterion back to any, saved
+	gv_input(v, B_L1);   // L1: every criterion back to any (not saved: M12)
 	{
 		char txt[4096];
 		cfg_text(txt, sizeof txt);
-		want(v.nshown == 21 && !g_games_filter.fmt && !g_games_filter.other && strstr(txt, "\ngames_filter=0,0,0,0\n"), "L1 resets and saves");
+		want(v.nshown == 21 && !g_games_filter.fmt && !g_games_filter.other && !strstr(txt, "games_filter"), "L1 resets, not saved");
 	}
-	// the filter panel: R1 opens, right increases, O applies and saves
+	// the filter panel: R1 opens, right increases, O applies (not saved)
 	gv_input(v, B_R1);
 	want(v.mode == GV_FILTER, "R1 opens the filter panel");
 	gv_input(v, B_RIGHT); gv_input(v, B_RIGHT);   // Format: 2048
@@ -522,7 +532,7 @@ static void games_scenarios()
 	{
 		char txt[4096];
 		cfg_text(txt, sizeof txt);
-		want(v.mode == GV_LIST && g_games_filter.fmt == 2 && g_games_filter.redump == 2 && strstr(txt, "\ngames_filter=2,2,0,0\n"), "O applies and saves");
+		want(v.mode == GV_LIST && g_games_filter.fmt == 2 && g_games_filter.redump == 2 && !strstr(txt, "games_filter"), "O applies, not saved");
 	}
 	gframe("games-criteria-two", v);
 	want(has_text(sv ? "2048 · Ej kontrollerad" : "2048 · Not checked"), "the criteria line");
@@ -559,7 +569,11 @@ static void games_scenarios()
 	gv_input(v, B_CIRCLE);
 	// SELECT: the next source (USB 1 (RIPS)), then All: each row with its place
 	gv_input(v, B_SELECT);
-	want(!strcmp(v.key, "usb1") && !strcmp(g_games_source, "usb1"), "SELECT: USB 1, remembered");
+	{
+		char txt[4096];
+		cfg_text(txt, sizeof txt);
+		want(!strcmp(v.key, "usb1") && !strcmp(g_games_source, "usb1") && !strstr(txt, "games_source"), "SELECT: USB 1, remembered until a restart, not saved");
+	}
 	gv_poll(v);
 	gframe("games-usb", v);
 	want(v.nshown == 1 && has_text("USB 1 (RIPS)"), "the stick's list and name");
@@ -604,7 +618,8 @@ static void games_scenarios()
 	want(gv_poll(v) && gv_ready(v) && !strcmp(g_gl.key, "hdd") && v.nshown == 21, "the screen asks for its source again");
 	want(v.mode == GV_LIST, "a new result closes the detail view");
 	want(!gv_poll(v) && !gv_poll(v), "no redraw without a new result");
-	// the two settings in the audit log: by their name, values in words
+	// the two settings in the audit log: by their name, values in words (games_filter: rows from a
+	// version that saved the filter stay readable)
 	{
 		char av[160];
 		want(!strcmp(av_key_label("games_source"), sv ? "Spellistan: källa" : "Game list: source") &&
@@ -2131,11 +2146,2362 @@ static void audit_scenarios()
 	if (bad) g_fail += bad; else printf("ok   the audit log screen (levels, paging, undo, sources)%s\n", g_sfx_sv ? " (sv)" : "");
 }
 
+// ---------------------------------------------------------------- remote control and the [MCP] indicator
+static void remote_scenarios()
+{
+	const char *sfx = g_sfx_sv ? "-sv" : "";
+	auto shot = [&](const char *name) {
+		char nm[96];
+		snprintf(nm, sizeof nm, "%s%s", name, sfx);
+		save(nm);
+		size_t b0 = g_fail;
+		check(nm);
+		printf("%s %s\n", g_fail == (int)b0 ? "ok  " : "FAIL", nm);
+	};
+	auto need = [&](bool ok, const char *what) { if (!ok) { printf("FAIL %s%s\n", what, sfx); g_fail++; } };
+	int keep[3] = {g_remote, g_mcp, g_status_json};
+	DriveCfg sd = g_std;
+	const time_t when = 1793530800;
+	// the settings: "Remote control", X opens its menu; MCP off: no indicator
+	g_remote = 1; g_mcp = 0; g_status_json = 1;
+	g_boxes.clear(); settings_draw(SR_REMOTE, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); shot("settings-remote-control");
+	need(has_text(g_sfx_sv ? "Fjärrstyrning" : "Remote control"), "the settings row is called Remote control");
+	need(!has_text("[MCP]"), "[MCP] shows while MCP is off");
+	// the menu: three switches, the focused one says where it answers
+	g_boxes.clear(); remote_control_draw(0); shot("remote-control-view");
+	need(has_text(g_sfx_sv ? "Fjärrvisning" : "Remote view") && has_text("MCP") && has_text("status.json"), "the menu's three rows");
+	need(has_text(":8090/"), "the remote view row says its address");
+	g_mcp = 1;
+	g_boxes.clear(); remote_control_draw(1); shot("remote-control-mcp-on");
+	need(has_text("[MCP]"), "no [MCP] on the menu while MCP is on");
+	need(has_text(":8090/mcp"), "the MCP row says its address");
+	g_remote = 0; g_status_json = 0;
+	g_boxes.clear(); remote_control_draw(2); shot("remote-control-status-off");
+	need(has_text(":8090/status.json"), "the status.json row says its address");
+	// the indicator on the other screens
+	g_boxes.clear(); settings_draw(SR_SPEED, sd, RD_LOCAL, 1, 1, 1, "2026-06-15 11-55-46", when); shot("settings-mcp-indicator");
+	need(has_text("[MCP]"), "no [MCP] on the settings while MCP is on");
+	reset_all(); usb(0, 0);
+	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577); ripped(0, 1, 0);
+	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
+	int list[NCARDS], nc = card_list(list);
+	g_boxes.clear(); home_draw(list, nc, 0); shot("home-mcp-indicator");
+	need(has_text("[MCP]"), "no [MCP] on the home screen while MCP is on");
+	g_mcp = 0;
+	g_boxes.clear(); home_draw(list, nc, 0);
+	need(!has_text("[MCP]"), "[MCP] on the home screen while MCP is off");
+	g_boxes.clear(); about_draw(); need(!has_text("[MCP]"), "[MCP] on About while MCP is off");
+	g_mcp = 1;
+	g_boxes.clear(); about_draw(); need(has_text("[MCP]"), "no [MCP] on About while MCP is on");
+	g_remote = keep[0]; g_mcp = keep[1]; g_status_json = keep[2];
+	reset_all();
+}
+
+// ---------------------------------------------------------------- MCP: state, settings, log
+// Valid UTF-8 (what every hook writes must be)
+static bool utf8_valid(const char *s)
+{
+	const unsigned char *p = (const unsigned char *)s;
+	while (*p) {
+		int n = *p < 0x80 ? 0 : (*p & 0xE0) == 0xC0 && *p >= 0xC2 ? 1 : (*p & 0xF0) == 0xE0 ? 2 : (*p & 0xF8) == 0xF0 && *p <= 0xF4 ? 3 : -1;
+		if (n < 0) return false;
+		p++;
+		for (int i = 0; i < n; i++, p++) if ((*p & 0xC0) != 0x80) return false;
+	}
+	return true;
+}
+static int setting_rows(const char *key, AuditSrc src)   // setting rows of the audit log for key from src
+{
+	static AuditRow r[200];
+	int n = audit_events(AU_SETTINGS, NULL, r, 200), k = 0;
+	for (int i = 0; i < n; i++) if (!strcmp(r[i].what, key) && r[i].src == src) k++;
+	return k;
+}
+static std::string read_file(const char *p)
+{
+	std::string s;
+	FILE *f = fopen(p, "rb");
+	if (!f) return s;
+	char b[4096];
+	size_t k;
+	while ((k = fread(b, 1, sizeof b, f)) > 0) s.append(b, k);
+	fclose(f);
+	return s;
+}
+// A screen loop run by a script: each frame (the screen's flip) calls the step with the frame's
+// number and what it drew; the step returns the buttons to press next (as the remote view's pad).
+static std::function<int(int)> g_step;
+static int g_step_frame;
+static void step_frame()
+{
+	int b = g_step ? g_step(++g_step_frame) : B_CIRCLE;
+	if (g_step_frame > 400) b = B_CIRCLE;   // a script that never ends: leave
+	g_boxes.clear();
+	if (b) __sync_fetch_and_or(&g_remote_btn, b);
+}
+static void run_screen(std::function<void()> screen, std::function<int(int)> step)
+{
+	static uint32_t fb[1920 * 1080];   // the screen's buffers: present() copies the canvas there
+	color_buffer[0] = color_buffer[1] = fb;
+	g_step = step; g_step_frame = 0;
+	host_frame = step_frame;
+	g_boxes.clear();
+	screen();
+	host_frame = NULL;
+	g_step = nullptr;
+}
+
+// n frames of a screen with nothing pressed: the UI thread's turn (it takes what MCP asked for)
+static void ui_frames(int n)
+{
+	run_screen([]() { about_screen(); }, [n](int f) -> int { return f > n ? B_CIRCLE : 0; });
+}
+
+static void mcp_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp: %s%s%.300s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
+	reset_all(); usb(0, 0); usb(1, 2);   // the PS3's drive, USB drives on ports 0 and 2
+	for (int c = 0; c < 3; c++) g_cards[c].tried = 1;   // identified already (no identify thread here)
+	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
+	g_webhook[0] = 0; g_webhook_hdr[0][0] = 0; g_webhook_on = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5;
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	g_remote = g_mcp = g_status_json = 0; g_audit_mb = 256;
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};   // the drives' own values: none (as the cards)
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();   // primes
+	const McpHooks &h = g_mcp_hooks;
+	mcp_init(&g_mcp_hooks, APP_VERSION);   // as the app does at start
+	static char out[MCP_MAX_RESPONSE];
+	const char *SECRET_URL = "http://10.0.0.9:8123/api/webhook/SECRETWEBHOOKID", *SECRET_HDR = "Authorization: Bearer TOPSECRETTOKEN";
+	std::vector<std::string> said;   // every hook answer: none may hold a secret
+
+	// list_settings: every setting with its scope, labels (en/sv), value and allowed values
+	{
+		int rc = h.list_settings(out, sizeof out);
+		said.push_back(out);
+		FILE *f = fopen("out/mcp-settings.json", "w"); if (f) { fputs(out, f); fclose(f); }
+		need(rc == 0, "list_settings answers", out);
+		need(!system("python3 check_settings.py out/mcp-settings.json internal usb0 usb2"), "list_settings covers every setting (check_settings.py)");
+		need(strstr(out, "\"key\":\"speed\",\"scope\":\"standard\",\"label\":{\"en\":\"Read speed\",\"sv\":\"Läshastighet\"}") != NULL, "speed with its labels", out);
+		need(strstr(out, "{\"value\":\"0\",\"label\":{\"en\":\"Max\",\"sv\":\"Max\"}}") != NULL, "speed's value 0 is Max", out);
+		need(strstr(out, "{\"value\":\"2\",\"label\":{\"en\":\"Bit-perfect\",\"sv\":\"Bitperfekt\"}}") != NULL, "check's value 2 is Bit-perfect");
+		need(strstr(out, "{\"value\":\"-1\",\"label\":{\"en\":\"Standard (4)\",\"sv\":\"Standard (4)\"}}") != NULL, "a drive's -1 says the standard's value");
+		need(strstr(out, "\"key\":\"webhook\",\"scope\":\"standard\"") && strstr(out, "\"is_set\":false"), "the webhook address: is_set false");
+		need(utf8_valid(out), "list_settings is valid UTF-8");
+	}
+	// set_setting: the screens' values only, applied, saved, logged with source mcp
+	{
+		int rc = h.set_setting("speed", "3", NULL, out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && g_std.speed == 3, "speed 3 (2x) is set", out);
+		need(strstr(out, "\"key\":\"speed\"") && strstr(out, "\"value\":\"3\""), "set_setting answers with the new value", out);
+		need(setting_rows("speed", AU_MCP) == 1, "the change is an audit row with source mcp");
+		need(read_file("out/psxrip.cfg").find("\nspeed=3\n") != std::string::npos, "the change is saved");
+		rc = h.set_setting("speed", "9", NULL, out, sizeof out);
+		need(rc != 0 && g_std.speed == 3 && strstr(out, "Allowed"), "speed 9 is refused with the allowed values", out);
+		rc = h.set_setting("retries", "64", NULL, out, sizeof out);
+		need(rc != 0 && g_std.retries == 4, "retries 64 is refused (the screens offer up to 32)", out);
+		rc = h.set_setting("retries", "8", NULL, out, sizeof out);
+		need(rc == 0 && g_std.retries == 8, "retries 8", out);
+		rc = h.set_setting("nope", "1", NULL, out, sizeof out);
+		need(rc != 0 && strstr(out, "list_settings"), "an unknown key is refused", out);
+		rc = h.set_setting("speed", "-1", NULL, out, sizeof out);
+		need(rc != 0, "the standard itself cannot be \"standard\"", out);
+		rc = h.set_setting("redump", "1", NULL, out, sizeof out);
+		need(rc == 0 && g_redump == RD_ONLINE, "redump online", out);
+		rc = h.set_setting("redump", "1", "usb0", out, sizeof out);
+		need(rc != 0, "redump has no per-drive value", out);
+		rc = h.set_setting("destination", "/dev_hdd0/PSXISO", NULL, out, sizeof out);
+		need(rc != 0, "destination needs a drive", out);
+		// a drive's own values, like the drive's settings (SELECT)
+		rc = h.set_setting("speed", "1", "usb2", out, sizeof out);
+		need(rc == 0 && g_usbcfg[2].set && g_usbcfg[2].speed == 1 && strstr(out, "\"value\":\"1\""), "usb2's own speed", out);
+		need(g_cards[2].speed == -1 && (g_cards[2].pend_cfg & CF_DRIVE), "MCP's thread never writes the card: the UI takes it", out);
+		ui_frames(1);
+		need(g_cards[2].speed == 1 && !g_cards[2].pend_cfg, "the card takes usb2's speed on the next frame");
+		need(setting_rows("drive_usb2", AU_MCP) == 1, "usb2's change is an audit row drive_usb2 with source mcp");
+		rc = h.set_setting("speed", "-1", "usb2", out, sizeof out);
+		ui_frames(1);
+		need(rc == 0 && g_cards[2].speed == -1, "usb2 back to the standard speed", out);
+		rc = h.set_setting("speed", "1", "usb5", out, sizeof out);
+		need(rc != 0, "a drive that is not there is refused", out);
+		g_cards[1].job = 1;
+		rc = h.set_setting("speed", "1", "usb0", out, sizeof out);
+		need(rc != 0 && g_cards[1].speed == -1 && strstr(out, "busy"), "a busy drive's settings are refused", out);
+		rc = h.set_setting("destination", "/dev_hdd0/PSXISO", "usb0", out, sizeof out);
+		need(rc != 0, "a busy drive's destination is refused", out);
+		g_cards[1].job = 0;
+		rc = h.set_setting("destination", "/dev_hdd0/PSXISO", "internal", out, sizeof out);
+		ui_frames(1);
+		need(rc == 0 && !strcmp(g_cards[0].outdir, "/dev_hdd0/PSXISO") && !strcmp(g_outdir, "/dev_hdd0/PSXISO"), "the internal drive's destination", out);
+		rc = h.set_setting("destination", "/dev_hdd0/ELSEWHERE", "internal", out, sizeof out);
+		need(rc != 0, "a destination that is not offered is refused", out);
+		// switches, webhook events and progress, the file name, the audit size
+		rc = h.set_setting("status_json", "1", NULL, out, sizeof out);
+		need(rc == 0 && g_status_json == 1, "status_json on", out);
+		rc = h.set_setting("webhook_event_rip_started", "1", NULL, out, sizeof out);
+		need(rc == 0 && (g_webhook_mask >> WH_RIP_STARTED & 1), "the rip_started event on", out);
+		need(setting_rows("webhook_events", AU_MCP) == 1, "the event is an audit row webhook_events");
+		rc = h.set_setting("webhook_progress", "10", NULL, out, sizeof out);
+		need(rc == 0 && (g_webhook_mask >> WH_RIP_PROGRESS & 1) && g_webhook_step == 10, "progress every 10 %", out);
+		rc = h.set_setting("webhook_progress", "0", NULL, out, sizeof out);
+		need(rc == 0 && !(g_webhook_mask >> WH_RIP_PROGRESS & 1), "progress off", out);
+		rc = h.set_setting("webhook_progress", "3", NULL, out, sizeof out);
+		need(rc != 0, "progress every 3 % is not offered", out);
+		rc = h.set_setting("name_pattern", "%T (%R)", NULL, out, sizeof out);
+		need(rc == 0 && !strcmp(g_name_pat, "%T (%R)") && strstr(out, "\"value\":\"%T (%R)\""), "an own file name pattern", out);
+		rc = h.set_setting("name_pattern", "", NULL, out, sizeof out);
+		need(rc == 0 && !strcmp(g_name_pat, FN_PRESETS[0]), "an empty pattern is the first ready-made one", out);
+		rc = h.set_setting("audit_mb", "64", NULL, out, sizeof out);
+		need(rc == 0 && g_audit_mb == 64, "audit_mb 64", out);
+		rc = h.set_setting("audit_mb", "100", NULL, out, sizeof out);
+		need(rc != 0 && g_audit_mb == 64, "audit_mb 100 is not offered", out);
+		// secrets: set, never shown; the audit says set
+		rc = h.set_setting("webhook", SECRET_URL, NULL, out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && !strcmp(g_webhook, SECRET_URL) && strstr(out, "\"is_set\":true"), "the webhook address is set", out);
+		rc = h.set_setting("webhook_header1", SECRET_HDR, NULL, out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && !strcmp(g_webhook_hdr[0], SECRET_HDR) && strstr(out, "\"is_set\":true"), "header 1 is set", out);
+		rc = h.set_setting("webhook_header2", "no colon here", NULL, out, sizeof out);
+		need(rc != 0 && !g_webhook_hdr[1][0], "a header without \"Name: value\" is refused", out);
+		{
+			static AuditRow r[200];
+			int n = audit_events(AU_SETTINGS, NULL, r, 200), ok = 0;
+			for (int i = 0; i < n; i++) if (!strcmp(r[i].what, "webhook_header1") && r[i].src == AU_MCP && !strcmp(r[i].after, "set")) ok = 1;
+			need(ok, "the header is an audit row \"set\" with source mcp");
+		}
+		g_cards[0].pend_cfg = 0;
+		// through the request handling: a number as the value (agents send 4, not "4")
+		const char *req = "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"set_setting\",\"arguments\":{\"key\":\"retries\",\"value\":16}}}";
+		mcp_handle(req, (int)strlen(req), out, sizeof out);
+		need(strstr(out, "\"isError\":false") && g_std.retries == 16, "set_setting over JSON-RPC with a number", out);
+		req = "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"tools/call\",\"params\":{\"name\":\"list_settings\"}}";
+		mcp_handle(req, (int)strlen(req), out, sizeof out);
+		need(strstr(out, "\"isError\":false") && strstr(out, "audit_mb"), "list_settings over JSON-RPC fits the response", out);
+		said.push_back(out);
+	}
+	// the open settings screen shows a value changed over MCP, and its own changes do not undo it
+	{
+		int seen_new = 0, row1 = 0;
+		std::string st0, st_dlg;
+		run_screen(settings_screen, [&](int f) -> int {
+			if (f == 1) {
+				h.state(out, sizeof out); st0 = out;
+				h.set_setting("speed", "1", NULL, out, sizeof out);   // 8x
+				return 0;
+			}
+			if (f < 6) { if (has_text("8×")) seen_new = 1; return 0; }
+			if (f == 6 || f == 8) return B_DOWN;   // past the game list's row to re-reads
+			if (f == 10) { h.state(out, sizeof out); row1 = strstr(out, "\"row\":2") != NULL; return B_RIGHT; }   // retries 16 -> 32
+			if (f == 12) return B_TRIANGLE;   // "reset?" dialog
+			if (f == 14) { h.state(out, sizeof out); st_dlg = out; return B_CIRCLE; }   // no
+			if (f == 16) return B_CIRCLE;
+			return 0;
+		});
+		need(strstr(st0.c_str(), "\"screen\":\"settings\"") && strstr(st0.c_str(), "\"row\":0"), "get_state on the settings: screen and row", st0.c_str());
+		need(seen_new, "the open settings screen shows the speed MCP set");
+		need(row1, "get_state follows the row");
+		need(strstr(st_dlg.c_str(), "\"screen\":\"dialog\"") && strstr(st_dlg.c_str(), "\"question\":true") && strstr(st_dlg.c_str(), "\"over\":\"settings\""),
+		     "get_state shows the open question", st_dlg.c_str());
+		need(g_std.speed == 1 && g_std.retries == 32, "the screen's own change kept MCP's speed");
+		need(setting_rows("speed", AU_MCP) == 2 && setting_rows("speed", AU_REMOTE) == 0, "MCP's speed saved once, never again by the screen");
+		need(setting_rows("retries", AU_REMOTE) == 1, "the screen's change is its own row");
+	}
+	// get_state on the home screen and a drive's settings: the tab, the drive, the buttons
+	{
+		std::string a, b;
+		run_screen([]() { home_screen(); }, [&](int f) -> int {
+			if (f == 2) { h.state(out, sizeof out); a = out; return B_R1; }
+			if (f == 4) { h.state(out, sizeof out); b = out; return B_CIRCLE; }
+			return 0;
+		});
+		need(strstr(a.c_str(), "\"screen\":\"home\"") && strstr(a.c_str(), "\"tab\":\"internal\""), "get_state on the home screen", a.c_str());
+		need(strstr(a.c_str(), "\"buttons\":[") && strstr(a.c_str(), "\"button\":\"select\""), "get_state lists the hint bar's buttons", a.c_str());
+		need(strstr(b.c_str(), "\"tab\":\"usb0\""), "get_state: the next tab is usb0", b.c_str());
+		run_screen([]() { drive_settings_screen(2); }, [&](int f) -> int {
+			if (f == 2) { h.state(out, sizeof out); a = out; return B_CIRCLE; }
+			return 0;
+		});
+		need(strstr(a.c_str(), "\"screen\":\"drive_settings\"") && strstr(a.c_str(), "\"drive\":\"usb2\""), "get_state on usb2's settings", a.c_str());
+		said.push_back(a);
+	}
+	// get_drives: status.json's drives, each with the id the tools take
+	{
+		snprintf(g_cards[0].title, sizeof g_cards[0].title, "Bad \xff\xfe bytes \xc3");   // not UTF-8 (a disc's own text)
+		int rc = h.drives(out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && strstr(out, "\"id\":\"internal\"") && strstr(out, "\"id\":\"usb0\"") && strstr(out, "\"id\":\"usb2\""), "get_drives with each drive's id", out);
+		need(utf8_valid(out), "get_drives is valid UTF-8 with a title that is not");
+		rc = h.state(out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && utf8_valid(out), "get_state is valid UTF-8 with a title that is not");
+		disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+	}
+	// read_log: pages of psxrip.log, the next line number, secrets taken out
+	{
+		FILE *f = fopen(LOG_PATH, "w");
+		for (int i = 0; i < 10; i++) fprintf(f, "line %d\n", i);
+		fprintf(f, "posting to %s now\n", SECRET_URL);
+		fprintf(f, "header %s sent\n", SECRET_HDR);
+		fprintf(f, "bad \xff bytes\n");
+		fclose(f);
+		int rc = h.read_log(0, 3, out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && strstr(out, "\"from\":0") && strstr(out, "\"next\":3") && strstr(out, "\"total\":13") && strstr(out, "[\"line 0\",\"line 1\",\"line 2\"]"), "read_log from 0, 3 lines", out);
+		rc = h.read_log(3, 2, out, sizeof out);
+		need(rc == 0 && strstr(out, "[\"line 3\",\"line 4\"]") && strstr(out, "\"next\":5"), "read_log from 3", out);
+		rc = h.read_log(-1, 3, out, sizeof out);
+		said.push_back(out);
+		need(rc == 0 && strstr(out, "\"from\":10") && strstr(out, "\"next\":13") && strstr(out, "[secret]"), "read_log: the last 3 lines, secrets taken out", out);
+		need(utf8_valid(out), "read_log is valid UTF-8 with a line that is not", out);
+		rc = h.read_log(50, 3, out, sizeof out);
+		need(rc == 0 && strstr(out, "\"lines\":[]") && strstr(out, "\"next\":13"), "read_log past the end: nothing, next is the end", out);
+		f = fopen(LOG_PATH, "w");   // a log larger than one answer: it stops at the room it has
+		std::string longl(3000, 'x');
+		for (int i = 0; i < 500; i++) fprintf(f, "%d %s\n", i, longl.c_str());
+		fclose(f);
+		rc = h.read_log(0, 500, out, 100000);
+		need(rc == 0 && strlen(out) <= (100000 - 200) / 2 && strstr(out, "\"truncated\":true"), "read_log stays within half its buffer", out);
+		remove(LOG_PATH);
+		rc = h.read_log(-1, 10, out, sizeof out);
+		need(rc == 0 && strstr(out, "\"lines\":[]") && strstr(out, "\"total\":0"), "read_log without a log", out);
+	}
+	// no answer ever holds a secret
+	for (auto &s : said)
+		need(s.find("SECRETWEBHOOKID") == std::string::npos && s.find("TOPSECRETTOKEN") == std::string::npos, "a secret in a tool's answer", s.c_str());
+	{
+		int rc = h.list_settings(out, sizeof out);
+		need(rc == 0 && !strstr(out, "SECRETWEBHOOKID") && !strstr(out, "TOPSECRETTOKEN") && strstr(out, "\"key\":\"webhook\",\"scope\":\"standard\""), "list_settings after the secrets were set", out);
+		std::string lg = read_file(LOG_PATH);
+		need(lg.find("SECRETWEBHOOKID") == std::string::npos && lg.find("TOPSECRETTOKEN") == std::string::npos, "a secret in psxrip.log");
+	}
+	need(h.screenshot_jpeg != NULL, "get_screenshot has its hook (the encoder is tested in remote_test)");
+
+	g_webhook[0] = 0; g_webhook_hdr[0][0] = 0; g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; g_audit_mb = 256; audit_apply_cap();
+	g_remote = g_mcp = g_status_json = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5;
+	for (int c = 0; c < NCARDS; c++) card_defaults(g_cards[c]);
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	system("rm -rf out/audit out/psxrip.cfg");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   MCP: state, drives, settings (list, set, the open screen), log, no secrets\n");
+}
+
+
+// ---------------------------------------------------------------- MCP: the settings the screens offer, threads, the log's secrets
+// The value of a list setting as the screens and set_setting see it (the standard: card -1)
+static int value_of(const char *key, int card)
+{
+	for (int i = 0; i < NSETTINGS; i++) if (!strcmp(SETTINGS[i].key, key)) return setting_int(SETTINGS[i], card);
+	return -999;
+}
+// Where a list setting is changed on a screen: the screen, the row (reached with DOWN from row 0)
+struct ScreenRow { const char *key; int drive; void (*screen)(); int row; };
+static int g_rows_card;
+static void drive_screen_of_test() { drive_settings_screen(g_rows_card); }
+
+static void mcp_settings_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp settings: %s%s%.300s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
+	reset_all(); usb(0, 0); usb(1, 2);
+	for (int c = 0; c < 3; c++) { g_cards[c].tried = 1; card_defaults(g_cards[c]); }
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	g_webhook[0] = 0; for (int i = 0; i < WH_HEADERS; i++) g_webhook_hdr[i][0] = 0;
+	g_webhook_on = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5; g_webhook_hdr_on = 0;
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	g_remote = g_mcp = g_status_json = 0; g_audit_mb = 256;
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();
+	const McpHooks &h = g_mcp_hooks;
+	static char out[MCP_MAX_RESPONSE];
+
+	// free text and secrets: no control characters (the on-screen keyboard cannot type them)
+	{
+		int keys = 0;
+		const char *bad_bytes[] = {"\t", "\x1b", "\x7f", "\x01", "\x1f"};
+		for (int i = 0; i < NSETTINGS; i++) {
+			const SettingDef &d = SETTINGS[i];
+			if (d.kind != SK_TEXT && d.kind != SK_SECRET) continue;
+			keys++;
+			const char *base = d.field == F_NAME ? "%T " : d.field == F_WH_URL ? "http://h.example/x" : "X-Key: v";
+			for (const char *b : bad_bytes) {
+				std::string v = std::string(base) + b + "end";
+				std::string before = d.field == F_NAME ? g_name_pat : d.field == F_WH_URL ? g_webhook : g_webhook_hdr[d.arg];
+				int rc = h.set_setting(d.key, v.c_str(), NULL, out, sizeof out);
+				std::string after = d.field == F_NAME ? g_name_pat : d.field == F_WH_URL ? g_webhook : g_webhook_hdr[d.arg];
+				char what[120];
+				snprintf(what, sizeof what, "%s with byte 0x%02x is refused", d.key, (unsigned char)b[0]);
+				need(rc != 0 && before == after && strstr(out, "control character") && !strstr(out, "end"), what, out);
+			}
+			std::string ok = std::string(d.field == F_NAME ? "%T \xc3\x85" : d.field == F_WH_URL ? "http://h.example/\xc3\x85" : "X-Key: \xc3\x85");
+			int rc = h.set_setting(d.key, ok.c_str(), NULL, out, sizeof out);
+			char what[120];
+			snprintf(what, sizeof what, "%s takes UTF-8 letters", d.key);
+			need(rc == 0, what, out);
+			h.set_setting(d.key, d.field == F_NAME ? "%T [%D]" : "", NULL, out, sizeof out);
+		}
+		need(keys == 5, "the free-text and secret keys: name_pattern, webhook, three headers");
+		const char *req = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\"name\":\"set_setting\",\"arguments\":{\"key\":\"name_pattern\",\"value\":\"%T\\u0009x\"}}}";
+		mcp_handle(req, (int)strlen(req), out, sizeof out);
+		need(strstr(out, "\"isError\":true") && !strcmp(g_name_pat, "%T [%D]"), "a tab sent as \\u0009 over JSON-RPC is refused", out);
+	}
+
+	// every value a screen reaches is one set_setting takes, and the other way round
+	{
+		int ev_row[WH_COUNT], r = 2;   // the webhooks' rows: address, headers, the events but progress, progress
+		for (int i = 0; i < WH_COUNT; i++) if (i != WH_RIP_PROGRESS) ev_row[i] = r++;
+		const int prog_row = r;
+		std::vector<ScreenRow> rows = {
+			{"speed", 0, settings_screen, SR_SPEED}, {"retries", 0, settings_screen, SR_RETRIES}, {"check", 0, settings_screen, SR_CHECK},
+			{"eject", 0, settings_screen, SR_EJECT}, {"autostart", 0, settings_screen, SR_AUTOSTART}, {"redump", 0, settings_screen, SR_REDUMP},
+			{"webhook_on", 0, settings_screen, SR_WEBHOOK}, {"audit_mb", 0, settings_screen, SR_AUDIT_MB},
+			{"remote", 0, remote_control_screen, 0}, {"mcp", 0, remote_control_screen, 1}, {"status_json", 0, remote_control_screen, 2},
+			{"webhook_headers_on", 0, webhook_settings_screen, 1}, {"webhook_progress", 0, webhook_settings_screen, prog_row},
+			{"speed", 1, drive_screen_of_test, 0}, {"retries", 1, drive_screen_of_test, 1}, {"check", 1, drive_screen_of_test, 2},
+			{"eject", 1, drive_screen_of_test, 3}, {"autostart", 1, drive_screen_of_test, 4},
+		};
+		for (int i = 0; i < NSETTINGS; i++)
+			if (SETTINGS[i].field == F_WH_EVENT) rows.push_back({SETTINGS[i].key, 0, webhook_settings_screen, ev_row[SETTINGS[i].arg]});
+		for (int i = 0; i < NSETTINGS; i++) {   // each list setting has its screen row here (a new one must be added)
+			const SettingDef &d = SETTINGS[i];
+			if (d.kind != SK_LIST) continue;
+			for (int drive = 0; drive < 2; drive++) {
+				if ((drive && d.scope == SC_STD) || (!drive && d.scope == SC_DRIVE)) continue;
+				int found = 0;
+				for (auto &sr : rows) found |= !strcmp(sr.key, d.key) && sr.drive == drive;
+				char what[120];
+				snprintf(what, sizeof what, "%s%s has a screen row in the parity test", d.key, drive ? " (a drive)" : "");
+				need(found, what);
+			}
+		}
+		g_rows_card = 2;
+		const int card = 2;
+		for (auto &sr : rows) {
+			std::set<int> reached;
+			int c = sr.drive ? card : -1;
+			reached.insert(value_of(sr.key, c));
+			int labels_ok = 1;
+			const SettingDef *d = NULL;
+			for (int i = 0; i < NSETTINGS; i++) if (!strcmp(SETTINGS[i].key, sr.key)) d = &SETTINGS[i];
+			run_screen(sr.screen, [&](int f) -> int {
+				int v = value_of(sr.key, c);
+				reached.insert(v);
+				if (f > sr.row + 1 && v >= 0 && !(sr.screen == settings_screen && (sr.row == SR_WEBHOOK))) {   // the row shows the table's label
+					char l[100] = "";
+					for (int i = 0; i < d->nopts; i++) if (d->opts[i].v == v) opt_label(d->opts[i], T, l, sizeof l);
+					if (!l[0] || !has_text(l)) labels_ok = 0;
+				}
+				if (f <= sr.row) return B_DOWN;
+				if (f <= sr.row + 12) return B_LEFT;
+				if (f <= sr.row + 24) return B_RIGHT;
+				if (f <= sr.row + 25) return 0;
+				return B_CIRCLE;
+			});
+			ui_frames(1);   // a drive's change reaches its card
+			std::set<int> taken;
+			char drive_id_s[16] = "";
+			if (sr.drive) drive_id(card, drive_id_s, sizeof drive_id_s);
+			for (int v = -3; v <= 300; v++) {
+				char t[16];
+				snprintf(t, sizeof t, "%d", v);
+				if (!h.set_setting(sr.key, t, sr.drive ? drive_id_s : NULL, out, sizeof out)) taken.insert(v);
+			}
+			ui_frames(1);
+			std::string a, b;
+			for (int v : reached) a += std::to_string(v) + " ";
+			for (int v : taken) b += std::to_string(v) + " ";
+			char what[300];
+			snprintf(what, sizeof what, "%s%s: the screen reaches {%s}, set_setting takes {%s}", sr.key, sr.drive ? " (usb2)" : "", a.c_str(), b.c_str());
+			need(reached == taken, what);
+			snprintf(what, sizeof what, "%s%s: the screen shows the table's labels", sr.key, sr.drive ? " (usb2)" : "");
+			need(labels_ok, what);
+		}
+		g_remote = g_mcp = g_status_json = 0; remote_apply();
+	}
+
+	// switches: the web server's paths follow (remote_apply), the popup only when the view turns on
+	{
+		host_remote_flags = -1;
+		int rc = h.set_setting("mcp", "1", NULL, out, sizeof out);
+		need(rc == 0 && host_remote_flags == REMOTE_MCP, "set_setting mcp=1 tells the web server", out);
+		rc = h.set_setting("status_json", "1", NULL, out, sizeof out);
+		need(rc == 0 && host_remote_flags == (REMOTE_MCP | REMOTE_STATUS), "set_setting status_json=1 tells the web server", out);
+		int calls = host_webman_calls;
+		rc = h.set_setting("remote", "1", NULL, out, sizeof out);
+		need(rc == 0 && host_remote_flags == (REMOTE_VIEW | REMOTE_MCP | REMOTE_STATUS), "set_setting remote=1 tells the web server", out);
+		need(host_webman_calls == calls + 1, "remote off -> on shows the address (one popup)");
+		rc = h.set_setting("remote", "1", NULL, out, sizeof out);
+		need(rc == 0 && host_webman_calls == calls + 1, "remote on -> on: no popup");
+		rc = h.set_setting("mcp", "0", NULL, out, sizeof out);
+		need(rc == 0 && host_remote_flags == (REMOTE_VIEW | REMOTE_STATUS), "set_setting mcp=0 tells the web server", out);
+		h.set_setting("remote", "0", NULL, out, sizeof out); h.set_setting("status_json", "0", NULL, out, sizeof out);
+		need(host_remote_flags == 0, "all off: the web server stops");
+	}
+
+	// destinations: scanned without the config lock; one that is not connected is listed as such
+	{
+		int io = 0, io_locked = 0;
+		static int *pio, *pio_locked;
+		pio = &io; pio_locked = &io_locked;
+		host_io = []() { (*pio)++; if (host_mutex_held(g_cfg_mx)) (*pio_locked)++; };
+		int rc = h.list_settings(out, sizeof out);
+		need(rc == 0 && io > 0 && io_locked == 0, "list_settings scans the drives without the config lock", out);
+		io = io_locked = 0;
+		rc = h.set_setting("destination", "/dev_hdd0/PSXISO", "usb0", out, sizeof out);
+		need(rc == 0 && io > 0 && io_locked == 0, "set_setting destination scans without the config lock", out);
+		host_io = NULL;
+		ui_frames(1);
+		snprintf(g_outdir, sizeof g_outdir, "/dev_usb006/PSXISO");   // chosen before, not plugged in now
+		card_take_cfg(0, CF_OUTDIR);
+		rc = h.list_settings(out, sizeof out);
+		const char *e = strstr(out, "{\"value\":\"/dev_usb006/PSXISO\",\"label\":{\"en\":");
+		need(rc == 0 && e && strstr(e, "not connected") && strstr(e, "inte ansluten") && strstr(e, "inte ansluten") < strstr(e, "}}"),
+		     "a destination that is not connected is in values, marked so", out);
+		rc = h.set_setting("destination", "/dev_usb006/PSXISO", "internal", out, sizeof out);
+		need(rc == 0, "the listed destination that is not connected is taken (it is the current one)", out);
+		rc = h.set_setting("destination", "/dev_usb007/PSXISO", "internal", out, sizeof out);
+		need(rc != 0, "another destination that is not connected is refused", out);
+		h.set_setting("destination", "/dev_hdd0/PSXISO", "internal", out, sizeof out);
+		ui_frames(1);
+	}
+
+	// get_state reads one consistent picture while the UI thread changes screens
+	{
+		static volatile int stop, started;
+		stop = started = 0;
+		pthread_t t;
+		pthread_create(&t, NULL, [](void *) -> void * {
+			while (!stop) { ui_at(SCR_DRIVE_SETTINGS, 4, 2); ui_at(SCR_SETTINGS, 1, -1); started = 1; }
+			return NULL;
+		}, NULL);
+		while (!started) usleep(100);
+		int torn = 0;
+		for (int i = 0; i < 20000 && !torn; i++) {
+			h.state(out, sizeof out);
+			bool ds = strstr(out, "\"screen\":\"drive_settings\"") != NULL, st = strstr(out, "\"screen\":\"settings\"") != NULL;
+			bool r4 = strstr(out, "\"row\":4") != NULL, r1 = strstr(out, "\"row\":1") != NULL, dr = strstr(out, "\"drive\":\"usb2\"") != NULL;
+			if (!((ds && r4 && dr) || (st && r1 && !dr))) torn = 1;
+		}
+		stop = 1;
+		pthread_join(t, NULL);
+		need(!torn, "get_state never pairs one screen with another's row or drive", out);
+	}
+
+	// the config lock is recursive and shared: MCP changes settings while the settings screen does
+	{
+		static volatile int stop;
+		static int sets_ok;
+		stop = 0; sets_ok = 0;
+		pthread_t t;
+		pthread_create(&t, NULL, [](void *) -> void * {
+			static char o[MCP_MAX_RESPONSE];
+			for (int i = 0; !stop && i < 300; i++)
+				if (!g_mcp_hooks.set_setting("speed", i & 1 ? "1" : "2", NULL, o, sizeof o)) sets_ok++;
+			return NULL;
+		}, NULL);
+		run_screen(settings_screen, [&](int f) -> int {
+			if (f == 1 || f == 3) return B_DOWN;   // past the game list's row to re-reads
+			if (f < 5) return 0;
+			if (f < 120) return f & 1 ? B_RIGHT : 0;
+			return B_CIRCLE;
+		});
+		stop = 1;
+		pthread_join(t, NULL);
+		std::string cfg = read_file("out/psxrip.cfg");
+		char sp[32], re[32];
+		snprintf(sp, sizeof sp, "\nspeed=%d\n", g_std.speed);
+		snprintf(re, sizeof re, "\nretries=%d\n", g_std.retries);
+		need(sets_ok > 0 && cfg.find(sp) != std::string::npos && cfg.find(re) != std::string::npos,
+		     "two threads: the saved config is the last values of both", cfg.c_str());
+	}
+
+	// read_log: short secrets, short paths, a secret cut by a long line, a tiny buffer
+	{
+		h.set_setting("webhook", "http://h.example/abcd", NULL, out, sizeof out);
+		h.set_setting("webhook_header1", "X-K: q7z", NULL, out, sizeof out);
+		h.set_setting("webhook_header2", "X-Long: TOPSECRETLONGVALUE", NULL, out, sizeof out);
+		FILE *f = fopen(LOG_PATH, "w");
+		fprintf(f, "key q7z sent\n");
+		fprintf(f, "path /abcd used\n");
+		fprintf(f, "%s TOPSECRETLONGVALUE\n", std::string(1015, 'x').c_str());   // the secret across the 1023-byte cut
+		fclose(f);
+		int rc = h.read_log(0, 10, out, sizeof out);
+		need(rc == 0 && !strstr(out, "q7z") && !strstr(out, "/abcd") && !strstr(out, "TOPS") && !strstr(out, "TOPSECRET"), "read_log: short secrets and a cut one are taken out", out);
+		need(strstr(out, "key [secret] sent") && strstr(out, "path [secret] used"), "read_log: the short ones as [secret]", out);
+		static char small[400];
+		memset(small, 'Z', sizeof small);
+		rc = h.read_log(0, 10, small, 300);
+		need(small[299] == 'Z' || memchr(small, 0, 300), "read_log with a tiny buffer stays in it");
+		need(small[300] == 'Z' && small[399] == 'Z', "read_log with a tiny buffer writes nothing past it");
+		h.set_setting("webhook", "", NULL, out, sizeof out);
+		h.set_setting("webhook_header1", "", NULL, out, sizeof out);
+		h.set_setting("webhook_header2", "", NULL, out, sizeof out);
+		remove(LOG_PATH);
+	}
+
+	g_webhook[0] = 0; for (int i = 0; i < WH_HEADERS; i++) g_webhook_hdr[i][0] = 0;
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; g_audit_mb = 256; audit_apply_cap();
+	g_remote = g_mcp = g_status_json = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5; g_webhook_on = 0; g_webhook_hdr_on = 0;
+	snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	snprintf(g_outdir, sizeof g_outdir, "/dev_hdd0/PSXISO");
+	for (int c = 0; c < NCARDS; c++) { card_defaults(g_cards[c]); g_cards[c].pend_cfg = 0; }
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	ui_at(SCR_HOME);
+	system("rm -rf out/audit out/psxrip.cfg");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   MCP: control characters, the screens' values, switches, destinations, threads, log secrets\n");
+}
+
+// ---------------------------------------------------------------- MCP: the screen and the jobs (requests the UI thread takes)
+// The app's UI runs on a thread of its own here (home_screen, as on the console) and this thread is
+// MCP's: it calls the hooks as the web server does. Each frame runs what the test hands the UI
+// thread (on_ui) and takes the pad presses (g_remote_btn, as the remote view's pad).
+static volatile int g_bg_quit, g_bg_frames, g_bg_job_set, g_bg_returns;   // g_bg_returns: home_screen returned (the app would exit)
+static const char *volatile g_bg_tell;   // a message the UI thread shows with tell() in its next frame
+static std::function<void()> g_bg_job;
+static pthread_t g_bg_t;
+static void bg_frame()
+{
+	usleep(1000);
+	g_boxes.clear();
+	if (g_bg_job_set) { g_bg_job(); __sync_synchronize(); g_bg_job_set = 0; }
+	if (g_bg_tell) { const char *m = g_bg_tell; g_bg_tell = NULL; tell(m); }   // its own frames run inside this one
+	if (g_bg_quit) __sync_fetch_and_or(&g_remote_btn, B_CIRCLE);
+	__sync_fetch_and_add(&g_bg_frames, 1);
+}
+static void bg_frames(int n)
+{
+	int f0 = g_bg_frames;
+	uint64_t t0 = now_ms();
+	while (g_bg_frames - f0 < n && now_ms() - t0 < 5000) usleep(500);
+}
+static void on_ui(std::function<void()> fn)   // runs fn on the UI thread, in a frame (inside flip_frame)
+{
+	g_bg_job = fn;
+	__sync_synchronize();
+	g_bg_job_set = 1;
+	uint64_t t0 = now_ms();
+	while (g_bg_job_set && now_ms() - t0 < 5000) usleep(500);
+}
+static void pad(int bits) { __sync_fetch_and_or(&g_remote_btn, bits); bg_frames(4); }
+static void bg_start()
+{
+	static uint32_t fb[1920 * 1080];
+	color_buffer[0] = color_buffer[1] = fb;
+	g_bg_quit = 0;
+	host_frame = bg_frame;
+	pthread_create(&g_bg_t, NULL, [](void *) -> void * { while (!g_bg_quit) { home_screen(); __sync_fetch_and_add(&g_bg_returns, 1); } return NULL; }, NULL);
+	bg_frames(3);
+}
+static void bg_stop()
+{
+	g_bg_quit = 1;
+	pthread_join(g_bg_t, NULL);
+	host_frame = NULL;
+	g_remote_btn = 0;
+}
+static int cx_of(int c, int which)   // card c's context: 0 g_skip, 1 g_abort, 2 g_speed
+{
+	OnCard oc(c);
+	return which == 0 ? g_skip : which == 1 ? g_abort : g_speed;
+}
+static int job_rows(const char *what, AuditSrc src)   // job rows (rip, check, repair) of the audit log
+{
+	static AuditRow r[200];
+	int n = audit_events(AU_RIPS, NULL, r, 200), k = 0;
+	for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, "job") && !strcmp(r[i].what, what) && r[i].src == src) k++;
+	return k;
+}
+
+static void mcp_ui_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp ui: %s%s%.400s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
+	reset_all(); usb(0, 0); usb(1, 2);   // the PS3's drive, USB drives on ports 0 (usb0) and 2 (usb2, empty)
+	for (int c = 0; c < 3; c++) g_cards[c].tried = 1;
+	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
+	g_webhook[0] = 0; g_webhook_on = 0; g_webhook_mask = WH_DEFAULT_MASK;
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	g_remote = g_mcp = g_status_json = 0;
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();
+	const McpHooks &h = g_mcp_hooks;
+	mcp_init(&g_mcp_hooks, APP_VERSION);
+	static char outb[MCP_MAX_RESPONSE];
+	std::string out;
+	auto call = [&](const char *tool, const char *arg) { int rc = h.ui(tool, arg, outb, sizeof outb); out = outb; return rc; };
+	auto has = [&](const char *s) { return out.find(s) != std::string::npos; };
+	const char *o = NULL;
+	#define O (o = out.c_str())
+
+	bg_start();
+	// go_tab: the home screen's tab
+	{
+		int rc = call("go_tab", "usb0");
+		need(rc == 0 && has("\"screen\":\"home\"") && has("\"tab\":\"usb0\""), "go_tab usb0", O);
+		rc = call("go_tab", "usb5");
+		need(rc != 0 && has("usb5"), "go_tab to a drive that is not there is refused", O);
+		rc = call("go_tab", "internal");
+		need(rc == 0 && has("\"tab\":\"internal\""), "go_tab internal", O);
+	}
+	// press_button circle on the home screen would exit the app (and MCP with it): refused at once;
+	// the remote view's pad still exits as before
+	{
+		int r0 = g_bg_returns;
+		uint64_t t0 = now_ms();
+		int rc = call("press_button", "circle");
+		need(rc != 0 && has("Circle on the home screen exits the app; MCP does not exit it. Use the controller.") && now_ms() - t0 < 1000,
+		     "press_button circle on the home screen is refused at once", O);
+		bg_frames(4);
+		need(g_bg_returns == r0, "press_button circle: home_screen does not return");
+		rc = call("go_tab", "usb0");
+		need(rc == 0 && has("\"screen\":\"home\"") && has("\"tab\":\"usb0\""), "the home screen still takes requests after the refusal", O);
+		pad(B_CIRCLE);
+		need(g_bg_returns == r0 + 1, "the remote view's pad circle on the home screen still exits");
+		rc = call("go_tab", "internal");
+		need(rc == 0 && has("\"tab\":\"internal\""), "home again after the remote pad's exit", O);
+	}
+	// tell() and ask_yesno() are the app's own dialog: MCP answers at once and names its text
+	{
+		g_bg_tell = "A test message from tell.";
+		bg_frames(4);
+		uint64_t t0 = now_ms();
+		int rc = call("go_screen", "settings");
+		need(rc != 0 && has("A dialog is open: \"A test message from tell.\"") && has("cross = OK") && now_ms() - t0 < 1000,
+		     "tell's dialog: go_screen is refused at once with its text", O);
+		rc = call("press_button", "cross");
+		need(rc == 0 && has("\"screen\":\"home\"") && has("\"dialog\":null"), "press_button cross closes tell's dialog", O);
+	}
+	// go_screen: any screen from any screen, the way the pad goes (back, then in)
+	{
+		int rc = call("go_screen", "settings");
+		need(rc == 0 && has("\"screen\":\"settings\"") && has("\"row\":0"), "go_screen settings", O);
+		rc = call("press_button", "down");
+		need(rc == 0 && has("\"screen\":\"settings\"") && has("\"row\":1"), "press_button down on the settings", O);
+		rc = call("go_screen", "remote_control");
+		need(rc == 0 && has("\"screen\":\"remote_control\""), "go_screen remote_control", O);
+		rc = call("go_screen", "webhooks");
+		need(rc == 0 && has("\"screen\":\"webhooks\""), "go_screen webhooks from remote_control", O);
+		rc = call("go_screen", "drive_settings:usb2");
+		need(rc == 0 && has("\"screen\":\"drive_settings\"") && has("\"drive\":\"usb2\"") && has("\"tab\":\"usb2\""), "go_screen drive_settings usb2 from webhooks", O);
+		rc = call("go_screen", "drive_settings:usb0");
+		need(rc == 0 && has("\"screen\":\"drive_settings\"") && has("\"drive\":\"usb0\""), "go_screen drive_settings usb0 from usb2's", O);
+		const char *screens[] = {"audit_log", "filename", "about", "settings", "home"};
+		for (const char *s : screens) {
+			rc = call("go_screen", s);
+			char want[64], what[80];
+			snprintf(want, sizeof want, "\"screen\":\"%s\"", s);
+			snprintf(what, sizeof what, "go_screen %s", s);
+			need(rc == 0 && has(want), what, O);
+		}
+		rc = call("go_screen", "drive_settings:usb7");
+		need(rc != 0 && has("usb7"), "go_screen drive_settings of a drive that is not there", O);
+	}
+	// a dialog: only press_button answers it; everything else is refused at once with its text
+	{
+		call("go_screen", "settings");
+		int rc = call("press_button", "triangle");   // "reset the settings?"
+		need(rc == 0 && has("\"screen\":\"dialog\"") && has("\"question\":true"), "press_button triangle opens the question", O);
+		uint64_t t0 = now_ms();
+		rc = call("go_screen", "home");
+		need(rc != 0 && has("dialog") && has("press_button") && now_ms() - t0 < 1000, "go_screen with a dialog open is refused at once", O);
+		rc = call("rip", "internal");
+		need(rc != 0 && has("dialog"), "an action with a dialog open is refused", O);
+		rc = call("press_button", "circle");   // no
+		need(rc == 0 && has("\"screen\":\"settings\"") && has("\"dialog\":null"), "press_button circle answers no", O);
+		need(g_std.retries == 4, "the settings were not reset");
+		rc = call("go_screen", "home");
+		need(rc == 0 && has("\"screen\":\"home\""), "home again", O);
+	}
+	// the game list: go_screen games, its panels as screens of their own, MCP leaves each as O does,
+	// and the trash question is a dialog (only a button answers it)
+	{
+		char keep_root[256];
+		snprintf(keep_root, sizeof keep_root, "%s", host_root);
+		on_ui([] {
+			gs_library();
+			snprintf(g_games_source, sizeof g_games_source, "hdd");
+			g_games_filter = GameFilter{0, 0, 0, 0};
+			g_gl_stale = 1;
+		});
+		int rc = call("go_screen", "games");
+		need(rc == 0 && has("\"screen\":\"games\"") && has("\"row\":0"), "go_screen games from home", O);
+		bg_frames(4);
+		rc = call("press_button", "down");
+		need(rc == 0 && has("\"screen\":\"games\"") && has("\"row\":1"), "press_button down in the game list", O);
+		rc = call("press_button", "r1");
+		need(rc == 0 && has("\"screen\":\"game_filter\"") && has("\"row\":0"), "press_button r1 opens the filter panel", O);
+		rc = call("go_screen", "settings");
+		need(rc == 0 && has("\"screen\":\"settings\"") && has("\"row\":0"), "go_screen settings from the filter panel", O);
+		rc = call("go_screen", "games");
+		need(rc == 0 && has("\"screen\":\"games\""), "go_screen games from the settings", O);
+		bg_frames(4);
+		rc = call("press_button", "cross");
+		need(rc == 0 && has("\"screen\":\"game_detail\""), "press_button cross opens the detail view", O);
+		rc = call("go_screen", "games");
+		need(rc == 0 && has("\"screen\":\"games\""), "go_screen games from the detail view", O);
+		call("press_button", "cross");
+		rc = call("press_button", "cross");
+		need(rc == 0 && has("\"screen\":\"game_rename\""), "cross in the detail view opens the rename view", O);
+		rc = call("go_screen", "home");
+		need(rc == 0 && has("\"screen\":\"home\""), "go_screen home from the rename view", O);
+		need(vf_exists("/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].bin"), "leaving the rename view renames nothing");
+		// the trash: Alundra into it, the trash shown (the panel's last row), START asks to empty it
+		call("go_screen", "games");
+		bg_frames(4);
+		rc = call("press_button", "triangle");
+		need(rc == 0 && !vf_exists("/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35].bin"), "press_button triangle moves the game to the trash", O);
+		call("press_button", "r1");
+		call("press_button", "up");
+		call("press_button", "right");
+		rc = call("press_button", "circle");
+		bg_frames(4);
+		need(rc == 0 && has("\"screen\":\"games\""), "the filter panel shows the trash", O);
+		rc = call("press_button", "start");
+		need(rc == 0 && has("\"screen\":\"dialog\"") && has("\"question\":true") && has("\"over\":\"games\""), "START in the trash asks to empty it", O);
+		uint64_t t0 = now_ms();
+		rc = call("go_screen", "home");
+		need(rc != 0 && has("A dialog is open") && has("cross = yes, circle = no") && now_ms() - t0 < 1000, "the trash question: go_screen is refused at once", O);
+		rc = call("press_button", "circle");
+		need(rc == 0 && has("\"screen\":\"games\"") && has("\"dialog\":null"), "press_button circle answers no", O);
+		need(vf_exists("/dev_hdd0/PSXISO/.trash/Alundra (Europe) [SLES_011.35].bin"), "the trash was not emptied");
+		rc = call("go_screen", "home");
+		need(rc == 0 && has("\"screen\":\"home\"") && has("\"dialog\":null"), "home again from the game list", O);
+		on_ui([&] { snprintf(host_root, sizeof host_root, "%s", keep_root); });
+	}
+	// the actions: the pad's checks, the reasons in the app's words, the tab shown
+	{
+		int rc = call("rip", "usb2");
+		need(rc != 0 && has("no disc"), "rip on an empty drive is refused: no disc", O);
+		rc = call("rip", "usb0");
+		need(rc == 0 && has("\"tab\":\"usb0\"") && job_rows("rip", AU_MCP) == 1, "rip usb0 starts a rip (source mcp) on its tab", O);
+		on_ui([]() { g_cards[1].job = 1; });   // usb0 rips
+		rc = call("eject", "usb0");
+		need(rc != 0 && has("cannot be ejected") && g_cards[1].state == DISC_READY, "eject while ripping is refused", O);
+		pad(B_TRIANGLE);
+		need(g_cards[1].state == DISC_READY, "the pad's eject while ripping does nothing either");
+		rc = call("rip", "usb0");
+		need(rc != 0 && job_rows("rip", AU_MCP) == 1, "rip on a ripping drive is refused", O);
+		rc = call("go_screen", "drive_settings:usb0");
+		need(rc != 0 && has("\"screen\"") == false && has("A job runs on this drive: its settings can be opened when it has ended."), "a ripping drive's settings do not open", O);
+		rc = call("skip_rereads", "usb0");
+		need(rc != 0 && has("not re-reading"), "skip_rereads while not re-reading is refused", O);
+		on_ui([]() { OnCard oc(1); g_phase = 1; });
+		rc = call("skip_rereads", "usb0");
+		need(rc == 0 && cx_of(1, 0) == 1, "skip_rereads while re-reading", O);
+		rc = call("cancel", "usb0");
+		need(rc == 0 && has("\"screen\":\"home\"") && cx_of(1, 1) == 1, "cancel: the call is the confirmation (no dialog)", O);
+		need(read_file(LOG_PATH).find("cancel") != std::string::npos, "the cancel is logged");
+		// the pad's cancel question answered over MCP: the log says it was confirmed, by mcp
+		on_ui([]() { OnCard oc(1); g_abort = 0; });
+		call("go_tab", "usb0");
+		rc = call("press_button", "circle");
+		need(rc == 0 && has("\"screen\":\"dialog\"") && has("\"question\":true"), "press_button circle on a ripping tab asks to cancel", O);
+		rc = call("press_button", "cross");
+		need(rc == 0 && has("\"dialog\":null") && cx_of(1, 1) == 1, "press_button cross confirms the cancel", O);
+		need(read_file(LOG_PATH).find("cancel on card 1: confirmed (mcp)") != std::string::npos, "the cancel answered over MCP logs: confirmed (mcp)");
+		need(read_file(LOG_PATH).find("cancel on card 1: mcp, the call is the confirmation") != std::string::npos, "the cancel tool logs: the call is the confirmation");
+		on_ui([]() { g_cards[1].job = 0; OnCard oc(1); g_abort = 0; g_skip = 0; g_phase = 0; });
+		rc = call("cancel", "usb0");
+		need(rc != 0 && has("Nothing runs"), "cancel with nothing running is refused", O);
+		rc = call("check", "usb2");
+		need(rc != 0 && has("no disc"), "check on an empty drive is refused: no disc", O);
+		on_ui([]() { ripped(0, -1, 0); });
+		rc = call("check", "internal");
+		need(rc == 0 && has("\"tab\":\"internal\"") && job_rows("check", AU_MCP) == 1, "check internal starts a check (source mcp)", O);
+		rc = call("repair", "usb0");
+		need(rc != 0 && job_rows("repair", AU_MCP) == 0, "repair without a rip to repair is refused", O);
+		rc = call("eject", "usb0");
+		need(rc == 0 && g_cards[1].state == DISC_NONE, "eject usb0", O);
+		// the pad goes through the same checks: X on the internal drive rips (source: the remote pad)
+		on_ui([]() { g_cards[0].prev_rip = 0; g_cards[0].exist[0] = 0; g_cards[0].state = DISC_READY; });
+		call("go_tab", "internal");
+		pad(B_CROSS);
+		need(job_rows("rip", AU_REMOTE) == 1, "the pad's X rips through the same check");
+	}
+	// a press posted while a screen opens (between a loop's own pad_pressed and the new screen's entry
+	// swallow) reaches the new screen's loop: the pad's X on a disc while another drive rips opens
+	// "one at a time" (own_dialog swallows the pad on entry); MCP's cross is posted on the way there
+	{
+		static volatile int posted, hooked;
+		static int btn_rc;
+		static std::string btn_out;
+		static pthread_t bt;
+		posted = hooked = 0; btn_rc = -9; btn_out.clear();
+		on_ui([]() { g_cards[0].prev_rip = 0; g_cards[0].exist[0] = 0; g_cards[0].state = DISC_READY; g_cards[1].job = 1; OnCard oc(1); g_state = ST_RIPPING; });
+		int par_was = g_parallel;
+		g_parallel = 0;
+		call("go_tab", "internal");
+		on_ui([]() {
+			host_io = []() {   // in can_rip (the space check), after home's pad_pressed took X
+				if (hooked) return;
+				hooked = 1;
+				pthread_create(&bt, NULL, [](void *) -> void * {
+					std::vector<char> b(MCP_MAX_RESPONSE);
+					btn_rc = g_mcp_hooks.ui("press_button", "cross", b.data(), (int)b.size());
+					btn_out = b.data();
+					return NULL;
+				}, NULL);
+				uint64_t t0 = now_ms();
+				while (g_req_state != RQ_POSTED && now_ms() - t0 < 2000) usleep(500);
+				posted = g_req_state == RQ_POSTED;
+			};
+			__sync_fetch_and_or(&g_remote_btn, B_CROSS);
+		});
+		bg_frames(4);
+		if (hooked) pthread_join(bt, NULL);
+		host_io = NULL;
+		bg_frames(4);
+		UiState u;
+		ui_snapshot(u);
+		need(hooked && posted, "the press was posted while the dialog opened");
+		need(btn_rc == 0 && btn_out.find("\"dialog\":null") != std::string::npos && !u.dlg_open,
+		     "a press posted while a screen opens reaches the new screen's loop (not its entry swallow)", btn_out.c_str());
+		on_ui([]() { g_cards[1].job = 0; OnCard oc(1); g_state = ST_HOME; });
+		g_parallel = par_was;
+	}
+	// set_setting, then rip in the same frame: the rip uses the new value (the card takes it first)
+	{
+		on_ui([]() { g_cards[0].state = DISC_READY; g_cards[0].prev_rip = 0; OnCard oc(0); g_speed = 0; });
+		call("go_tab", "internal");
+		on_ui([]() {
+			static char o2[4096];
+			g_mcp_hooks.set_setting("speed", "1", "internal", o2, sizeof o2);   // after this frame's take
+			__sync_fetch_and_or(&g_remote_btn, B_CROSS);
+		});
+		bg_frames(4);
+		need(job_rows("rip", AU_REMOTE) == 2 && cx_of(0, 2) == 1, "a rip right after set_setting uses the new speed");
+		// the drive's settings screen: a change in the same frame keeps what MCP saved
+		call("go_screen", "drive_settings:usb2");
+		on_ui([]() {
+			static char o2[4096];
+			g_mcp_hooks.set_setting("retries", "8", "usb2", o2, sizeof o2);
+			__sync_fetch_and_or(&g_remote_btn, B_RIGHT);   // row 0: speed
+		});
+		bg_frames(4);
+		need(g_usbcfg[2].retries == 8 && g_usbcfg[2].speed != -1, "the drive screen's change keeps the retries MCP saved");
+		call("go_screen", "home");
+	}
+	// two clients at once: each answer is the state after its own request
+	{
+		struct Cl { const char *drive; int ok, n; };
+		static Cl cl[2] = {{"usb2", 0, 0}, {"internal", 0, 0}};
+		pthread_t t[2];
+		for (int i = 0; i < 2; i++) {
+			cl[i].ok = cl[i].n = 0;
+			pthread_create(&t[i], NULL, [](void *p) -> void * {
+				Cl *c = (Cl *)p;
+				std::vector<char> b(MCP_MAX_RESPONSE);
+				char want[32];
+				snprintf(want, sizeof want, "\"tab\":\"%s\"", c->drive);
+				for (int k = 0; k < 15; k++, c->n++)
+					if (!g_mcp_hooks.ui("go_tab", c->drive, b.data(), (int)b.size()) && strstr(b.data(), want)) c->ok++;
+				return NULL;
+			}, &cl[i]);
+		}
+		for (int i = 0; i < 2; i++) pthread_join(t[i], NULL);
+		need(cl[0].ok == cl[0].n && cl[1].ok == cl[1].n, "two clients: every answer shows its own tab");
+	}
+	bg_stop();
+	// the slot: a request the UI looked at, withdrawn at the 5 s limit and replaced by another, is not
+	// taken in its place (the sequence number), and a look never leaves the slot changed
+	{
+		UiReq a; memset(&a, 0, sizeof a); a.kind = RK_SCREEN; a.scr = SCR_DRIVE_SETTINGS; a.card = 2; a.seq = 101;
+		g_req = a; g_req_state = RQ_POSTED;
+		UiReq seen;
+		need(ui_req_peek(seen) && seen.seq == 101 && seen.card == 2 && g_req_state == RQ_POSTED, "the UI looks at a posted request");
+		need(__sync_bool_compare_and_swap(&g_req_state, RQ_POSTED, RQ_FREE), "MCP withdraws it");
+		UiReq b = a; b.card = 1; b.seq = 102;
+		g_req = b; g_req_state = RQ_POSTED;
+		need(!ui_req_take(1 << RK_SCREEN, seen.seq) && g_req_state == RQ_POSTED, "another request is not taken for the one looked at");
+		need(ui_req_take(1 << RK_SCREEN, 102) && g_req_state == RQ_TAKEN, "the request looked at is taken");
+		g_req_state = RQ_FREE;
+		need(!ui_req_peek(seen), "nothing posted: nothing to look at");
+	}
+	// nobody takes the request (the UI thread is elsewhere): busy after 5 s, nothing left behind
+	{
+		uint64_t t0 = now_ms();
+		int rc = call("go_tab", "internal");
+		uint64_t dt = now_ms() - t0;
+		need(rc != 0 && has("Busy") && dt >= 4500 && dt < 6500, "a request the UI does not take: busy after 5 s", O);
+		{ UiLock lock; g_ui.osk = 1; }
+		t0 = now_ms();
+		rc = call("press_button", "cross");
+		need(rc != 0 && has("keyboard") && now_ms() - t0 < 1000, "the on-screen keyboard: busy at once, nothing pressed", O);
+		{ UiLock lock; g_ui.osk = 0; }
+		need(g_remote_btn == 0, "nothing was pressed");
+	}
+	// a config value outside a setting's list (retries 3, a drive's 64): kept, listed, taken back
+	{
+		g_std.retries = 3; g_usbcfg[0] = DriveCfg{1, 64, -1, -1, -1, -1};
+		char b[MCP_MAX_RESPONSE];
+		int rc = h.list_settings(b, sizeof b);
+		FILE *f = fopen("out/mcp-settings-odd.json", "w"); if (f) { fputs(b, f); fclose(f); }
+		need(rc == 0 && !system("python3 check_settings.py out/mcp-settings-odd.json internal usb0 usb2"), "a value outside the list is among the values (check_settings.py)");
+		const char *r = strstr(b, "\"key\":\"retries\",\"scope\":\"standard\"");
+		need(r && strstr(r, "\"value\":\"3\",\"values\":[") && strstr(r, "{\"value\":\"3\",\"label\":{\"en\":\"3\""), "retries 3 is listed as the value", r);
+		rc = h.set_setting("retries", "3", NULL, b, sizeof b);
+		need(rc == 0 && g_std.retries == 3, "retries 3 is taken back (the current value)", b);
+		rc = h.set_setting("retries", "64", NULL, b, sizeof b);
+		need(rc != 0 && g_std.retries == 3, "retries 64 is still refused for the standard", b);
+		rc = h.set_setting("retries", "64", "usb0", b, sizeof b);
+		need(rc == 0 && g_usbcfg[0].retries == 64, "usb0's retries 64 is taken back", b);
+		rc = h.set_setting("retries", "16", "usb0", b, sizeof b);
+		rc = h.set_setting("retries", "64", "usb0", b, sizeof b);
+		need(rc != 0 && g_usbcfg[0].retries == 16, "once changed, 64 is not offered any more", b);
+	}
+	#undef O
+
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF;
+	for (int c = 0; c < NCARDS; c++) { card_defaults(g_cards[c]); g_cards[c].pend_cfg = 0; }
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	ui_at(SCR_HOME);
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   MCP: screens, tabs, buttons, dialogs, actions with the pad's checks, busy, two clients\n");
+}
+
+// ---------------------------------------------------------------- MCP: the game list's tools
+// list_games and get_game read on MCP's thread (their own scan); the actions are requests the game
+// list screen carries out as the pad would, with source mcp in the audit log.
+static volatile int g_gc_hold;   // the check job waits after its first disc while this is set (a real thread then)
+static void gc_hold_hook(int) { while (g_gc_hold) usleep(1000); }
+static bool json_ok(const char *s)   // python's reader decides (not the app's own writer)
+{
+	FILE *f = fopen("out/mcp-games.json", "w");
+	if (!f) return false;
+	fputs(s, f);
+	fclose(f);
+	return !system("python3 -c 'import json,sys; json.load(open(sys.argv[1]))' out/mcp-games.json 2>&1");
+}
+static McpGameQuery gq(const char *src = "", int limit = 50)
+{
+	McpGameQuery q;
+	memset(&q, 0, sizeof q);
+	snprintf(q.source, sizeof q.source, "%s", src);
+	q.limit = limit;
+	q.expect = -1;   // (empty_trash: no expectation)
+	return q;
+}
+// empty_trash's expect by ids, as mcp.cpp hands it on
+static McpGameQuery gq_ids(const char *src, std::vector<const char *> ids)
+{
+	McpGameQuery q = gq(src);
+	q.expect = (int)ids.size();
+	q.expect_ids = 1;
+	for (const char *id : ids) q.expect_hash += mcp_id_hash(id);
+	return q;
+}
+// The rows' ids of a list_games answer (a group's discs have no name).
+static std::vector<std::string> row_ids(const std::string &out)
+{
+	std::vector<std::string> ids;
+	size_t p = 0;
+	while ((p = out.find("{\"id\":\"", p)) != std::string::npos) {
+		p += 7;
+		size_t e = out.find('"', p);
+		if (out.compare(e, 9, "\",\"name\":") == 0) ids.push_back(out.substr(p, e - p));
+	}
+	return ids;
+}
+static int src_rows(AuditDom dom, const char *what, AuditSrc src)   // job rows of a domain by kind and source
+{
+	static AuditRow r[200];
+	int n = audit_events(dom, NULL, r, 200), k = 0;
+	for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, "job") && !strcmp(r[i].what, what) && r[i].src == src) k++;
+	return k;
+}
+// The texts the screen draws now: the UI thread draws its frame again and they are taken from it
+// (trace_drawn is the trace while the game list's MCP scenarios run).
+static pthread_mutex_t g_texts_mx = PTHREAD_MUTEX_INITIALIZER;
+static std::vector<std::string> g_texts;
+static void trace_drawn(int kind, int x, int y, int w, int h, const char *text, int extra)
+{
+	trace(kind, x, y, w, h, text, extra);
+	if (kind != UI_TRACE_TEXT || !text || !*text) return;
+	pthread_mutex_lock(&g_texts_mx);
+	g_texts.push_back(text);
+	pthread_mutex_unlock(&g_texts_mx);
+}
+static std::string frame_texts()
+{
+	on_ui([] { pthread_mutex_lock(&g_texts_mx); g_texts.clear(); pthread_mutex_unlock(&g_texts_mx); g_redraw = 2; });
+	bg_frames(3);
+	std::string all;
+	pthread_mutex_lock(&g_texts_mx);
+	for (auto &t : g_texts) all += t + "\n";
+	pthread_mutex_unlock(&g_texts_mx);
+	return all;
+}
+static void mcp_games_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp games: %s%s%.600s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	char keep_root[256];
+	snprintf(keep_root, sizeof keep_root, "%s", host_root);
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	audit_set_move_hooks(gm_moved_hook, gm_busy_hook);
+	reset_all();
+	gs_library();
+	g_redump = RD_OFF; host_rd_local = 0;
+	g_gc_last.set = 0;
+	snprintf(g_games_source, sizeof g_games_source, "hdd");
+	g_games_filter = GameFilter{0, 0, 0, 0};
+	g_gl_stale = 1;
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();
+	const McpHooks &h = g_mcp_hooks;
+	mcp_init(&g_mcp_hooks, APP_VERSION);
+	static char outb[MCP_MAX_RESPONSE];
+	std::string out;
+	auto has = [&](const char *s) { return out.find(s) != std::string::npos; };
+	auto list = [&](McpGameQuery q) { int rc = h.list_games(&q, outb, sizeof outb); out = outb; return rc; };
+	auto get = [&](const char *id) { int rc = h.get_game(id, outb, sizeof outb); out = outb; return rc; };
+	auto act = [&](const char *tool, const char *id, const char *pat = NULL, McpGameQuery q = gq()) {
+		int rc = h.game(tool, id, pat, &q, outb, sizeof outb); out = outb; return rc; };
+	const char *o = NULL;
+	#define O (o = out.c_str())
+	const char *ALUNDRA = "hdd:/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35]";
+	const char *APE = "hdd:/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15]";
+	const char *APE_T = "hdd:/dev_hdd0/PSXISO/.trash/Ape Escape (Europe) [SCES_011.15]";
+	const char *FF9 = "hdd:/dev_hdd0/PSXISO/Final Fantasy IX (Europe) (Disc 1) [SLES_029.65]";
+
+	// list_games: every source, the summary, the rows with their ids and marks (no UI thread runs:
+	// it never needs the screen)
+	{
+		int rc = list(gq());
+		need(rc == 0 && json_ok(out.c_str()), "list_games: valid JSON", O);
+		need(has("\"source\":\"all\"") && has("\"matching\":22") && has("\"next_offset\":null"), "list_games: all 22 games, one page", O);
+		need(has("{\"key\":\"hdd\",\"label\":\"Hard disk\",\"discs\":24}") && has("{\"key\":\"usb1\",\"label\":\"USB 1 (RIPS)\",\"discs\":1}"), "list_games: the sources with their labels", O);
+		need(has("\"summary\":{\"text\":\"22 games · 1 verified · 2 with errors · 1 re-rip · 1 broken\",\"games\":22,\"verified\":1,\"errors\":2,\"rerip\":1,\"broken\":1}"),
+		     "list_games: the summary line's counts", O);
+		std::string al = std::string("{\"id\":\"") + ALUNDRA + "\",\"name\":\"Alundra (Europe)\",\"disc_id\":\"SLES_011.35\",\"format\":\"2352\",\"tracks\":1,\"status\":\"verified\"";
+		need(has(al.c_str()) && has("\"redump_name\":\"Alundra (Europe)\"") && has("\"place\":{\"source\":\"hdd\",\"label\":\"Hard disk\",\"folder\":\"/dev_hdd0/PSXISO\"}"),
+		     "list_games: a row's id, name, disc ID, format, status, Redump name, place", O);
+		need(has("\"id\":\"hdd:/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso\"") && has("\"format\":\"2048\",\"tracks\":1,\"status\":\"rerip\""),
+		     "list_games: an .iso's id names its type; a 2048 image is re-rip", O);
+		need(has("\"id\":\"usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]\"") && has("\"place\":{\"source\":\"usb1\",\"label\":\"USB 1 (RIPS)\""),
+		     "list_games: a game on a stick", O);
+		std::string ff = std::string("\"id\":\"") + FF9 + "\",\"name\":\"Final Fantasy IX";
+		need(has(ff.c_str()) && has("\"ndiscs\":4,\"discs\":[") && has("\"status\":\"errors\",\"status_text\":\"3 errors\",\"errors\":3"),
+		     "list_games: a game of four discs, its worst status and its discs", O);
+		need(has("\"name\":\"MediEvil (Europe)\"") && out.find("\"sbi_missing\":true") != std::string::npos && out.find("\"duplicate\":true") != std::string::npos &&
+		     has("\"in_trash\":false"), "list_games: the marks", O);
+		need(has("\"check\":{\"running\":false,\"last\":null}"), "list_games: no check has run", O);
+		// pages: ids are the same game in every page, no game twice
+		std::set<std::string> ids;
+		int pages = 0, total = 0;
+		for (int off = 0; off < 22; off += 5, pages++) {
+			McpGameQuery q = gq("", 5);
+			q.offset = off;
+			rc = list(q);
+			size_t p = 0;
+			int k = 0;
+			while ((p = out.find("{\"id\":\"", p)) != std::string::npos) {   // the rows (a group's discs have no name)
+				p += 7;
+				size_t e = out.find('"', p);
+				if (out.compare(e, 9, "\",\"name\":") == 0) { ids.insert(out.substr(p, e - p)); k++; }
+			}
+			total += k;
+			char want[48];
+			if (off + 5 < 22) snprintf(want, sizeof want, "\"next_offset\":%d", off + 5); else snprintf(want, sizeof want, "\"next_offset\":null");
+			need(rc == 0 && k == (off + 5 <= 22 ? 5 : 2) && has(want), "list_games: a page of 5", O);
+		}
+		need(pages == 5 && total == 22 && ids.size() == 22, "list_games: five pages, 22 different ids");
+		// the filter panel's criteria, the source
+		McpGameQuery q = gq();
+		q.fmt = 2;
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":1") && has("Castlevania") && has("\"filter\":{\"format\":\"2048\",\"redump\":\"any\",\"errors\":\"any\",\"other\":\"any\",\"show\":\"games\"}"),
+		     "list_games: format 2048", O);
+		q = gq(); q.redump = 1;
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":2") && has("Alundra") && has("Final Fantasy IX") && !has("Ape Escape"), "list_games: verified (a group with one verified disc)", O);
+		q = gq(); q.other = 2;
+		rc = list(q);
+		need(rc == 0 && has("Croc 2") && has("WipEout 3") && !has("Alundra"), "list_games: duplicates", O);
+		rc = list(gq("hdd"));
+		need(rc == 0 && has("\"source\":\"hdd\"") && has("\"matching\":21") && !has("usb1:"), "list_games: the hard disk only", O);
+		rc = list(gq("usb5"));
+		need(rc != 0 && has("not connected"), "list_games: a source that is not there", O);
+		q = gq(); q.trash = 1;
+		rc = list(q);
+		need(rc == 0 && has("\"trash\":true") && has("\"matching\":0") && has("\"games\":[]"), "list_games: the trash, empty", O);
+		// get_game: the detail view, every disc
+		rc = get(FF9);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"ndiscs\":4") && has("{\"label\":\"Status\",\"value\":\"3 errors\"}") &&
+		     has("\"value\":\"4f1c7d0b9e2a3c5d6e7f8091a2b3c4d5\"") && has("120344") && has("\"files\":[") &&
+		     has("Final Fantasy IX (Europe) (Disc 4) [SLES_329.65].cue"), "get_game: the detail view of four discs", O);
+		rc = get("hdd:/dev_hdd0/PSXISO/Nothing here");
+		need(rc != 0 && has("No game") && has("list_games"), "get_game: an id the list does not have", O);
+		rc = get("Alundra");
+		need(rc != 0 && has("No game"), "get_game: not an id", O);
+		// query: a part of the name, any case
+		q = gq(); snprintf(q.query, sizeof q.query, "CROC");
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":2") && has("usb1:/dev_usb001/PSXISO/Croc 2") && !has("Alundra") && has("\"query\":\"CROC\""),
+		     "list_games: query, any case, every source", O);
+		q = gq("hdd"); q.redump = 1; snprintf(q.query, sizeof q.query, "fantasy");
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":1") && has("Final Fantasy IX") && !has("Alundra"), "list_games: query and the filter together", O);
+		q = gq(); snprintf(q.query, sizeof q.query, "zzz");
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":0") && has("\"games\":[]"), "list_games: a query nothing matches", O);
+		q = gq(); snprintf(q.query, sizeof q.query, "\xC3\x89" "chapp");
+		rc = list(q);
+		need(rc == 0 && has("\"matching\":1"), "list_games: a query that is not ASCII", O);
+		// one scan per source for list_games and one for get_game: they never read each other's again
+		// (the folders' dates are old: only the app's changes and a stick's age make a scan stale)
+		system("touch -t 202601010000 out/gl/dev_hdd0/PSXISO out/gl/dev_usb001/PSXISO");
+		rc = list(gq());
+		uint32_t reads = g_mg_reads;
+		rc = get(FF9);
+		need(rc == 0 && g_mg_reads == reads, "get_game: read from list_games' scan of All");
+		McpGameQuery p2 = gq("", 5); p2.offset = 5;
+		rc = list(p2);
+		need(rc == 0 && g_mg_reads == reads, "list_games: the next page from the same scan after get_game");
+		rc = list(gq("hdd"));
+		need(rc == 0 && g_mg_reads == reads + 1, "list_games: another source is read");
+		rc = get("usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]");
+		need(rc == 0 && g_mg_reads == reads + 2, "get_game: a source list_games has not read is read on its own");
+		rc = list(gq("hdd"));
+		need(rc == 0 && g_mg_reads == reads + 2, "list_games: its scan was not replaced by get_game's");
+		rc = get("usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]");
+		need(rc == 0 && g_mg_reads == reads + 2, "get_game: its own scan is kept too");
+		// a page that does not fit is cut (next_offset says where to go on); never a whole failure
+		{
+			static char small[2 * 6000 + 200];
+			std::set<std::string> seen;
+			int off = 0, pages = 0, cuts = 0;
+			for (; off >= 0 && pages < 40; pages++) {
+				McpGameQuery c = gq("", 200); c.offset = off;
+				rc = h.list_games(&c, small, sizeof small); out = small;
+				if (rc != 0 || !json_ok(small)) { need(false, "list_games: a cut page is valid JSON", O); break; }
+				std::vector<std::string> ids = row_ids(out);
+				for (auto &s : ids) seen.insert(s);
+				cuts += has("\"cut\":true");
+				size_t at = out.find("\"next_offset\":");
+				off = at == std::string::npos || out.compare(at + 14, 4, "null") == 0 ? -1 : atoi(out.c_str() + at + 14);
+				if (off >= 0 && off != c.offset + (int)ids.size()) { need(false, "list_games: next_offset is the first row left out", O); break; }
+			}
+			need(cuts > 0 && seen.size() == 22 && off < 0, "list_games: cut pages give every game once");
+			static char tiny[2 * 300 + 200];
+			McpGameQuery c = gq("", 200);
+			rc = h.list_games(&c, tiny, sizeof tiny); out = tiny;
+			need(rc != 0 && has("smaller limit"), "list_games: too large even for one row: says to use a smaller limit", O);
+		}
+		// MCP turned off: its scans are freed (also when one is in use then: when that call ends)
+		rc = list(gq());
+		need(g_mg != NULL && g_mg_one != NULL, "MCP's scans are kept while it is on");
+		char sb[256];
+		h.set_setting("mcp", "1", NULL, sb, sizeof sb);
+		h.set_setting("mcp", "0", NULL, sb, sizeof sb);
+		need(g_mg == NULL && g_mg_one == NULL, "set_setting mcp=0: MCP's scans are freed");
+		rc = list(gq());
+		{
+			MgLock held;   // a list_games call that is still reading
+			h.set_setting("mcp", "1", NULL, sb, sizeof sb);
+			h.set_setting("mcp", "0", NULL, sb, sizeof sb);
+			need(g_mg != NULL, "set_setting mcp=0 while a call reads: the UI does not wait for it");
+		}
+		need(g_mg == NULL, "set_setting mcp=0 while a call reads: freed when the call ends");
+		h.set_setting("mcp", "1", NULL, sb, sizeof sb);
+	}
+
+	bg_start();
+	// Redump off: check_game is refused with the pad's reason; the game list is shown on the way
+	{
+		int rc = act("check_game", APE);
+		need(rc != 0 && has(T_en(STR_GC_REDUMP_OFF)), "check_game with Redump off: the pad's reason", O);
+		UiState u; ui_snapshot(u);
+		need(u.scr == SCR_GAMES, "check_game went to the game list");
+		rc = act("check_games", NULL);
+		need(rc != 0 && has(T_en(STR_GC_REDUMP_OFF)), "check_games with Redump off", O);
+	}
+	// the trash: trash_game from the home screen, restore_game, refusals
+	{
+		h.ui("go_screen", "home", outb, sizeof outb);
+		int rc = act("trash_game", APE);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"trashed\":\"Ape Escape (Europe)\"") && has(APE_T) && has("\"state\":{\"screen\":\"games\""),
+		     "trash_game: moved, the new id, the state", O);
+		need(!vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin") && vf_exists("/dev_hdd0/PSXISO/.trash/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "trash_game: the files are in the trash");
+		need(src_rows(AU_FILES, "trash", AU_MCP) == 1, "trash_game: an audit job with source mcp");
+		rc = act("trash_game", APE);
+		need(rc != 0 && has("No game"), "trash_game: the old id is gone", O);
+		rc = act("trash_game", APE_T);
+		need(rc != 0 && has("already in the trash"), "trash_game: a game in the trash", O);
+		McpGameQuery q = gq(); q.trash = 1;
+		rc = list(q);
+		need(rc == 0 && has(APE_T) && has("\"in_trash\":true"), "list_games: the game in the trash", O);
+		rc = act("restore_game", ALUNDRA);
+		need(rc != 0 && has("not in the trash"), "restore_game: a game not in the trash", O);
+		rc = act("restore_game", APE_T);
+		need(rc == 0 && has("\"result\":{\"restored\":\"Ape Escape (Europe)\"") && vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "restore_game: back in its folder", O);
+		need(src_rows(AU_FILES, "restore", AU_MCP) == 1, "restore_game: an audit job with source mcp");
+		// a game on another source: the list shows that source on the way (All shows every source: it
+		// stays), but only SELECT and show_games remember a source (until a restart: never saved, M13)
+		auto saved_src = [&]() { FILE *f = fopen(CFG_PATH, "r"); char b[8192] = ""; if (f) { b[fread(b, 1, sizeof b - 1, f)] = 0; fclose(f); }
+		                         const char *s = strstr(b, "\ngames_source="); return std::string(s ? s + 14 : "", s ? strcspn(s + 14, "\n") : 0); };
+		rc = act("check_games", NULL, NULL, gq("hdd"));
+		need(rc != 0 && !strcmp(g_games_source, "hdd"), "check_games on the hard disk: the list shows it", O);
+		rc = act("trash_game", "usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]");
+		need(rc == 0 && vf_exists("/dev_usb001/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88].bin") && !strcmp(g_games_source, "hdd") && saved_src() == "",
+		     "trash_game on the stick: the list switched to it, the source is not remembered", O);
+		rc = act("restore_game", "usb1:/dev_usb001/PSXISO/.trash/Croc 2 (Europe) [SLES_020.88]");
+		need(rc == 0 && vf_exists("/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88].bin"), "restore_game on the stick", O);
+		rc = act("check_games", NULL, NULL, gq("all"));
+		need(rc != 0 && !strcmp(g_games_source, "hdd") && saved_src() == "", "check_games on All: not remembered either", O);
+		h.ui("go_screen", "home", outb, sizeof outb);
+		h.ui("go_screen", "games", outb, sizeof outb);
+		bg_frames(4);
+		need(!strcmp(g_gl.key, "hdd"), "the list opened again shows the remembered source");
+		// a source that is not connected cannot be chosen, as SELECT offers only the connected ones
+		uint64_t t0 = now_ms();
+		rc = act("check_games", NULL, NULL, gq("usb5"));
+		need(rc != 0 && has("not connected") && now_ms() - t0 < 1000 && !strcmp(g_games_source, "hdd"), "check_games on a source that is not there: refused at once", O);
+		rc = act("trash_game", "usb5:/dev_usb005/PSXISO/Croc 2 (Europe) [SLES_020.88]");
+		need(rc != 0 && has("not connected"), "trash_game on a source that is not there", O);
+		bg_frames(2);
+		need(!strcmp(g_gl.key, "hdd"), "the list still shows the hard disk");
+	}
+	// rename_game: the rename view's checks, the new names, get_game by the new id
+	{
+		const char *KL = "hdd:/dev_hdd0/PSXISO/Klonoa";
+		int rc = act("rename_game", KL, "%T (Fixed)");
+		need(rc == 0 && has("\"result\":{\"renamed\":\"Klonoa\"") && has("{\"id\":\"hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)\",\"name\":\"Klonoa (Fixed)\"}") &&
+		     vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).bin") && vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).cue"), "rename_game: renamed, the new name and id", O);
+		need(src_rows(AU_FILES, "rename", AU_MCP) == 1, "rename_game: an audit job with source mcp");
+		rc = get("hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)");
+		need(rc == 0 && has("Klonoa (Fixed).bin") && has("Klonoa (Fixed).cue"), "get_game: the new names", O);
+		rc = get(KL);
+		need(rc != 0 && has("No game"), "get_game: the old id is gone", O);
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", "%T (Fixed)");
+		need(rc != 0 && has(T_en(STR_GM_SAME)), "rename_game: the same name is refused with the view's reason", O);
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", "Spyro");
+		need(rc != 0 && has("Spyro is already there") && vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).bin"), "rename_game: a name that is taken", O);
+		std::string longp(96, 'x');
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", longp.c_str());
+		need(rc != 0 && has("95"), "rename_game: a pattern too long for the view", O);
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", "a\tb");
+		need(rc != 0 && has("control"), "rename_game: a control character", O);
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/.trash/Klonoa (Fixed)", "%T");
+		need(rc != 0, "rename_game: an id that is not there", O);
+		// a name starting with a dot would hide the game (the list and webMAN skip such names)
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", ".%T");
+		need(rc != 0 && has(T_en(STR_GM_DOT)) && vf_exists("/dev_hdd0/PSXISO/Klonoa (Fixed).bin"), "rename_game: a name starting with a dot", O);
+		rc = act("rename_game", "hdd:/dev_hdd0/PSXISO/Klonoa (Fixed)", ".");
+		need(rc != 0 && has(T_en(STR_GM_DOT)), "rename_game: the name \".\"", O);
+		// a game of 12 discs with long names: every disc's new id comes back (more than 2048 bytes)
+		const char *LONG = "A Game With A Very Long Title That Goes On And On (Europe) (En,Fr,De,Es,It,Nl,Sv)";
+		for (int i = 1; i <= 12; i++) {
+			char nm[160];
+			snprintf(nm, sizeof nm, "%s (Disc %d)", LONG, i);
+			gs_set("out/gl/dev_hdd0/PSXISO", nm, 3, NULL);
+		}
+		gl_changed();   // (as a rip into the folder: the list reads it again)
+		bg_frames(4);
+		char lid[200];
+		snprintf(lid, sizeof lid, "hdd:/dev_hdd0/PSXISO/%s (Disc 1)", LONG);
+		rc = act("rename_game", lid, "%T (Renamed)");
+		std::vector<std::string> nids;
+		for (size_t p = 0; (p = out.find("{\"id\":\"hdd:/dev_hdd0/PSXISO/A Game With", p)) != std::string::npos; p++) nids.push_back(out.substr(p, 20));
+		need(rc == 0 && json_ok(out.c_str()) && nids.size() >= 12 && has("(Disc 12) (Renamed)\",\"name\":") && out.find("\"discs\":[") < out.find("\"state\":"),
+		     "rename_game: the 12 discs' new ids", O);
+		snprintf(lid, sizeof lid, "hdd:/dev_hdd0/PSXISO/A Game With A Very Long Title That Goes On And On (Disc 1) (Renamed)");   // (the title: no regions)
+		rc = act("trash_game", lid);
+		need(rc == 0 && has("(Disc 12) (Renamed)\",\"name\":"), "trash_game: the 12 discs' new ids", O);
+		std::string tid = std::string(lid).insert(strlen("hdd:/dev_hdd0/PSXISO/"), ".trash/");
+		// only the game's id (its first disc) is not enough: every disc's id is expected
+		rc = act("empty_trash", NULL, NULL, gq_ids("hdd", {tid.c_str()}));
+		need(rc != 0 && has("has 12 discs now, not the 1 expected") && vf_exists("/dev_hdd0/PSXISO/.trash/A Game With A Very Long Title That Goes On And On (Disc 12) (Renamed).bin"),
+		     "empty_trash: one id for a game of 12 discs is refused (a disc added later would go too)", O);
+		std::vector<std::string> dids;
+		for (int i = 1; i <= 12; i++) {
+			char d[260];
+			snprintf(d, sizeof d, "hdd:/dev_hdd0/PSXISO/.trash/A Game With A Very Long Title That Goes On And On (Disc %d) (Renamed)", i);
+			dids.push_back(d);
+		}
+		std::vector<const char *> dp;
+		for (auto &x : dids) dp.push_back(x.c_str());
+		rc = act("empty_trash", NULL, NULL, gq_ids("hdd", dp));
+		need(rc == 0 && has("\"emptied\":true"), "empty_trash: the 12 discs (every disc's id expected)", O);
+	}
+	// empty_trash: never without confirm (the whole MCP path), then final, with source mcp
+	{
+		int rc = act("trash_game", "hdd:/dev_hdd0/PSXISO/Driver");
+		need(rc == 0 && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "Driver into the trash", O);
+		static char body[600];
+		snprintf(body, sizeof body, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"empty_trash\",\"arguments\":{\"source\":\"hdd\"}}}");
+		int st = mcp_handle(body, strlen(body), outb, sizeof outb);
+		out = outb;
+		need(st == 200 && has("\"isError\":true") && has("confirm: true") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash without confirm: refused, nothing deleted", O);
+		// only one source's trash, the one the agent names (never all of them at once)
+		rc = act("empty_trash", NULL, NULL, gq("all"));
+		need(rc != 0 && has("one source") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash on All: refused", O);
+		rc = act("empty_trash", NULL, NULL, gq(""));
+		need(rc != 0 && has("one source") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash without a source: refused", O);
+		// expect: what the agent saw in that trash; anything else there now: refused, nothing deleted
+		McpGameQuery e = gq("hdd"); e.expect = 2;
+		rc = act("empty_trash", NULL, NULL, e);
+		need(rc != 0 && has("Not emptied") && has("1 game") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash: expect 2 games, 1 there: refused", O);
+		rc = act("empty_trash", NULL, NULL, gq_ids("hdd", {"hdd:/dev_hdd0/PSXISO/.trash/Spyro"}));
+		need(rc != 0 && has("Not emptied") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash: expect another game's id: refused", O);
+		rc = act("empty_trash", NULL, NULL, gq_ids("hdd", {"hdd:/dev_hdd0/PSXISO/.trash/Driver", "hdd:/dev_hdd0/PSXISO/.trash/Spyro"}));
+		need(rc != 0 && has("Not emptied") && vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin"), "empty_trash: expect one id too many: refused", O);
+		need(src_rows(AU_FILES, "empty", AU_MCP) == 1, "empty_trash refused: no audit job");
+		snprintf(body, sizeof body, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"empty_trash\",\"arguments\":{\"source\":\"hdd\",\"confirm\":true,\"expect\":[\"hdd:/dev_hdd0/PSXISO/.trash/Driver\"]}}}");
+		st = mcp_handle(body, strlen(body), outb, sizeof outb);
+		out = outb;
+		need(st == 200 && has("\"isError\":false") && !vf_exists("/dev_hdd0/PSXISO/.trash/Driver.bin") && vf_exists("/dev_hdd0/PSXISO/Spyro.bin"),
+		     "empty_trash with confirm and the ids expected: the trash's files deleted, nothing else", O);
+		need(src_rows(AU_FILES, "empty", AU_MCP) == 2, "empty_trash: an audit job with source mcp");
+		rc = act("empty_trash", NULL, NULL, gq("hdd"));
+		need(rc != 0 && has("empty"), "empty_trash: an empty trash", O);
+	}
+	// checks over MCP: started at once; list_games shows the result
+	{
+		std::vector<uint8_t> zeros((size_t)3 * RAW_SIZE);
+		{ Md5 m; uint8_t d[16]; md5_init(&m); md5_update(&m, zeros.data(), zeros.size()); md5_final(&m, d); memcpy(host_rd_md5, d, 16); }
+		snprintf(host_rd_name, sizeof host_rd_name, "Spyro the Dragon (Europe)");
+		host_rd_local = 1;
+		g_redump = RD_LOCAL;
+		const char *SP = "hdd:/dev_hdd0/PSXISO/Spyro";
+		int rc = act("check_game", SP);
+		need(rc == 0 && has("\"result\":{\"started\":true,\"discs\":1}"), "check_game: started", O);
+		bg_frames(4);
+		rc = list(gq("hdd"));
+		std::string sp = std::string("\"id\":\"") + SP + "\",\"name\":\"Spyro\"";
+		size_t at = out.find(sp);
+		need(rc == 0 && at != std::string::npos && out.find("\"status\":\"verified\"", at) < out.find("\"id\":", at + 5) &&
+		     has("\"last\":{\"discs\":1,\"checked\":1,\"failed\":0,\"not_compared\":0,\"cancelled\":false,\"unreachable\":false}"),
+		     "list_games after check_game: verified, and the check's result", O);
+		need(src_rows(AU_RIPS, "check", AU_MCP) == 1, "check_game: an audit check job with source mcp");
+		McpGameQuery q = gq("hdd"); q.redump = 2;
+		rc = list(q);
+		int before = atoi(out.c_str() + out.find("\"matching\":") + 11);
+		rc = act("check_games", NULL, NULL, q);
+		need(rc == 0 && has("\"started\":true"), "check_games: the unchecked games of the hard disk", O);
+		bg_frames(4);
+		rc = list(q);
+		int after = atoi(out.c_str() + out.find("\"matching\":") + 11);
+		need(rc == 0 && before > 2 && after == 2 && has("Castlevania") && has("Tekken 3"), "check_games: only those that cannot be checked are left", O);
+		rc = act("check_games", NULL, NULL, q);
+		need(rc != 0 && has(T_en(STR_GC_NOTHING)), "check_games: nothing left to check", O);
+		rc = act("check_game", "hdd:/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso");
+		need(rc != 0 && has(T_en(STR_GC_NO_2048)), "check_game: a 2048 image, the pad's reason", O);
+		rc = act("cancel_check", NULL);
+		need(rc != 0 && has("No game list check"), "cancel_check with no check running", O);
+	}
+	// while the game list checks (its progress screen), nothing but cancel_check and the reading tools
+	// works; cancel_check stops it as circle does
+	{
+		host_thread_gc = 1;
+		g_gc_hold = 1;
+		g_gc_after = gc_hold_hook;
+		int rc = act("check_game", ALUNDRA);
+		need(rc == 0 && has("\"started\":true"), "check_game on a thread of its own: started", O);
+		bg_frames(4);
+		UiState u; ui_snapshot(u);
+		need(u.scr == SCR_GAME_CHECK && g_gc.running, "the progress screen shows while it checks");
+		uint64_t t0 = now_ms();
+		rc = act("trash_game", APE);
+		need(rc != 0 && has("being checked") && now_ms() - t0 < 1000 && vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "trash_game while checking: refused at once", O);
+		rc = act("rename_game", APE, "x");
+		need(rc != 0 && has("being checked"), "rename_game while checking: refused", O);
+		rc = act("check_games", NULL);
+		need(rc != 0 && has("being checked"), "check_games while checking: refused", O);
+		rc = h.ui("go_screen", "home", outb, sizeof outb); out = outb;
+		need(rc != 0 && has("being checked"), "go_screen while checking: refused", O);
+		rc = list(gq("hdd"));
+		need(rc == 0 && has("\"check\":{\"running\":true,\"disc\":1,\"of\":1"), "list_games while checking: works, with the progress", O);
+		rc = act("cancel_check", NULL);
+		need(rc == 0 && has("\"result\":{\"cancelled\":true}") && g_gc.abort, "cancel_check: the check stops as circle does", O);
+		g_gc_hold = 0;
+		for (int i = 0; i < 200 && g_gc.running; i++) usleep(5000);
+		bg_frames(4);
+		ui_snapshot(u);
+		need(!g_gc.running && u.scr == SCR_GAMES, "the check ended: the list again");
+		rc = list(gq("hdd"));
+		need(rc == 0 && has("\"cancelled\":true"), "list_games: the last check was cancelled", O);
+		g_gc_after = NULL;
+		host_thread_gc = 0;
+	}
+	// a check job running (not this screen's progress): trash and restore are refused as the pad's
+	// triangle is not offered then
+	{
+		g_gc.running = 1;
+		int rc = act("trash_game", APE);
+		need(rc != 0 && has(T_en(STR_GC_CARD_BUSY)) && vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin"), "trash_game while a check job runs: refused", O);
+		rc = act("restore_game", APE_T);
+		need(rc != 0, "restore_game while a check job runs: refused", O);
+		g_gc.running = 0;
+	}
+	// G9: a rip and an image of one base name are two games; each id acts on its own files
+	{
+		const char *CV = "Castlevania Chronicles (USA) [SLUS_013.48]";
+		gs_set("out/gl/dev_hdd0/PSXISO", CV, 3, NULL);
+		std::string rip = std::string("hdd:/dev_hdd0/PSXISO/") + CV, iso = rip + ".iso";
+		int rc = list(gq("hdd"));
+		std::string ripq = "\"id\":\"" + rip + "\",", isoq = "\"id\":\"" + iso + "\",";
+		need(rc == 0 && has(ripq.c_str()) && has(isoq.c_str()), "G9: the rip and the .iso are two rows", O);
+		rc = act("trash_game", iso.c_str());
+		std::string isot = std::string("hdd:/dev_hdd0/PSXISO/.trash/") + CV + ".iso";
+		need(rc == 0 && has(isot.c_str()) && vf_exists("/dev_hdd0/PSXISO/.trash/Castlevania Chronicles (USA) [SLUS_013.48].iso") &&
+		     vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].bin") && vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].cue") &&
+		     !vf_exists("/dev_hdd0/PSXISO/.trash/Castlevania Chronicles (USA) [SLUS_013.48].bin"), "G9: trash_game of the .iso moves only the image", O);
+		rc = list(gq("hdd"));
+		need(rc == 0 && has(ripq.c_str()) && !has(isoq.c_str()), "G9: list_games still shows the rip", O);
+		rc = get(isot.c_str());
+		need(rc == 0 && has("\"in_trash\":true") && has(".iso"), "G9: get_game on the trash id", O);
+		rc = act("restore_game", isot.c_str());
+		need(rc == 0 && vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso"), "G9: restore_game of the .iso", O);
+		rc = act("trash_game", rip.c_str());
+		need(rc == 0 && vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].iso") &&
+		     vf_exists("/dev_hdd0/PSXISO/.trash/Castlevania Chronicles (USA) [SLUS_013.48].bin"), "G9: trash_game of the rip leaves the .iso", O);
+		rc = act("restore_game", (std::string("hdd:/dev_hdd0/PSXISO/.trash/") + CV).c_str());
+		need(rc == 0 && vf_exists("/dev_hdd0/PSXISO/Castlevania Chronicles (USA) [SLUS_013.48].bin"), "G9: restore_game of the rip", O);
+	}
+	// a game request while the detail view, the filter panel or the rename view is open: they leave as
+	// circle does and the list carries it out
+	{
+		auto screen_is = [&](const char *s) { UiState u; ui_snapshot(u); return !strcmp(SCR_NAMES[u.scr], s); };
+		h.ui("go_screen", "home", outb, sizeof outb);
+		h.ui("go_screen", "games", outb, sizeof outb);
+		h.ui("press_button", "cross", outb, sizeof outb); out = outb;
+		need(screen_is("game_detail"), "the detail view is open", O);
+		int rc = act("trash_game", APE);
+		need(rc == 0 && has("\"trashed\"") && has("\"state\":{\"screen\":\"games\"") && vf_exists("/dev_hdd0/PSXISO/.trash/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "trash_game from the detail view", O);
+		h.ui("press_button", "r1", outb, sizeof outb);
+		need(screen_is("game_filter"), "the filter panel is open");
+		rc = act("restore_game", APE_T);
+		need(rc == 0 && has("\"restored\"") && has("\"state\":{\"screen\":\"games\"") && vf_exists("/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "restore_game from the filter panel", O);
+		h.ui("go_screen", "home", outb, sizeof outb);   // (the list shows the trash now: back to its games)
+		h.ui("go_screen", "games", outb, sizeof outb);
+		h.ui("press_button", "cross", outb, sizeof outb);
+		h.ui("press_button", "cross", outb, sizeof outb); out = outb;
+		need(screen_is("game_rename"), "the rename view is open", O);
+		rc = act("trash_game", APE);
+		need(rc == 0 && has("\"trashed\"") && has("\"state\":{\"screen\":\"games\"") && vf_exists("/dev_hdd0/PSXISO/.trash/Ape Escape (Europe) [SCES_011.15].bin"),
+		     "trash_game from the rename view", O);
+		rc = act("restore_game", APE_T);
+		need(rc == 0, "restore_game", O);
+	}
+	// show_games (M10): the list's source and filter in one step, as SELECT and the filter panel set them.
+	// Both last until the app restarts: never saved, no audit rows (M12, M13). Criteria not given keep
+	// their value, "clear" clears them as L1 does
+	{
+		auto show = [&](const char *src, int mask, GameFilter f, int trash = 0, int clear = 0) {
+			McpGameQuery q = gq(src);
+			q.fmt = f.fmt; q.redump = f.redump; q.errors = f.errors; q.other = f.other; q.trash = trash;
+			q.fgiven = mask; q.fclear = clear;
+			return act("show_games", NULL, NULL, q);
+		};
+		auto saved_has = [&](const char *key) { FILE *f = fopen(CFG_PATH, "r"); char b[8192] = ""; if (f) { b[fread(b, 1, sizeof b - 1, f)] = 0; fclose(f); }
+		                                        return strstr(b, (std::string("\n") + key + "=").c_str()) != NULL; };
+		auto filter_is = [&](int a, int b, int c, int d) { return g_games_filter.fmt == a && g_games_filter.redump == b && g_games_filter.errors == c && g_games_filter.other == d; };
+		void (*keep_trace)(int, int, int, int, int, const char *, int) = ui_trace;
+		ui_trace = trace_drawn;
+		h.ui("go_screen", "home", outb, sizeof outb);
+		bg_frames(2);
+		int s0 = setting_rows("games_source", AU_MCP), f0 = setting_rows("games_filter", AU_MCP);
+		// duplicates on every source, from the home screen (the example in docs/mcp.md)
+		McpGameQuery dq = gq("all"); dq.other = 2;
+		list(dq);
+		int dups = atoi(out.c_str() + out.find("\"matching\":") + 11);
+		int rc = show("all", 8, GameFilter{0, 0, 0, 2});
+		char shown[40];
+		snprintf(shown, sizeof shown, "\"shown\":%d,\"shown_text\":\"%d of 22\"", dups, dups);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"source\":\"all\",\"label\":\"All\",\"trash\":false,") &&
+		     has("\"filter\":{\"format\":\"any\",\"redump\":\"any\",\"errors\":\"any\",\"other\":\"duplicates\",\"show\":\"games\"}") &&
+		     has("\"summary\":{\"text\":\"22 games") && has(shown) && has("\"state\":{\"screen\":\"games\""), "show_games all, duplicates: the list and its summary", O);
+		need(dups >= 3 && !strcmp(g_games_source, "all") && !saved_has("games_source") && filter_is(0, 0, 0, 2) && !saved_has("games_filter"),
+		     "show_games: the source and filter are set, not saved", O);
+		need(has("\"note\":\"The source and filter last until the app restarts"), "show_games: the answer says they are not kept", O);
+		need(setting_rows("games_source", AU_MCP) == s0 && setting_rows("games_filter", AU_MCP) == f0 && s0 == 0 && f0 == 0, "show_games: no audit rows");
+		std::string ft = frame_texts();
+		char of[24];
+		snprintf(of, sizeof of, "%d of 22", dups);
+		need(ft.find("Games · All") != std::string::npos && ft.find("\nDuplicates\n") != std::string::npos && ft.find(of) != std::string::npos &&
+		     ft.find("Croc 2") != std::string::npos, "show_games: the screen shows All with the duplicates", ft.c_str());
+		// each criterion on its own: the others keep their value
+		rc = show("", 2, GameFilter{0, 1, 0, 0});
+		need(rc == 0 && filter_is(0, 1, 0, 2) && !saved_has("games_filter") && !strcmp(g_games_source, "all"), "show_games redump: the other criteria and the source kept", O);
+		rc = show("", 1, GameFilter{1, 0, 0, 0});
+		need(rc == 0 && filter_is(1, 1, 0, 2), "show_games format", O);
+		rc = show("", 4, GameFilter{0, 0, 2, 0});
+		need(rc == 0 && filter_is(1, 1, 2, 2) && has("\"errors\":\"without\""), "show_games errors", O);
+		rc = show("", 8, GameFilter{0, 0, 0, 3});
+		need(rc == 0 && filter_is(1, 1, 2, 3) && has("\"other\":\"sbi_missing\""), "show_games other", O);
+		rc = show("", 0, GameFilter{0, 0, 0, 0}, 0, 1);
+		need(rc == 0 && filter_is(0, 0, 0, 0) && !saved_has("games_filter") && has("\"shown\":22,\"shown_text\":\"22 of 22\""), "show_games clear: as L1", O);
+		ft = frame_texts();
+		need(ft.find("Alundra") != std::string::npos && ft.find("All games") != std::string::npos, "show_games clear: the screen shows every game", ft.c_str());
+		// the source alone; then show: trash (the view only, as the panel's Show: not saved)
+		int f1 = setting_rows("games_filter", AU_MCP);
+		rc = show("hdd", 0, GameFilter{0, 0, 0, 0});
+		need(rc == 0 && !strcmp(g_games_source, "hdd") && !saved_has("games_source") && !strcmp(g_gl.key, "hdd") && has("\"label\":\"Hard disk\"") &&
+		     setting_rows("games_filter", AU_MCP) == f1, "show_games hdd: the source set, the filter untouched", O);
+		rc = show("", 16, GameFilter{0, 0, 0, 0}, 1);
+		need(rc == 0 && has("\"trash\":true") && has("\"show\":\"trash\"") && !strcmp(g_gl.key, "t:hdd") && !saved_has("games_filter"), "show_games show trash", O);
+		rc = show("", 16, GameFilter{0, 0, 0, 0}, 0);
+		need(rc == 0 && has("\"trash\":false") && !strcmp(g_gl.key, "hdd"), "show_games show games", O);
+		// the stick: shown and remembered (until a restart)
+		rc = show("usb1", 0, GameFilter{0, 0, 0, 0});
+		need(rc == 0 && !strcmp(g_games_source, "usb1") && !saved_has("games_source") && has("\"label\":\"USB 1 (RIPS)\""), "show_games usb1", O);
+		// refused: a source that is not connected (at once, nothing changed)
+		uint64_t t0 = now_ms();
+		int s1 = setting_rows("games_source", AU_MCP);
+		rc = show("usb5", 1, GameFilter{2, 0, 0, 0});
+		need(rc != 0 && has("not connected") && now_ms() - t0 < 1000 && !strcmp(g_games_source, "usb1") && filter_is(0, 0, 0, 0) &&
+		     setting_rows("games_source", AU_MCP) == s1, "show_games on a source that is not there: refused, nothing changed", O);
+		// refused: the app's dialog is in the way (the pad cannot get to the list without answering it)
+		g_bg_tell = "A test message from tell.";
+		bg_frames(4);
+		t0 = now_ms();
+		rc = show("hdd", 0, GameFilter{0, 0, 0, 0});
+		need(rc != 0 && has("A dialog is open") && now_ms() - t0 < 1000 && !strcmp(g_games_source, "usb1"), "show_games with a dialog open: refused at once", O);
+		h.ui("press_button", "cross", outb, sizeof outb);
+		// refused while the game list checks
+		show("hdd", 0, GameFilter{0, 0, 0, 0});
+		host_thread_gc = 1;
+		g_gc_hold = 1;
+		g_gc_after = gc_hold_hook;
+		rc = act("check_game", ALUNDRA);
+		need(rc == 0 && has("\"started\":true"), "a check on a thread of its own", O);
+		bg_frames(4);
+		t0 = now_ms();
+		rc = show("all", 8, GameFilter{0, 0, 0, 2});
+		need(rc != 0 && has("being checked") && now_ms() - t0 < 1000 && !strcmp(g_games_source, "hdd") && filter_is(0, 0, 0, 0), "show_games while checking: refused", O);
+		act("cancel_check", NULL);
+		g_gc_hold = 0;
+		for (int i = 0; i < 200 && g_gc.running; i++) usleep(5000);
+		bg_frames(4);
+		g_gc_after = NULL;
+		host_thread_gc = 0;
+		// the pad's filter panel as before: R1, right (2352), circle applies it (not saved, no audit row); L1 clears
+		int f2 = setting_rows("games_filter", AU_MCP);
+		h.ui("press_button", "r1", outb, sizeof outb);
+		h.ui("press_button", "right", outb, sizeof outb);
+		h.ui("press_button", "circle", outb, sizeof outb); out = outb;
+		need(filter_is(1, 0, 0, 0) && !saved_has("games_filter") && setting_rows("games_filter", AU_MCP) == f2 && has("\"screen\":\"games\""), "the filter panel: applied, not saved", O);
+		h.ui("press_button", "l1", outb, sizeof outb);
+		need(filter_is(0, 0, 0, 0) && !saved_has("games_filter"), "L1 clears the filter");
+		need(setting_rows("games_source", AU_MCP) == 0 && setting_rows("games_filter", AU_MCP) == 0, "the pad and show_games: no audit rows");
+		// old games_source/games_filter rows in the log (from a version that saved them): a start adds no
+		// row for the lines that are gone, and their undo is refused (there is no setting to put back)
+		audit_setting(AU_APP, "games_source", "hdd", "usb1");
+		audit_setting(AU_APP, "games_filter", "0,0,0,0", "1,0,0,0");
+		int sa = setting_rows("games_source", AU_APP), fa = setting_rows("games_filter", AU_APP);
+		cfg_audit_boot();
+		need(setting_rows("games_source", AU_APP) == sa && setting_rows("games_filter", AU_APP) == fa, "a start: no audit rows for the old lines");
+		need(set_setting_hook("games_filter", "0,0,0,0") != 0 && set_setting_hook("games_source", "hdd") != 0 && filter_is(0, 0, 0, 0) &&
+		     !strcmp(g_games_source, "hdd") && !saved_has("games_filter") && !saved_has("games_source"), "the undo of an old row is refused");
+		// and the audit log shows them as not undoable, with the reason in words (no triangle that always fails)
+		audit_set_retired(cfg_retired);
+		{
+			static AuditRow ev[8];
+			int ne = audit_events(AU_SETTINGS, NULL, ev, 8), seen = 0;
+			for (int i = 0; i < ne; i++) {
+				if (strcmp(ev[i].kind, "setting") || (strcmp(ev[i].what, "games_filter") && strcmp(ev[i].what, "games_source"))) continue;
+				seen++;
+				char en[200], svt[200];
+				av_reason(av_row_reason(ev[i]), en, sizeof en, T_en);
+				av_reason(av_row_reason(ev[i]), svt, sizeof svt, T_sv);
+				need(!ev[i].reversible && ev[i].why == AW_RETIRED && !strcmp(en, "No longer a setting: nothing to undo") &&
+				     !strcmp(svt, "Inte längre en inställning: inget att ångra"), "an old row: not undoable, the reason in en and sv", en);
+			}
+			need(seen == 2, "both old rows are listed");
+		}
+		ui_trace = keep_trace;
+	}
+	h.ui("go_screen", "home", outb, sizeof outb);
+	bg_stop();
+	#undef O
+	// a game-list check holding a card's rip: the pad's and MCP's rip, check and repair say so (the
+	// card's tab too), as the job starts do
+	{
+		GcItem it;
+		memset(&it, 0, sizeof it);
+		snprintf(it.base, sizeof it.base, "/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35]");
+		Card &k = g_cards[0];
+		k.state = DISC_READY; k.job = 0; k.prev_rip = 1; k.repair_n = 1; k.rd_state = -1;
+		snprintf(k.exist, sizeof k.exist, "%s", it.base);
+		snprintf(k.base, sizeof k.base, "%s", it.base);
+		g_gc.items = &it; g_gc.n = 1; g_gc.i = 0; g_gc.running = 1;
+		char why[200];
+		int r1 = can_rip(0, T_en, why, sizeof why);
+		need(r1 != CAN_OK && !strcmp(why, T_en(STR_GC_CARD_BUSY)) && !strcmp(k.res, T(STR_GC_CARD_BUSY)), "can_rip: the game list checks this rip");
+		int r2 = can_check(0, T_en, why, sizeof why);
+		need(r2 != CAN_OK && !strcmp(why, T_en(STR_GC_CARD_BUSY)), "can_check: the game list checks this rip");
+		int r3 = can_repair(0, T_en, why, sizeof why);
+		need(r3 != CAN_OK && !strcmp(why, T_en(STR_GC_CARD_BUSY)), "can_repair: the game list checks this rip");
+		g_gc.running = 0; g_gc.items = NULL; g_gc.n = 0;
+	}
+	g_redump = RD_OFF; host_rd_local = 0;
+	snprintf(host_root, sizeof host_root, "%s", keep_root);
+	ui_at(SCR_HOME);
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log");
+	audit_init("out/audit", &vf_io);
+	reset_all();
+	if (bad) g_fail += bad; else printf("ok   MCP: the game list's tools (list, details, check, rename, trash, restore, empty, busy while checking)\n");
+}
+
+// ---------------------------------------------------------------- MCP: the app's other tools (ruling M11)
+// get_app_info, audit_log, preview_name and get_drives' events and free space: reading tools, on this
+// thread (as the web server's); nothing on the screen changes.
+static uint32_t job_row_id(uint32_t job) { AuditRow r; return audit_job_row(job, &r) ? r.id : 0; }
+static void mcp_app_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp app: %s%s%.600s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log out/au_img.bin");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
+	audit_set_retired(cfg_retired);
+	reset_all(); usb(0, 0); usb(1, 2);
+	for (int c = 0; c < 3; c++) g_cards[c].tried = 1;
+	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
+	const char *SECRET_URL = "http://10.0.0.9:8123/api/webhook/SECRETWEBHOOKID", *SECRET_HDR = "Authorization: Bearer TOPSECRETTOKEN";
+	snprintf(g_webhook, sizeof g_webhook, "%s", SECRET_URL);
+	snprintf(g_webhook_hdr[0], sizeof g_webhook_hdr[0], "%s", SECRET_HDR);
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();
+	const McpHooks &h = g_mcp_hooks;
+	mcp_init(&g_mcp_hooks, APP_VERSION);
+	static char outb[MCP_MAX_RESPONSE];
+	std::string out;
+	std::vector<std::string> said;
+	auto has = [&](const char *t) { return out.find(t) != std::string::npos; };
+	auto keep = [&](int rc) { out = outb; said.push_back(out); return rc; };
+	auto alog = [&](const char *dom, const char *disc, uint32_t job, int off = 0, int lim = 50) {
+		McpAuditQuery q;
+		memset(&q, 0, sizeof q);
+		snprintf(q.domain, sizeof q.domain, "%s", dom);
+		snprintf(q.disc, sizeof q.disc, "%s", disc);
+		q.job = job; q.offset = off; q.limit = lim;
+		return keep(h.audit_log(&q, outb, sizeof outb));
+	};
+	const char *o = NULL;
+	#define O (o = out.c_str())
+
+	// get_drives: the running job's events (the tab's list, newest first) in English whatever the
+	// console's language, and each destination's free space as the tab shows it
+	{
+		host_lang = PS3_LANG_SWEDISH; lang_init();
+		ripping(1, 1000, 291570, 0, 0, 0);
+		{ OnCard oc(1); rip_event(0x7CE0A0, STR_EV_RECOVERED, 4711); rip_event(0x7CE0A0, STR_EV_FIXED, 4712, "EDC"); }
+		char e1[160], e2[160];
+		snprintf(e1, sizeof e1, T_en(STR_EV_RECOVERED), 4711u, "");
+		snprintf(e2, sizeof e2, T_en(STR_EV_FIXED), 4712u, T_en(STR_WHY_CHECKSUM));
+		std::string want = std::string("\"events\":[\"") + e2 + "\",\"" + e1 + "\"]";
+		int rc = keep(h.drives(outb, sizeof outb));
+		need(rc == 0 && json_ok(out.c_str()) && has(want.c_str()), "get_drives: the job's events, newest first, in English", O);
+		{ OnCard oc(1); need(strstr(g_ev[1].text, T(STR_WHY_CHECKSUM)) != NULL, "the tab's event stays in the console's language", g_ev[1].text); }
+		need(has("\"free_gb\":338") && out.find("\"free_gb\"") != out.rfind("\"free_gb\""), "get_drives: free_gb of each drive's destination", O);
+		static char js[16384];
+		status_json(js, sizeof js);
+		need(json_ok(js) && strstr(js, want.c_str()) && strstr(js, "\"free_gb\":338"), "status.json has them too", js);
+		g_cards[1].job = 0;
+		{ OnCard oc(1); g_nev = 0; g_done = g_total = 0; }
+	}
+	// get_app_info: About in English, the address, parallel rips, the Redump copy and its last download
+	{
+		g_dl_last.set = 0;
+		int rc = keep(h.app_info(outb, sizeof outb));
+		need(rc == 0 && json_ok(out.c_str()), "get_app_info: valid JSON", O);
+		std::string desc = std::string("\"description\":\"") + T_en(STR_ABOUT_DESC) + "\"";
+		need(has("\"version\":\"" APP_VERSION "\"") && has(desc.c_str()) && has("\"author\":\"" APP_AUTHOR "\"") && has("\"source\":\"" APP_URL "\""),
+		     "get_app_info: the version and About's text", O);
+		need(has("\"license\":\"Free software under the GNU General Public License v3.\"") && has("\"libraries\":\"PSL1GHT"), "get_app_info: the licence and libraries", O);
+		need(has("\"address\":\"http://192.168.1.50:8090\"") && has("\"mcp\":\"http://192.168.1.50:8090/mcp\"") && has("\"parallel_rips\":true"),
+		     "get_app_info: the address and parallel rips", O);
+		need(has("\"redump_copy\":{\"discs\":1,\"version\":\"2026-06-15\",\"fetched\":null,\"downloading\":false,\"last_download\":null}"),
+		     "get_app_info: the Redump copy, no download yet", O);
+		g_dl_last.result = 21000; snprintf(g_dl_last.version, sizeof g_dl_last.version, "2026-11-01 10-00-00"); g_dl_last.at = 1762000000; g_dl_last.src = AU_MCP; g_dl_last.set = 1;
+		keep(h.app_info(outb, sizeof outb));
+		need(has("\"last_download\":{\"result\":\"done\",\"discs\":21000,\"error\":null,\"version\":\"2026-11-01 10-00-00\",\"at\":\"2025-11-01T12:26:40Z\",\"source\":\"mcp\"}"),
+		     "get_app_info: the last download", O);
+		g_dl_last.result = -3; g_dl_last.src = AU_PAD;
+		keep(h.app_info(outb, sizeof outb));
+		need(has("\"last_download\":{\"result\":\"failed\",\"discs\":null,\"error\":-3,\"version\":null,") && has("\"source\":\"pad\""), "get_app_info: a failed download", O);
+		g_dl_last.set = 0;
+	}
+	// audit_log: the screen's levels, every item with its verdict; secrets never shown
+	{
+		int rc = alog("", "", 0);
+		need(rc == 0 && json_ok(out.c_str()) && has("{\"domain\":\"rips\",\"label\":\"Rips\",\"lists\":\"discs\",\"empty\":true}") &&
+		     has("{\"domain\":\"settings\",\"label\":\"Settings\",\"lists\":\"events\",\"empty\":true}") && has("\"domain\":\"files\""), "audit_log: the three domains", O);
+		// a repair of Alundra with two sectors; the image has the new bytes, so the job can be undone
+		uint8_t a[2352], b[2352];
+		memset(a, 0x11, sizeof a); memset(b, 0x22, sizeof b);
+		{ FILE *f = fopen("out/au_img.bin", "wb"); for (int i = 0; i < 8; i++) fwrite(b, 1, sizeof b, f); fclose(f); }
+		uint32_t job = audit_job_begin(AU_MCP, "SLES_011.35", "Alundra", "repair");
+		audit_sector(job, "out/au_img.bin", 2, a, b);
+		audit_sector(job, "out/au_img.bin", 3, a, b);
+		audit_job_end(job, "finished");
+		audit_setting(AU_PAD, "speed", "0", "1");
+		audit_setting(AU_PAD, "name_pattern", "%T [%D]", "%T /api/webhook/SECRETWEBHOOKID");   // a secret in a plain row: shown as [secret]
+		audit_setting_private(AU_PAD, "webhook", "cleared", "set");
+		audit_setting(AU_APP, "games_filter", "0,0,0,0", "1,0,0,0");
+		uint32_t mv = audit_job_begin(AU_PAD, "SLES_011.35", "Alundra", "rename", AU_FILES);
+		audit_job_end(mv, "finished");
+		rc = alog("", "", 0);
+		need(rc == 0 && has("\"domain\":\"rips\",\"label\":\"Rips\",\"lists\":\"discs\",\"empty\":false") &&
+		     has("\"lists\":\"events\",\"empty\":false"), "audit_log: the domains have items now", O);
+		rc = alog("rips", "", 0);
+		need(rc == 0 && json_ok(out.c_str()) && has("{\"disc\":\"SLES_011.35\",\"name\":\"Alundra\",\"last\":\"") &&
+		     has("\"undo\":{\"can\":true,\"redo\":false,\"why\":null}") && has("\"next_offset\":null"), "audit_log rips: the disc, undoable", O);
+		rc = alog("files", "", 0);
+		need(rc == 0 && has("\"disc\":\"SLES_011.35\"") && has("\"can\":false") && has("undone by its jobs"), "audit_log files: a disc is undone by its jobs", O);
+		rc = alog("rips", "SLES_011.35", 0);
+		char jw[80];
+		snprintf(jw, sizeof jw, "\"kind\":\"job\",\"job\":%u,\"domain\":\"rips\"", (unsigned)job);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"domain\":\"rips\",\"disc\":\"SLES_011.35\",\"name\":\"Alundra\",\"undo\":{\"can\":true") && has(jw) &&
+		     has("\"label\":\"Repair\"") && has("\"source\":\"mcp\""), "audit_log a disc: its events, the job with its verdict", O);
+		rc = alog("", "", job);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"kind\":\"sector\"") && has("\"lba\":2,") && has("\"lba\":3,") && has("\"label\":\"Sector 2: changed\"") &&
+		     has("\"file\":\"out/au_img.bin\""), "audit_log a job: its rows, the sectors with their lba", O);
+		need(has("\"event\":{") && has("\"next_offset\":null"), "audit_log a job: its own row and no more", O);
+		rc = alog("", "", job, 0, 1);
+		need(rc == 0 && has("\"next_offset\":1") && has("\"limit\":1"), "audit_log a job: a page of one", O);
+		rc = alog("", "", job, 1, 1);
+		need(rc == 0 && has("\"offset\":1") && has("\"next_offset\":2"), "audit_log a job: the next page", O);
+		rc = alog("settings", "", 0);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"label\":\"Read speed: Max \xe2\x86\x92 8\xc3\x97\"") && has("\"what\":\"speed\",\"before\":\"0\",\"after\":\"1\""),
+		     "audit_log settings: a setting's row in English, with its values", O);
+		need(has("\"what\":\"webhook\",\"before\":\"cleared\",\"after\":\"set\""),
+		     "audit_log settings: a secret's row says only set / cleared", O);
+		need(has("[secret]") && !has("SECRETWEBHOOKID"), "audit_log: a secret in a plain row is masked", O);
+		std::string ret = std::string("\"why\":\"") + T_en(STR_AW_RETIRED) + "\"";
+		need(has(ret.c_str()), "audit_log: an old games_filter row is not undoable (AW_RETIRED)", O);
+		std::string sec = std::string("\"why\":\"") + T_en(STR_AW_SECRET) + "\"";
+		need(has(sec.c_str()), "audit_log: a secret's row cannot be undone, and says why", O);
+		// refusals
+		rc = alog("", "", 999999);
+		need(rc != 0 && has("No job 999999"), "audit_log: an unknown job", O);
+		rc = alog("rips", "SLUS_999.99", 0);
+		need(rc != 0 && has("No disc \"SLUS_999.99\" in the domain rips"), "audit_log: an unknown disc", O);
+		// undone: the verdict says the next step is a redo
+		char why[200];
+		AuditReason rs;
+		need(audit_undo_job(job, why, sizeof why, &rs) == 0, "the repair is undone", why);
+		rc = alog("rips", "SLES_011.35", 0);
+		need(rc == 0 && has("\"undo\":{\"can\":true,\"redo\":true,\"why\":null}"), "audit_log: an undone job's next step is a redo", O);
+	}
+	// preview_name: the names the pattern gives for the drives' discs (the File name view), one drive's,
+	// or an example when no drive has a disc
+	{
+		char f0[200], f1[200], l0[200];
+		name_from("%T (%R)", "Alundra (Europe)", "Alundra", "SLES_011.35", f0, sizeof f0);
+		name_from("%T (%R)", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "Croc 2", "SLES_020.88", f1, sizeof f1);
+		listed_name(f0, l0, sizeof l0);
+		int rc = keep(h.preview_name("%T (%R)", NULL, NULL, outb, sizeof outb));
+		std::string w0 = std::string("{\"drive\":\"internal\",\"disc\":\"Alundra\",\"serial\":\"SLES_011.35\",\"file\":\"") + f0 + ".bin\",\"webman\":\"" + l0 + "\",\"example\":false}";
+		std::string w1 = std::string("\"drive\":\"usb0\",\"disc\":\"Croc 2\",\"serial\":\"SLES_020.88\",\"file\":\"") + f1 + ".bin\"";
+		need(rc == 0 && json_ok(out.c_str()) && has("\"pattern\":\"%T (%R)\"") && has(w0.c_str()) && has(w1.c_str()) && !has("usb2"), "preview_name: every drive's disc", O);
+		need(!strcmp(g_name_pat, FN_PRESETS[0]), "preview_name changes nothing");
+		rc = keep(h.preview_name("%D", "usb0", NULL, outb, sizeof outb));
+		need(rc == 0 && has("\"file\":\"SLES_020.88.bin\"") && !has("internal"), "preview_name: one drive", O);
+		rc = keep(h.preview_name("", "internal", NULL, outb, sizeof outb));
+		need(rc == 0 && has("\"pattern\":\"%T [%D]\""), "preview_name: an empty pattern is the first ready-made one", O);
+		rc = keep(h.preview_name("%T", "usb2", NULL, outb, sizeof outb));
+		need(rc != 0 && has("no identified disc"), "preview_name: a drive without a disc", O);
+		rc = keep(h.preview_name("%T", "usb5", NULL, outb, sizeof outb));
+		need(rc != 0 && has("No drive \"usb5\""), "preview_name: a drive that is not there", O);
+		rc = keep(h.preview_name("%T\t", NULL, NULL, outb, sizeof outb));
+		need(rc != 0 && has("control character"), "preview_name: a control character", O);
+		std::string longp(96, 'x');
+		rc = keep(h.preview_name(longp.c_str(), NULL, NULL, outb, sizeof outb));
+		need(rc != 0 && has("too long"), "preview_name: too long", O);
+		g_cards[0].state = g_cards[1].state = DISC_NONE;
+		rc = keep(h.preview_name("%T", NULL, NULL, outb, sizeof outb));
+		need(rc == 0 && has("\"drive\":null,\"disc\":\"Croc 2\"") && has("\"example\":true"), "preview_name: an example when no drive has a disc", O);
+		// a game: each disc's new name, as the rename view's preview
+		char keep_root[256];
+		snprintf(keep_root, sizeof keep_root, "%s", host_root);
+		gs_library();
+		const char *ALUNDRA = "hdd:/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35]";
+		const char *FF9 = "hdd:/dev_hdd0/PSXISO/Final Fantasy IX (Europe) (Disc 1) [SLES_029.65]";
+		rc = keep(h.preview_name("%T", NULL, ALUNDRA, outb, sizeof outb));
+		need(rc == 0 && json_ok(out.c_str()) && has("\"now\":\"Alundra (Europe) [SLES_011.35].bin\",\"new\":\"Alundra.bin\"") && has("\"same\":false"),
+		     "preview_name: a game's new name", O);
+		rc = keep(h.preview_name("%N [%D]", NULL, ALUNDRA, outb, sizeof outb));
+		need(rc == 0 && has("\"same\":true"), "preview_name: the pattern that gives its name now", O);
+		rc = keep(h.preview_name("%D", NULL, FF9, outb, sizeof outb));
+		need(rc == 0 && has("\"new\":\"SLES_029.65.bin\"") && has("\"new\":\"SLES_329.65.bin\""), "preview_name: every disc of a game", O);
+		rc = keep(h.preview_name("%T", NULL, "hdd:/dev_hdd0/PSXISO/Nope", outb, sizeof outb));
+		need(rc != 0 && has("No game with the id"), "preview_name: an unknown game", O);
+		snprintf(host_root, sizeof host_root, "%s", keep_root);
+		mg_free();
+	}
+	for (const std::string &t : said)
+		if (t.find("SECRETWEBHOOKID") != std::string::npos || t.find("TOPSECRETTOKEN") != std::string::npos || t.find("10.0.0.9") != std::string::npos)
+			need(false, "a secret in an answer", t.c_str());
+	g_webhook[0] = 0; g_webhook_hdr[0][0] = 0;
+	host_lang = PS3_LANG_ENGLISH_US; lang_init();
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log out/au_img.bin");
+	audit_init("out/audit", &vf_io);
+	audit_set_retired(NULL);
+	reset_all();
+	#undef O
+	if (bad) g_fail += bad; else printf("ok   MCP: get_app_info, audit_log, preview_name, get_drives' events and free space\n");
+}
+
+// ---------------------------------------------------------------- MCP: the app's other changing tools
+// A tick for the long undo's tests: while g_hold_undo the undo stays at this tick (the UI thread keeps
+// answering requests through it); g_block_first_tick holds its first tick without any answer.
+static volatile int g_hold_undo, g_block_first_tick;
+static int held_tick(uint32_t done, uint32_t total)
+{
+	while (g_block_first_tick) usleep(1000);
+	int r = audit_undo_tick(done, total);
+	while (g_hold_undo) { audit_undo_tick(done, total); usleep(2000); }
+	return r;
+}
+// reset_settings (D1), redump_download (D2), webhook_test, show_game, audit_undo and audit_redo (D3):
+// requests the UI thread (home_screen here, on a thread of its own) takes as the pad would.
+static void mcp_app_ui_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp app ui: %s%s%.700s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log out/au_img.bin");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
+	audit_set_retired(cfg_retired);
+	reset_all(); usb(0, 0); usb(1, 2);
+	for (int c = 0; c < 3; c++) g_cards[c].tried = 1;
+	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
+	g_webhook[0] = 0; g_webhook_hdr[0][0] = 0; g_webhook_hdr_on = 0; g_webhook_on = 0; g_webhook_mask = WH_DEFAULT_MASK; g_webhook_step = 5;
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	g_remote = g_mcp = g_status_json = 1; g_audit_mb = 256;
+	memset(g_usbcfg, 0, sizeof g_usbcfg); g_bdcfg = DriveCfg{0, -1, -1, -1, -1, -1};
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();
+	const McpHooks &h = g_mcp_hooks;
+	mcp_init(&g_mcp_hooks, APP_VERSION);
+	static char outb[MCP_MAX_RESPONSE];
+	std::string out;
+	std::vector<std::string> said;
+	auto call = [&](const char *tool, const char *arg) { int rc = h.ui(tool, arg, outb, sizeof outb); out = outb; said.push_back(out); return rc; };
+	auto set = [&](const char *k, const char *v, const char *d = NULL) { int rc = h.set_setting(k, v, d, outb, sizeof outb); out = outb; return rc; };
+	auto has = [&](const char *t) { return out.find(t) != std::string::npos; };
+	auto state = [&]() { int rc = h.state(outb, sizeof outb); out = outb; return rc; };
+	auto info = [&]() { int rc = h.app_info(outb, sizeof outb); out = outb; return rc; };
+	auto undo = [&](int redo, uint32_t row, uint32_t job, const char *disc = "", int confirm = 0) {
+		McpAuditQuery q;
+		memset(&q, 0, sizeof q);
+		q.row = row; q.job = job; q.confirm = confirm;
+		snprintf(q.disc, sizeof q.disc, "%s", disc);
+		int rc = h.audit_undo(redo, &q, outb, sizeof outb);
+		out = outb;
+		said.push_back(out);
+		return rc;
+	};
+	auto newest_row = [&](AuditDom dom, const char *kind, const char *what) {
+		static AuditRow r[64];
+		int n = audit_events(dom, NULL, r, 64);
+		for (int i = 0; i < n; i++) if (!strcmp(r[i].kind, kind) && !strcmp(r[i].what, what)) return r[i].id;
+		return (uint32_t)0;
+	};
+	auto wait_for = [&](std::function<bool()> ok) { uint64_t t0 = now_ms(); while (!ok() && now_ms() - t0 < 3000) usleep(1000); return ok(); };
+	const char *o = NULL;
+	#define O (o = out.c_str())
+	bg_start();
+
+	// reset_settings, all of them: the defaults, as the settings' triangle and yes; over MCP the Remote
+	// control switches stay on (D1), so the agent keeps its connection
+	{
+		set("speed", "3"); set("redump", "1"); set("audit_mb", "64"); set("name_pattern", "%N"); set("webhook_on", "1");
+		set("webhook", "http://192.0.2.10/hook");
+		int sp = setting_rows("speed", AU_MCP);
+		host_remote_flags = -1;
+		int rc = call("reset_settings", "");
+		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"reset\":\"all\",\"note\":\"Every setting is back to its default.") &&
+		     has("{\"key\":\"speed\",\"scope\":\"standard\"") && has("{\"key\":\"mcp\",\"scope\":\"standard\"") && !has("\"scope\":\"usb0\"") &&
+		     has("\"state\":{\"screen\":\"settings\""), "reset_settings: the standard settings as list_settings gives them, on the settings screen", O);
+		need(g_std.speed == 0 && g_redump == RD_OFF && g_audit_mb == 256 && !strcmp(g_name_pat, FN_PRESETS[0]) && g_webhook_on == 0 && g_webhook[0],
+		     "reset_settings: the defaults; the webhook address is kept");
+		need(g_remote == 1 && g_mcp == 1 && g_status_json == 1 && host_remote_flags == -1, "reset_settings over MCP: the Remote control switches stay on (D1)");
+		need(setting_rows("speed", AU_MCP) == sp + 1 && setting_rows("mcp", AU_MCP) == 0 && setting_rows("redump", AU_MCP) == 2,
+		     "reset_settings: logged with source mcp, nothing for the switches");
+		need(read_file("out/psxrip.cfg").find("\nmcp=1\n") != std::string::npos, "reset_settings: saved with MCP on");
+		// the same over press_button (triangle and yes) keeps them too; the pad's own reset turns them off
+		set("speed", "3");
+		rc = call("press_button", "triangle");
+		need(rc == 0 && has("\"screen\":\"dialog\"") && has("Reset all settings"), "the settings' triangle asks first", O);
+		rc = call("press_button", "cross");
+		need(rc == 0 && g_std.speed == 0 && g_mcp == 1 && g_remote == 1 && g_status_json == 1, "press_button's reset: the switches stay on", O);
+		pad(B_TRIANGLE);
+		pad(B_CROSS);
+		need(g_mcp == 0 && g_remote == 0 && g_status_json == 0, "the pad's reset turns the switches off");
+		set("remote", "1"); set("mcp", "1"); set("status_json", "1");
+	}
+	// reset_settings with a drive: its own settings back to the standard, as triangle in its settings
+	{
+		set("speed", "1", "usb2"); set("eject", "0", "usb2");
+		bg_frames(3);   // (the UI thread's cards take them)
+		int dr = setting_rows("drive_usb2", AU_MCP);
+		int rc = call("reset_settings", "usb2");
+		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"reset\":\"usb2\"") && has("{\"key\":\"speed\",\"scope\":\"usb2\"") &&
+		     !has("\"key\":\"destination\"") && !has("\"scope\":\"standard\"") && has("\"state\":{\"screen\":\"drive_settings\"") && has("\"drive\":\"usb2\""),
+		     "reset_settings usb2: its settings, on its settings screen", O);
+		need(g_cards[2].speed == -1 && g_cards[2].eject == -1 && g_usbcfg[2].speed == -1 && g_usbcfg[2].eject == -1, "usb2 is all standard");
+		need(setting_rows("drive_usb2", AU_MCP) == dr + 1, "one audit row with source mcp");
+		g_cards[1].job = 1;
+		rc = call("reset_settings", "usb0");
+		need(rc != 0 && has(T_en(STR_CAN_SETTINGS_BUSY)), "reset_settings: refused while a job runs on the drive (as its settings)", O);
+		g_cards[1].job = 0;
+		rc = call("reset_settings", "usb5");
+		need(rc != 0 && has("No drive \"usb5\""), "reset_settings: a drive that is not there", O);
+		call("go_tab", "internal");
+	}
+	// a dialog open: the changing tools are refused with its text, as the others are
+	{
+		g_bg_tell = "A test message from tell.";
+		bg_frames(4);
+		int rc = call("reset_settings", "usb2");
+		need(rc != 0 && has("A dialog is open"), "reset_settings: refused while a dialog is open", O);
+		rc = call("redump_download", "");
+		need(rc != 0 && has("A dialog is open"), "redump_download: refused while a dialog is open", O);
+		rc = undo(0, 1, 0);
+		need(rc != 0 && has("A dialog is open"), "audit_undo: refused while a dialog is open", O);
+		snprintf(g_webhook, sizeof g_webhook, "http://192.0.2.10/hook");
+		rc = h.webhook_test(outb, sizeof outb); out = outb;
+		need(rc != 0 && has("A dialog is open"), "webhook_test: refused while a dialog is open", O);
+		call("press_button", "cross");
+	}
+	// redump_download: answered at once (started), the progress in get_state; cancel stops it; no
+	// dialog at the end over MCP (D2): get_app_info has the result
+	{
+		host_thread_rd = 1; host_rd_dl_hold = 1; host_rd_dl_result = 21000;
+		uint64_t t0 = now_ms();
+		int rc = call("redump_download", "");
+		need(rc == 0 && now_ms() - t0 < 2000 && has("\"result\":{\"started\":true") && has("\"state\":{\"screen\":\"redump_download\"") &&
+		     has("\"redump_download\":{\"phase\":\"download\",\"percent\":25,\"kb\":1024,\"kb_total\":4096,\"cancelling\":false}"), "redump_download: started, with its progress", O);
+		info();
+		need(has("\"downloading\":true"), "get_app_info: downloading", O);
+		rc = call("redump_download", "");
+		need(rc != 0 && has("runs already"), "redump_download: one at a time", O);
+		rc = call("go_screen", "home");
+		need(rc != 0 && has("downloading"), "other requests wait for it (refused at once)", O);
+		rc = call("redump_download", "cancel");
+		need(rc == 0 && has("\"result\":{\"cancelled\":true}"), "redump_download cancel: stops it", O);
+		need(wait_for([] { return !g_dl_running; }), "the download ends");
+		bg_frames(4);
+		state();
+		need(has("\"screen\":\"settings\"") && has("\"dialog\":null") && !has("\"redump_download\":{"), "after it: the settings, no dialog", O);
+		info();
+		need(has("\"last_download\":{\"result\":\"cancelled\"") && has("\"source\":\"mcp\""), "get_app_info: cancelled by mcp", O);
+		rc = call("redump_download", "cancel");
+		need(rc != 0 && has("No Redump download runs"), "redump_download cancel: nothing runs", O);
+		host_rd_dl_hold = 0;
+		rc = call("redump_download", "");
+		need(rc == 0 && has("\"started\":true"), "redump_download: a second one", O);
+		need(wait_for([] { return !g_dl_running; }), "it ends");
+		bg_frames(4);
+		state();
+		need(has("\"screen\":\"settings\"") && has("\"dialog\":null"), "D2: no dialog after a download MCP started", O);
+		info();
+		need(has("\"last_download\":{\"result\":\"done\",\"discs\":21000,\"error\":null,\"version\":\"2026-06-15\"") && has("\"source\":\"mcp\""), "get_app_info: done", O);
+		host_rd_dl_result = -3;
+		call("redump_download", "");
+		need(wait_for([] { return !g_dl_running; }), "a failing one ends");
+		bg_frames(4);
+		state();
+		need(has("\"dialog\":null"), "D2: no dialog after a failed download either", O);
+		info();
+		need(has("\"last_download\":{\"result\":\"failed\",\"discs\":null,\"error\":-3"), "get_app_info: failed (-3)", O);
+		// the pad's download still tells its result in a dialog
+		host_rd_dl_result = 5;
+		call("go_screen", "home");
+		call("go_screen", "settings");   // (opened again: its first row)
+		call("press_button", "r2"); call("press_button", "up");
+		state();
+		need(has("\"row\":8"), "the Redump copy's row", O);
+		pad(B_CROSS);
+		need(wait_for([] { return !g_dl_running; }), "the pad's download ends");
+		bg_frames(6);
+		state();
+		need(has("\"screen\":\"dialog\"") && has("downloaded"), "the pad's download: its dialog", O);
+		info();
+		need(has("\"source\":\"remote\""), "get_app_info: the pad's download (remote view's pad)", O);
+		call("press_button", "cross");
+		// the download's thread cannot be started: answered at once (-8), and the log does not say started
+		host_thread_rd = 0;
+		std::string lg0 = read_file("out/psxrip.log");
+		rc = call("redump_download", "");
+		need(rc != 0 && has("could not be started"), "redump_download: the thread cannot be started", O);
+		need(wait_for([] { return !g_dl_running; }), "the unstarted download ends");
+		bg_frames(4);
+		std::string lg = read_file("out/psxrip.log").substr(lg0.size());
+		need(lg.find("redump download started") == std::string::npos && lg.find("redump download result -8") != std::string::npos,
+		     "redump_download: no \"started\" in the log when the thread did not start", lg.c_str());
+		state();
+		need(has("\"dialog\":null"), "D2: no dialog after an unstarted download", O);
+		info();
+		need(has("\"last_download\":{\"result\":\"failed\",\"discs\":null,\"error\":-8"), "get_app_info: failed (-8)", O);
+		call("go_screen", "home");
+	}
+	// webhook_test: the HTTP status, never the address or headers; off the UI thread, at most 4 s
+	{
+		const char *SECRET_URL = "http://10.0.0.9:8123/api/webhook/SECRETWEBHOOKID", *SECRET_HDR = "Authorization: Bearer TOPSECRETTOKEN";
+		g_webhook[0] = 0;
+		int rc = h.webhook_test(outb, sizeof outb); out = outb;
+		need(rc != 0 && has("No webhook address is set"), "webhook_test: no address", O);
+		snprintf(g_webhook, sizeof g_webhook, "%s", SECRET_URL);
+		snprintf(g_webhook_hdr[0], sizeof g_webhook_hdr[0], "%s", SECRET_HDR);
+		g_webhook_hdr_on = 1;
+		host_webhook_status = 204; host_webhook_ms = 0;
+		int posts = host_webhook_posts;
+		{ UiLock lock; g_ui.osk = 1; }   // the user may be typing a new address: as the other changing tools
+		rc = h.webhook_test(outb, sizeof outb); out = outb; said.push_back(out);
+		{ UiLock lock; g_ui.osk = 0; }
+		need(rc != 0 && has("on-screen keyboard is open") && host_webhook_posts == posts, "webhook_test: refused while the on-screen keyboard is open", O);
+		rc = h.webhook_test(outb, sizeof outb); out = outb; said.push_back(out);
+		need(rc == 0 && json_ok(out.c_str()) && has("{\"sent\":true,\"status\":204,\"ok\":true}"), "webhook_test: the status", O);
+		need(host_webhook_posts == posts + 1 && !strcmp(host_webhook_url, SECRET_URL) && strstr(host_webhook_hdrs, SECRET_HDR), "webhook_test: sent to the address with its headers");
+		host_webhook_status = -2;
+		rc = h.webhook_test(outb, sizeof outb); out = outb; said.push_back(out);
+		need(rc == 0 && has("\"sent\":false") && has("host name could not be resolved"), "webhook_test: the host does not resolve", O);
+		host_webhook_status = 200; host_webhook_ms = 5000;
+		int f0 = g_bg_frames;
+		uint64_t t0 = now_ms();
+		rc = h.webhook_test(outb, sizeof outb); out = outb; said.push_back(out);
+		uint64_t took = now_ms() - t0;
+		need(rc == 0 && has("No answer within 4 s") && took >= 3900 && took < 4800, "webhook_test: at most 4 s", O);
+		need(g_bg_frames - f0 > 50, "webhook_test: the UI thread goes on meanwhile");
+		rc = h.webhook_test(outb, sizeof outb); out = outb;
+		need(rc != 0 && has("still waiting"), "webhook_test: one at a time", O);
+		need(wait_for([&] { return !g_wh_testing; }), "the slow test ends in the background");
+		host_webhook_ms = 0;
+		rc = h.webhook_test(outb, sizeof outb); out = outb;
+		need(rc == 0 && has("\"status\":200"), "webhook_test: again", O);
+		need(read_file("out/psxrip.log").find("webhook test -> 204 (mcp)") != std::string::npos, "webhook_test: logged, without the address");
+		g_webhook[0] = 0; g_webhook_hdr[0][0] = 0; g_webhook_hdr_on = 0;
+	}
+	// show_game: the detail view on the screen (the list goes to the game's source; the filter must
+	// show it)
+	{
+		char keep_root[256];
+		snprintf(keep_root, sizeof keep_root, "%s", host_root);
+		gs_library();
+		g_gl_stale = 1;
+		snprintf(g_games_source, sizeof g_games_source, "hdd");
+		g_games_filter = GameFilter{0, 0, 0, 0};
+		const char *ALUNDRA = "hdd:/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35]";
+		const char *CROC_USB = "usb1:/dev_usb001/PSXISO/Croc 2 (Europe) [SLES_020.88]";
+		McpGameQuery q = gq();
+		int rc = h.game("show_game", ALUNDRA, NULL, &q, outb, sizeof outb); out = outb;
+		need(rc == 0 && json_ok(out.c_str()) && has("\"result\":{\"shown\":\"Alundra (Europe)\",\"discs\":1") && has("\"state\":{\"screen\":\"game_detail\""),
+		     "show_game: the detail view", O);
+		rc = h.game("show_game", CROC_USB, NULL, &q, outb, sizeof outb); out = outb;
+		need(rc == 0 && has("\"shown\":\"Croc 2 (Europe)\"") && has("\"screen\":\"game_detail\"") && !strcmp(g_games_source, "hdd"),
+		     "show_game: another source's game; the list's own source stays", O);
+		q.redump = 1; q.fgiven = 2;
+		h.game("show_games", NULL, NULL, &q, outb, sizeof outb);
+		q = gq();
+		rc = h.game("show_game", "hdd:/dev_hdd0/PSXISO/Ape Escape (Europe) [SCES_011.15]", NULL, &q, outb, sizeof outb); out = outb;
+		need(rc != 0 && has("filter hides this game"), "show_game: refused when the filter hides it", O);
+		rc = h.game("show_game", "hdd:/dev_hdd0/PSXISO/Nope", NULL, &q, outb, sizeof outb); out = outb;
+		need(rc != 0 && has("No game with the id"), "show_game: an unknown game", O);
+		q.fclear = 1;
+		h.game("show_games", NULL, NULL, &q, outb, sizeof outb);
+		call("go_screen", "home");
+		snprintf(host_root, sizeof host_root, "%s", keep_root);
+		mg_free();
+	}
+	// audit_undo and audit_redo: the call is the confirmation for a row or a job (D3); never the
+	// pad's toggle: undo on an undone item is refused, and redo on one that is not
+	{
+		set("speed", "2");
+		uint32_t row = newest_row(AU_SETTINGS, "setting", "speed");
+		char rw[48];
+		snprintf(rw, sizeof rw, "\"result\":{\"undone\":\"row %u\"", (unsigned)row);
+		int rc = undo(0, row, 0);
+		need(rc == 0 && json_ok(out.c_str()) && has(rw) && has("\"label\":\"Read speed: Max \xe2\x86\x92 4\xc3\x97\"") && has("\"state\":{\"screen\":\"audit_log\""),
+		     "audit_undo row: undone, on the audit screen", O);
+		need(g_std.speed == 0, "audit_undo row: the setting is back");
+		rc = undo(0, row, 0);
+		need(rc != 0 && has("is undone already. audit_redo applies it again.") && g_std.speed == 0, "audit_undo on an undone row: refused, not toggled", O);
+		rc = undo(1, row, 0);
+		need(rc == 0 && has("\"result\":{\"redone\":") && g_std.speed == 2, "audit_redo row: applied again", O);
+		rc = undo(1, row, 0);
+		need(rc != 0 && has("is not undone. audit_undo undoes it.") && g_std.speed == 2, "audit_redo on a row that is not undone: refused", O);
+		// the answer names the rows' real source (undo), and masks a secret in the label as audit_log does
+		{
+			snprintf(g_webhook, sizeof g_webhook, "http://10.0.0.9:8123/api/webhook/SECRETWEBHOOKID");
+			audit_setting(AU_PAD, "name_pattern", "%T [%D]", "%T /api/webhook/SECRETWEBHOOKID");
+			uint32_t pr = newest_row(AU_SETTINGS, "setting", "name_pattern");
+			rc = undo(0, pr, 0);
+			need(rc == 0 && has("[secret]") && !has("SECRETWEBHOOKID") && !has("10.0.0.9"), "audit_undo: a secret in the label is masked", O);
+			need(has("the source undo") && has("by mcp") && !has("source MCP"), "audit_undo: the note names the source undo", O);
+			g_webhook[0] = 0;
+		}
+		set("webhook", "http://192.0.2.10/hook");
+		rc = undo(0, newest_row(AU_SETTINGS, "setting", "webhook"), 0);
+		need(rc != 0 && has(T_en(STR_AW_SECRET)), "audit_undo of a secret: refused with the screen's reason", O);
+		rc = undo(0, 999999, 0);
+		need(rc != 0 && has("No row 999999"), "audit_undo: an unknown row", O);
+		rc = undo(0, 0, 999999);
+		need(rc != 0 && has("No job 999999"), "audit_undo: an unknown job", O);
+		// a repair's sectors: by its job, and the whole disc (with confirm)
+		uint8_t a[2352], b[2352];
+		memset(a, 0x11, sizeof a); memset(b, 0x22, sizeof b);
+		{ FILE *f = fopen("out/au_img.bin", "wb"); for (int i = 0; i < 200; i++) fwrite(b, 1, sizeof b, f); fclose(f); }
+		uint32_t job = audit_job_begin(AU_PAD, "SLES_011.35", "Alundra", "repair");
+		audit_sector(job, "out/au_img.bin", 2, a, b);
+		audit_sector(job, "out/au_img.bin", 3, a, b);
+		audit_job_end(job, "finished");
+		auto sector = [&](int lba) { uint8_t x[2352]; FILE *f = fopen("out/au_img.bin", "rb"); fseek(f, (long)lba * 2352, SEEK_SET); fread(x, 1, sizeof x, f); fclose(f); return x[0]; };
+		rc = undo(0, job_row_id(job), 0);
+		need(rc != 0 && has("give job:"), "audit_undo of a job's own row: give the job", O);
+		rc = undo(0, 0, job);
+		need(rc == 0 && has("\"undone\":\"job") && has("\"label\":\"Repair \xc2\xb7 Alundra\"") && sector(2) == 0x11 && sector(3) == 0x11, "audit_undo job: its sectors back", O);
+		rc = undo(0, 0, job);
+		need(rc != 0 && has("undone already"), "audit_undo job again: refused", O);
+		rc = undo(1, 0, 0, "SLES_011.35", 1);
+		need(rc == 0 && has("\"redone\":\"disc SLES_011.35\"") && sector(2) == 0x22, "audit_redo disc (confirmed): redone", O);
+		rc = undo(0, 0, 0, "SLES_011.35", 0);
+		need(rc != 0 && has("confirm: true") && sector(2) == 0x22, "audit_undo disc without confirm: refused", O);
+		rc = undo(0, 0, 0, "SLES_011.35", 1);
+		need(rc == 0 && sector(2) == 0x11, "audit_undo disc: undone", O);
+		uint32_t mv = audit_job_begin(AU_PAD, "SCES_011.15", "Ape Escape", "rename", AU_FILES);
+		audit_job_end(mv, "finished");
+		rc = undo(0, 0, 0, "SCES_011.15", 1);
+		need(rc != 0 && has("undone by its jobs"), "audit_undo of a Files disc: by its jobs", O);
+		rc = undo(0, 0, 0, "SLUS_999.99", 1);
+		need(rc != 0 && has("No disc \"SLUS_999.99\""), "audit_undo: an unknown disc", O);
+		// a long undo: answered with started once it runs long; get_state shows it, and nothing else is taken meanwhile
+		uint32_t big = audit_job_begin(AU_PAD, "SLES_011.35", "Alundra", "repair");
+		for (int i = 4; i < 200; i++) audit_sector(big, "out/au_img.bin", i, a, b);
+		audit_job_end(big, "finished");
+		audit_set_progress(audit_undo_tick);
+		g_undo_early_ms = 0;
+		rc = undo(0, 0, big);
+		need(rc == 0 && has("\"result\":{\"started\":true,\"what\":\"job") && has("\"screen\":\"audit_undo\"") && has("\"audit_undo\":{\"what\":"),
+		     "a long undo: answered started, get_state shows it", O);
+		need(wait_for([] { UiState u; ui_snapshot(u); return u.scr == SCR_AUDIT_LOG; }), "the long undo ends");
+		need(sector(150) == 0x11 && sector(4) == 0x11, "the long undo undid every sector");
+		rc = call("go_screen", "home");
+		need(rc == 0 && has("\"screen\":\"home\""), "the slot is free after it", O);
+		// a long undo of a whole disc held at its ticks: get_state's what is in English and masked; every other
+		// request is refused at once while it runs
+		{
+			snprintf(g_webhook, sizeof g_webhook, "http://10.0.0.9:8123/api/webhook/SECRETWEBHOOKID");
+			uint32_t sj = audit_job_begin(AU_PAD, "SLES_099.99", "Hold /api/webhook/SECRETWEBHOOKID", "repair");
+			for (int i = 4; i < 200; i++) audit_sector(sj, "out/au_img.bin", i, b, a);
+			audit_job_end(sj, "finished");
+			host_lang = PS3_LANG_SWEDISH; lang_init();
+			g_hold_undo = 1;
+			audit_set_progress(held_tick);
+			rc = undo(0, 0, 0, "SLES_099.99", 1);
+			need(rc == 0 && has("\"result\":{\"started\":true,\"what\":\"disc SLES_099.99\""), "a held disc undo: answered started", O);
+			state();
+			need(has("\"audit_undo\":{\"what\":\"Hold [secret]\"") && !has("SECRETWEBHOOKID"), "get_state audit_undo.what: masked", O);
+			rc = call("go_screen", "home");
+			need(rc != 0 && has("An undo in the audit log runs"), "a request while a long undo runs: refused at once", O);
+			rc = undo(0, row, 0);
+			need(rc != 0 && has("An undo in the audit log runs"), "another undo while a long undo runs: refused at once", O);
+			g_hold_undo = 0;
+			need(wait_for([] { UiState u; ui_snapshot(u); return u.scr == SCR_AUDIT_LOG; }), "the held undo ends");
+			// a job's what is the label in English while the console is in Swedish
+			uint32_t ej = audit_job_begin(AU_PAD, "SLES_011.35", "Alundra", "repair");
+			for (int i = 4; i < 200; i++) audit_sector(ej, "out/au_img.bin", i, b, a);
+			audit_job_end(ej, "finished");
+			g_hold_undo = 1;
+			rc = undo(0, 0, ej);
+			need(rc == 0 && has("\"started\":true"), "a held job undo: answered started", O);
+			state();
+			need(has("\"audit_undo\":{\"what\":\"Repair\"") , "get_state audit_undo.what: in English with the console in Swedish", O);
+			g_hold_undo = 0;
+			need(wait_for([] { UiState u; ui_snapshot(u); return u.scr == SCR_AUDIT_LOG; }), "the held job undo ends");
+			host_lang = PS3_LANG_ENGLISH_US; lang_init();
+			g_webhook[0] = 0;
+		}
+		// the early answer when MCP has already given up (the first tick after 5 s): the slot is freed
+		// once, and the next request is taken
+		{
+			uint32_t gj = audit_job_begin(AU_PAD, "SLES_011.35", "Alundra", "repair");
+			for (int i = 4; i < 200; i++) audit_sector(gj, "out/au_img.bin", i, a, b);
+			audit_job_end(gj, "finished");
+			g_block_first_tick = 1;
+			audit_set_progress(held_tick);
+			uint64_t t0 = now_ms();
+			rc = undo(0, 0, gj);
+			need(rc != 0 && has("did not finish it within") && now_ms() - t0 >= 4500, "an undo whose first tick comes after 5 s: MCP gives up", O);
+			g_block_first_tick = 0;
+			need(wait_for([] { UiState u; ui_snapshot(u); return u.scr == SCR_AUDIT_LOG && !g_undo_mcp; }), "that undo ends");
+			bg_frames(4);
+			rc = call("go_screen", "home");
+			need(rc == 0 && has("\"screen\":\"home\""), "the slot is free after an early answer to nobody", O);
+		}
+		g_undo_early_ms = 3000;
+		audit_set_progress(NULL);
+	}
+	bg_stop();
+	for (const std::string &t : said)
+		if (t.find("SECRETWEBHOOKID") != std::string::npos || t.find("TOPSECRETTOKEN") != std::string::npos || t.find("10.0.0.9") != std::string::npos)
+			need(false, "a secret in an answer", t.c_str());
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log out/au_img.bin");
+	audit_init("out/audit", &vf_io);
+	audit_set_retired(NULL);
+	g_remote = g_mcp = g_status_json = 0;
+	reset_all();
+	#undef O
+	if (bad) g_fail += bad; else printf("ok   MCP: reset_settings (D1), redump_download (D2), webhook_test, show_game, audit_undo and audit_redo (D3)\n");
+}
+
 int main()
 {
+	setvbuf(stdout, NULL, _IONBF, 0);   // every line out before a crash
 	system("mkdir -p out");
 	ui_init();
 	lang_init();
+	locks_init();   // as the app does at start: real (host) mutexes
 	for (int c = 0; c < NCARDS; c++) ctx_init(c);
 	ui_trace = trace;
 
@@ -2199,6 +4565,18 @@ int main()
 		}
 		host_lang = PS3_LANG_SWEDISH; lang_init();
 		if (missing) g_fail += missing; else printf("ok   every text in both languages\n");
+	}
+
+	{   // the old result screen is gone (it could not be reached: the drives' tabs show each result):
+		// no screen name for it and none of its texts
+		int left = 0;
+		for (const char *nm : SCR_NAMES) if (!strcmp(nm, "result")) { printf("FAIL the screen name \"result\" is still there\n"); left++; }
+		static const char *const gone[] = {"Done!", "Klart!", "Time: %s", "Tid: %s", "Unreadable sectors: %u", "Oläsbara sektorer: %u",
+		                                   "No sectors to repair: the previous rip is complete.", "Fixed sectors: %u, all confirmed"};
+		for (int i = 0; i < STR_COUNT; i++)
+			for (const char *g : gone)
+				if (!strcmp(T_en((StrId)i), g) || !strcmp(T_sv((StrId)i), g)) { printf("FAIL the result screen's text \"%s\" is still there\n", g); left++; }
+		if (left) g_fail += left; else printf("ok   the result screen is gone, with its texts\n");
 	}
 
 	// three drives, nothing ripping: the three kinds of earlier rip
@@ -2693,8 +5071,44 @@ int main()
 	// the audit log screen, in both languages
 	host_lang = PS3_LANG_SWEDISH; lang_init(); g_sfx_sv = 1;
 	audit_scenarios();
+	remote_scenarios();
 	host_lang = PS3_LANG_ENGLISH_US; lang_init(); g_sfx_sv = 0;
 	audit_scenarios();
+	remote_scenarios();
+	{   // the remote control's switches in the config: an old remote=1 (before the switches) also
+		// turned on /status.json, so it still does; MCP is off unless the file says otherwise
+		system("rm -rf out/audit out/psxrip.cfg");
+		audit_init("out/audit", &vf_io);
+		audit_set_hooks(set_setting_hook, NULL);
+		int bad = 0;
+		auto load = [](const char *txt) {
+			FILE *f = fopen("out/psxrip.cfg", "w");
+			if (f) { fputs(txt, f); fclose(f); }
+			g_remote = g_mcp = g_status_json = 0;
+			g_cfg_primed = false; cfg_load(); cfg_prime();
+		};
+		load("remote=1\n");
+		if (g_remote != 1 || g_status_json != 1 || g_mcp != 0) { printf("FAIL remote=1 migrated to view %d, status.json %d, mcp %d\n", g_remote, g_status_json, g_mcp); bad++; }
+		load("remote=0\n");
+		if (g_remote || g_status_json || g_mcp) { printf("FAIL remote=0 migrated to view %d, status.json %d, mcp %d\n", g_remote, g_status_json, g_mcp); bad++; }
+		load("remote=1\nmcp=1\nstatus_json=0\n");
+		if (g_remote != 1 || g_status_json != 0 || g_mcp != 1) { printf("FAIL the switches read as view %d, status.json %d, mcp %d\n", g_remote, g_status_json, g_mcp); bad++; }
+		char txt[4096];
+		cfg_text(txt, sizeof txt);
+		if (!strstr(txt, "\nremote=1\n") || !strstr(txt, "\nmcp=1\n") || !strstr(txt, "\nstatus_json=0\n")) { printf("FAIL the switches in the config text\n"); bad++; }
+		// a change is a setting row of the audit log, and the undo hook applies it
+		g_input_src = AU_PAD;
+		g_mcp = 0; cfg_save();
+		AuditRow r[4];
+		int n = audit_events(AU_SETTINGS, NULL, r, 4);
+		if (n != 1 || strcmp(r[0].what, "mcp") || strcmp(r[0].before, "1") || strcmp(r[0].after, "0")) { printf("FAIL the mcp change in the audit log (%d rows)\n", n); bad++; }
+		if (set_setting_hook("status_json", "1") != 0 || g_status_json != 1) { printf("FAIL status_json through the undo hook\n"); bad++; }
+		if (set_setting_hook("mcp", "1") != 0 || g_mcp != 1) { printf("FAIL mcp through the undo hook\n"); bad++; }
+		g_remote = g_mcp = g_status_json = 0;
+		system("rm -rf out/audit out/psxrip.cfg");
+		audit_init("out/audit", &vf_io);
+		if (bad) g_fail += bad; else printf("ok   the remote control's switches in the config (migration of remote=1, audit, undo)\n");
+	}
 	{   // undoing an audit_mb row applies the size cap at once (the kept sectors over it go)
 		system("rm -rf out/audit out/psxrip.cfg");
 		audit_init("out/audit", &vf_io);
@@ -2735,6 +5149,12 @@ int main()
 	games_rename_open_scenarios();
 	games_names_scenarios();
 	games_index_scenarios();
+	mcp_scenarios();
+	mcp_settings_scenarios();
+	mcp_ui_scenarios();
+	mcp_games_scenarios();
+	mcp_app_scenarios();
+	mcp_app_ui_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

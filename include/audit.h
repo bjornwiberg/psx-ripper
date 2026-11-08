@@ -41,7 +41,8 @@ enum AuditWhy {
 	AW_MOVE_FAILED,       // the move failed and was put back: it is never done again (row)
 	AW_NOT_PUT_BACK,      // a move failed and lba file(s) could not be put back, `file` the first: the set is split (row);
 	                      // `what` (or "") a file that went back but whose app's part could not be undone, as AW_NOT_RESTORED
-	AW_NOT_RESTORED       // a move failed, `file` went back to its place but the app's part could not be undone (a cue's FILE lines) (row)
+	AW_NOT_RESTORED,      // a move failed, `file` went back to its place but the app's part could not be undone (a cue's FILE lines) (row)
+	AW_RETIRED            // a setting the app no longer has (a retired config key): nothing to undo (row, what = key)
 };
 struct AuditReason {
 	AuditWhy code;
@@ -112,6 +113,10 @@ int audit_discs(char (*keys)[96], char (*names)[96], int *events, uint32_t *last
 int audit_events(AuditDom dom, const char *disc, AuditRow *out, int max);
 // All rows of one job in log order, skipping the first `first`.
 int audit_rows(uint32_t job, AuditRow *out, int first, int max);
+// One row by its id, and a job's own row (kind "job") by the job's number, with the same computed
+// fields as the queries give. 1 when found, else 0.
+int audit_row(uint32_t id, AuditRow *out);
+int audit_job_row(uint32_t job, AuditRow *out);
 
 // Undo. Reversible are `sector` rows (their bytes still kept in job<N>.bin, the image's sector still
 // equal to the row's new bytes, the job not running) and `setting` rows (the setting still has the
@@ -145,6 +150,9 @@ int audit_disc_reversible(const char *disc, AuditReason *rs = NULL, int *redo = 
 // NULL = none (a setting is then not undone).
 void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
                      void (*recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n, int redo));
+// retired (may be NULL): 1 for a config key the app no longer has. Its setting rows (and undo rows of
+// them) are then never reversible (AW_RETIRED), and the set_setting hook is never called for one.
+void audit_set_retired(int (*retired)(const char *key));
 // Called by a job or disc undo before every AUDIT_TICK sectors (done of total), without the lock:
 // the app keeps its screen and the system's callbacks going. Nonzero stops the undo there (rows
 // undone so far stay undone, the recheck still runs). NULL = none.

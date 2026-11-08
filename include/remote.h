@@ -1,9 +1,18 @@
-// Remote view: a small web server on port 8090 with an MJPEG stream of the app's screen and a
-// status page in JSON, and a pad in the web page whose buttons press the console's. Switched on in the settings.
+// Remote control: a small web server on port 8090. Its paths each have a switch in the settings
+// (Settings → Remote control): the remote view (an MJPEG stream of the app's screen and a page with
+// a pad whose buttons press the console's), MCP (POST /mcp, see mcp.h) and /status.json.
 #ifndef PSXRIP_REMOTE_H
 #define PSXRIP_REMOTE_H
 
 #define REMOTE_PORT 8090
+#ifndef REMOTE_READ_SECONDS
+#define REMOTE_READ_SECONDS 10   // a request (headers and body) must have come whole by then
+#endif
+#ifndef REMOTE_SEND_SECONDS
+#define REMOTE_SEND_SECONDS 10   // a client that has not taken a send within this long is dropped
+#endif
+#define REMOTE_MAX_CLIENTS 4     // requests served at once; one more gets 503
+#define REMOTE_MAX_STREAMS 3     // remote view streams (/stream), counted apart: open tabs never block the requests
 
 struct RemoteHooks {
 	int (*status_json)(char *out, int n);         // current state as JSON
@@ -12,7 +21,10 @@ struct RemoteHooks {
 };
 
 void remote_init(const RemoteHooks *hooks);
-void remote_set(int on);                          // start or stop the server
+enum { REMOTE_VIEW = 1, REMOTE_MCP = 2, REMOTE_STATUS = 4 };
+void remote_set(int paths);                       // the paths that answer (REMOTE_*); the server runs while any does
 int remote_ip(char *out, int n);                  // the console's IP address, 0 on success
+// The screen as the remote view shows it (half size, JPEG). 0 on success; free *jpg with free().
+int remote_jpeg(unsigned char **jpg, int *len);
 
 #endif

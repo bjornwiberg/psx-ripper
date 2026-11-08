@@ -46,6 +46,7 @@ static std::map<uint32_t, bool> g_rips;
 static std::map<std::string, uint32_t> g_made;
 static uint64_t g_cap = 256ull << 20, g_blob_total;   // the audit_mb setting; all job<N>.bin together
 static int (*g_set_setting)(const char *key, const char *value);
+static int (*g_retired)(const char *key);   // a config key the app no longer has (its rows: nothing to undo)
 static void (*g_recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n, int redo);
 static int (*g_tick)(uint32_t done, uint32_t total);
 static int (*g_moved)(const char *from, const char *to);
@@ -600,6 +601,12 @@ static const UndoState::Setting *chain_setting(const UndoState &s, const UndoSta
 static const char *setting_block(const AuditRow &r, const UndoState &s, const char *key, const std::string &now,
                                  char *msg, size_t n, AuditReason *rs)
 {
+	if (g_retired && g_retired(key)) {   // no longer a setting: there is nothing to put the value back into
+		reason(rs, AW_RETIRED, r);
+		if (rs) copyn(rs->what, sizeof rs->what, key);
+		snprintf(msg, n, "%.100s is no longer a setting", key);
+		return msg;
+	}
 	auto it = s.cur.find(key);
 	if (it == s.cur.end() || it->second != now) {
 		reason(rs, AW_SETTING_CHANGED, r);
@@ -831,6 +838,29 @@ int audit_events(AuditDom dom, const char *disc, AuditRow *out, int max)
 	for (int i = 0; i < n; i++) mark(out[i], st);
 	unlock();
 	return n;
+}
+
+// The first row the test takes, marked as the queries mark it; 0 when none.
+template <class F> static int find_row(F take, AuditRow *out)
+{
+	int found = 0;
+	UndoState st;
+	lock();
+	build_state(st);
+	scan_log([&](const AuditRow &r) { if (!found && take(r)) { *out = r; found = 1; } });
+	if (found) {
+		fetch_roots(st, out, 1);
+		mark(*out, st);
+	}
+	unlock();
+	return found;
+}
+
+int audit_row(uint32_t id, AuditRow *out) { return id ? find_row([id](const AuditRow &r) { return r.id == id; }, out) : 0; }
+
+int audit_job_row(uint32_t job, AuditRow *out)
+{
+	return job ? find_row([job](const AuditRow &r) { return r.job == job && !strcmp(r.kind, "job"); }, out) : 0;
 }
 
 int audit_rows(uint32_t job, AuditRow *out, int first, int max)
@@ -1380,6 +1410,11 @@ void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
 {
 	g_set_setting = set_setting;
 	g_recheck = recheck;
+}
+
+void audit_set_retired(int (*retired)(const char *key))
+{
+	g_retired = retired;
 }
 
 void audit_set_progress(int (*tick)(uint32_t done, uint32_t total))

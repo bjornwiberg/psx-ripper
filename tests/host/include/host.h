@@ -5,6 +5,16 @@ struct HostUsb { int attached, port; char name[40]; };
 extern HostPad host_pad;
 extern HostUsb host_usb[];
 extern int host_lang;
+// called once per frame (the screens' flip): a test can look at a screen and press its buttons
+extern void (*host_frame)();
+// MCP tests: webMAN requests started, the web server's paths (remote_set; -1 never called), a
+// mutex held by the calling thread, a call from each drive scan / free-space query
+extern int host_webman_calls, host_remote_flags;
+int host_mutex_held(unsigned m);
+extern void (*host_io)();
+// 1: the game list's check job (thread "psxgcheck") runs on a thread of its own, as on the console
+// (else it runs in place, before gc_start returns)
+extern int host_thread_gc;
 // The console's drives: paths /dev_... and exfatN:/... are looked up under host_root ("" = they do
 // not exist, as on an empty console); host_exfat[port] = an exFAT drive is on that port;
 // host_label[port] = its volume label (FAT32 or exFAT).
@@ -18,3 +28,10 @@ extern const char *host_listdir_extra;   // a name vf_listdir adds to every fold
 extern int host_rd_local;
 extern unsigned char host_rd_md5[16];
 extern char host_rd_name[160];
+// The Redump download (thread "psxredump" when host_thread_rd): while host_rd_dl_hold it waits (an
+// abort ends it), then answers host_rd_dl_result. The webhook test's POST answers host_webhook_status
+// after host_webhook_ms; host_webhook_url and host_webhook_hdrs are what it was given.
+extern int host_thread_rd;
+extern volatile int host_rd_dl_hold, host_rd_dl_result, host_rd_dl_calls;
+extern volatile int host_webhook_status, host_webhook_ms, host_webhook_posts;
+extern char host_webhook_url[512], host_webhook_hdrs[1024];

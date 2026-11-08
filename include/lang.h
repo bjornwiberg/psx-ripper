@@ -94,10 +94,6 @@ enum StrId {
 	STR_WEB_BACK,
 	STR_TARGET_EXFAT,
 	STR_CONFIRMED,
-	STR_RES_DONE,
-	STR_UNREADABLE_N,
-	STR_RES_NEXT,
-	STR_RES_NEXT_NOEJECT,
 	STR_L_CHECK,
 	STR_CHECK_ON,
 	STR_CHECK_BITPERFECT,
@@ -110,13 +106,10 @@ enum StrId {
 	STR_HINT_NEWRIP,
 	STR_TIME,
 	STR_TIME_ETA,
-	STR_TOTAL_TIME,
 	STR_VERIFY_PASS,
-	STR_VERIFY_RESULT,
 	STR_HINT_YES,
 	STR_HINT_NO,
 	STR_HINT_OK,
-	STR_NOTHING_TO_REPAIR,
 	STR_WHY_CHECKSUM,
 	STR_WHY_ECC,
 	STR_WHY_HEADER,
@@ -150,7 +143,6 @@ enum StrId {
 	STR_EV_FIRST_OK,
 	STR_TIME_LEFT,
 	STR_FINISHING,
-	STR_FIXED_ALL_CONFIRMED,
 	STR_WH_EV_8,
 	STR_WH_SHORT_8,
 	STR_WH_EV_9,
@@ -452,10 +444,38 @@ enum StrId {
 	STR_AUDIT_MIGRATE,   // the audit's job that renamed old logs after their image
 	STR_FN_ALSO,         // the rename preview: the set's other files that take the new name
 	STR_GC_CUT,          // the check refuses a set whose file list or names the scan cut
+	STR_L_REMOTE_VIEW,
+	STR_L_MCP,
+	STR_L_STATUS_JSON,
+	STR_RC_VIEW_HELP,
+	STR_RC_MCP_HELP,
+	STR_RC_STATUS_HELP,
+	STR_DEST_NOT_CONNECTED,
+	STR_SET_CTRL_CHAR,
+	STR_CAN_BUSY,
+	STR_CAN_NO_DISC,
+	STR_CAN_READING,
+	STR_CAN_DISC_ERROR,
+	STR_CAN_NO_RIP,
+	STR_CAN_NEEDS_REPAIR,
+	STR_CAN_CHECKED,
+	STR_CAN_NO_REPAIR,
+	STR_CAN_OUT_OF_DATE,
+	STR_CAN_NO_JOB,
+	STR_CAN_NOT_REREADING,
+	STR_CAN_EJECT_BUSY,
+	STR_CAN_SETTINGS_BUSY,
+	STR_CAN_NO_EXIT,
+	STR_GC_NOTHING,
+	STR_GM_DOT,   // a rename to a name starting with a dot (hidden)
+	STR_AW_RETIRED,   // an old row of a config key the app no longer has
 	STR_COUNT
 };
 
 void lang_init();
 const char *T(StrId id);
+// A text in English or Swedish whatever the console's language (MCP gives both).
+const char *T_en(StrId id);
+const char *T_sv(StrId id);
 
 #endif

@@ -11,3 +11,4 @@ typedef struct { u32 attr_protocol, attr_recursive, attr_pshared, attr_adaptive;
 int sysMutexCreate(sys_mutex_t *m, const sys_mutex_attr_t *a);
 int sysMutexLock(sys_mutex_t m, u64 timeout);
 int sysMutexUnlock(sys_mutex_t m);
+int sysMutexTryLock(sys_mutex_t m);   // 0: taken; else held (also by the caller: not recursive)

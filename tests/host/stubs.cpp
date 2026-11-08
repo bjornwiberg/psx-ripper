@@ -28,9 +28,11 @@
 #include "webhook.h"
 #include "host.h"
 
+void (*host_io)() = 0;   // called by the drive scans and free-space queries (a test checks which locks are held)
 // lv2: free space on a drive (syscall 840) is a hard disk with room; nothing else happens
 void host_lv2_3(int n, u64, u64 total, u64 avail)
 {
+	if (n == 840 && host_io) host_io();
 	if (n == 840) { *(uint64_t *)(uintptr_t)total = 465ull << 30; *(uint64_t *)(uintptr_t)avail = 338ull << 30; }
 }
 
@@ -39,7 +41,8 @@ u32 display_width = 1920, display_height = 1080, color_pitch = 1920 * 4, curr_fb
 u32 *color_buffer[2];
 int flip_timeouts = 0;
 gcmContextData *context = 0;
-void flip_sync() {}
+void (*host_frame)() = 0;
+void flip_sync() { if (host_frame) host_frame(); }
 void flip() {}
 #ifdef HOST_REMOTE
 void waitflip() { usleep(16 * 1000); }   // about 60 frames per second, as on the console
@@ -82,13 +85,78 @@ int sysThreadCreate(sys_ppu_thread_t *id, void (*entry)(void *), void *arg, int,
 }
 void sysThreadExit(u64) { pthread_exit(NULL); }   // only the server's threads call it here
 #else
-int sysThreadCreate(sys_ppu_thread_t *id, void (*)(void *), void *, int, u64, u64, char *) { *id = 0; return -1; }
+#include <pthread.h>
+int host_webman_calls = 0;   // webMAN requests the app started (a popup, ...): counted, not sent
+int host_thread_gc = 0;
+int host_thread_rd = 0;      // the Redump download's thread runs (rd_download below)
+static pthread_t g_rd_thread;
+int sysThreadCreate(sys_ppu_thread_t *id, void (*entry)(void *), void *arg, int, u64, u64, char *name)
+{
+	*id = 0;
+	if (name && !strcmp(name, "psxwebman")) __sync_fetch_and_add(&host_webman_calls, 1);
+	if (host_thread_rd && name && !strcmp(name, "psxredump"))   // joined by the screen (sysThreadJoin)
+		return pthread_create(&g_rd_thread, NULL, (void *(*)(void *))entry, arg) ? -1 : (*id = 1, 0);
+	if ((host_thread_gc && name && !strcmp(name, "psxgcheck")) || (name && !strcmp(name, "psxwhtest"))) {
+		pthread_t t;
+		if (pthread_create(&t, NULL, (void *(*)(void *))entry, arg)) return -1;
+		pthread_detach(t);
+		return 0;
+	}
+	return -1;
+}
 void sysThreadExit(u64) {}
 #endif
+#ifdef HOST_REMOTE
 int sysThreadJoin(sys_ppu_thread_t, u64 *) { return 0; }
-int sysMutexCreate(sys_mutex_t *m, const sys_mutex_attr_t *) { *m = 1; return 0; }
-int sysMutexLock(sys_mutex_t, u64) { return 0; }
-int sysMutexUnlock(sys_mutex_t) { return 0; }
+#else
+int sysThreadJoin(sys_ppu_thread_t id, u64 *) { if (id == 1) pthread_join(g_rd_thread, NULL); return 0; }
+#endif
+// Real mutexes, recursive when the attributes say so (as lv2's): a test can run a screen and MCP's
+// hooks on two threads. A handle is an index; 0 was never created (a lock on it fails, as on the console).
+#include <pthread.h>
+#define HOST_MUTEXES 32
+static pthread_mutex_t g_host_mx[HOST_MUTEXES];
+static pthread_t g_host_owner[HOST_MUTEXES];
+static int g_host_depth[HOST_MUTEXES], g_host_mx_n = 1;
+int sysMutexCreate(sys_mutex_t *m, const sys_mutex_attr_t *a)
+{
+	int i = __sync_fetch_and_add(&g_host_mx_n, 1);
+	if (i >= HOST_MUTEXES) return -1;
+	pthread_mutexattr_t at;
+	pthread_mutexattr_init(&at);
+	pthread_mutexattr_settype(&at, a && a->attr_recursive == SYS_MUTEX_ATTR_RECURSIVE ? PTHREAD_MUTEX_RECURSIVE : PTHREAD_MUTEX_ERRORCHECK);
+	pthread_mutex_init(&g_host_mx[i], &at);
+	pthread_mutexattr_destroy(&at);
+	*m = i;
+	return 0;
+}
+int sysMutexLock(sys_mutex_t m, u64)
+{
+	if (m < 1 || m >= (sys_mutex_t)g_host_mx_n) return -1;
+	int r = pthread_mutex_lock(&g_host_mx[m]);
+	if (r) { fprintf(stderr, "FAIL mutex %u: lock error %d (a second lock of a lock that is not recursive)\n", m, r); abort(); }
+	g_host_owner[m] = pthread_self();
+	g_host_depth[m]++;
+	return 0;
+}
+int sysMutexUnlock(sys_mutex_t m)
+{
+	if (m < 1 || m >= (sys_mutex_t)g_host_mx_n) return -1;
+	if (!--g_host_depth[m]) g_host_owner[m] = pthread_t();
+	return pthread_mutex_unlock(&g_host_mx[m]);
+}
+int sysMutexTryLock(sys_mutex_t m)
+{
+	if (m < 1 || m >= (sys_mutex_t)g_host_mx_n) return -1;
+	if (pthread_mutex_trylock(&g_host_mx[m])) return -1;
+	g_host_owner[m] = pthread_self();
+	g_host_depth[m]++;
+	return 0;
+}
+int host_mutex_held(sys_mutex_t m)   // by the calling thread
+{
+	return m >= 1 && m < (sys_mutex_t)g_host_mx_n && g_host_depth[m] > 0 && pthread_equal(g_host_owner[m], pthread_self());
+}
 int sysMemContainerCreate(sys_mem_container_t *c, u64) { *c = 1; return 0; }
 int sysMemContainerDestroy(sys_mem_container_t) { return 0; }
 
@@ -164,6 +232,7 @@ int vf_rename(const char *from, const char *to) { char a[512], b[512]; if (host_
 int vf_mkdir(const char *path) { char b[512]; struct stat st; const char *p = hp(path, b, sizeof b); return mkdir(p, 0777) == 0 || (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) ? 0 : -1; }
 int vf_scan(VfVolume *out, int max)
 {
+	if (host_io) host_io();
 	int n = 0;
 	for (int port = 0; port < 8; port++)
 		if (host_exfat[port]) {
@@ -172,7 +241,7 @@ int vf_scan(VfVolume *out, int max)
 		}
 	return n;
 }
-int vf_free_mb(const char *, uint64_t *mb) { *mb = 338 * 1024; return 0; }   // a hard disk with room
+int vf_free_mb(const char *, uint64_t *mb) { if (host_io) host_io(); *mb = 338 * 1024; return 0; }   // a hard disk with room
 int vf_list(const char *, void (*)(const char *, void *), void *) { return 0; }
 const char *host_listdir_extra;   // a name every listing adds (a file a case-sensitive file system has too)
 int vf_listdir(const char *dir, void (*cb)(const char *, void *), void *ctx)
@@ -208,7 +277,7 @@ int vf_drive_present(int port)
 int vf_label(int port, char *out, size_t n) { if (port < 0 || port > 7) return -1; snprintf(out, n, "%s", host_label[port]); return 0; }
 
 // Redump, the remote view and webhooks: no network on the host
-int rd_local_info(char *ver, size_t n, time_t *when) { snprintf(ver, n, "2026-06-15"); *when = 0; return 1; }
+int rd_local_info(char *ver, size_t n, time_t *when) { snprintf(ver, n, "2026-06-15"); if (when) *when = 0; return 1; }   // (when may be NULL, as on the console)
 int rd_local_by_size(uint64_t, int, char (*)[RD_NAME], int) { return -1; }
 int host_rd_local;
 unsigned char host_rd_md5[16];
@@ -221,7 +290,16 @@ int rd_local_verify(const uint8_t (*md5)[16], int n, char *name, size_t nn)
 	return 1;
 }
 int rd_online(const char *, RdDisc *, int) { return -1; }
-int rd_download(volatile uint32_t *, volatile uint32_t *, volatile int *, volatile int *) { return -1; }
+// The download: while host_rd_dl_hold it reports progress and waits (an abort ends it, -7), then
+// answers host_rd_dl_result (the discs, or a failure < 0)
+volatile int host_rd_dl_hold, host_rd_dl_result = -1, host_rd_dl_calls;
+int rd_download(volatile uint32_t *done, volatile uint32_t *total, volatile int *phase, volatile int *abort)
+{
+	__sync_fetch_and_add(&host_rd_dl_calls, 1);
+	*phase = 0; *total = 4096 * 1024; *done = 1024 * 1024;
+	while (host_rd_dl_hold && !*abort) usleep(1000);
+	return *abort ? -7 : host_rd_dl_result;
+}
 #ifdef HOST_REMOTE
 int netCtlInit() { return 0; }
 int netCtlGetInfo(int, union net_ctl_info *info)   // this computer's first LAN address
@@ -239,11 +317,24 @@ int netCtlGetInfo(int, union net_ctl_info *info)   // this computer's first LAN 
 }
 #else
 void remote_init(const RemoteHooks *) {}
-void remote_set(int) {}
+int host_remote_flags = -1;   // what the app last told the web server to serve (remote_set)
+void remote_set(int flags) { host_remote_flags = flags; }
 int remote_ip(char *out, int n) { snprintf(out, n, "192.168.1.50"); return 0; }
+int remote_jpeg(unsigned char **jpg, int *len) { *jpg = NULL; *len = 0; return -1; }   // the encoder is remote.cpp's (remote_test)
 #endif
 void json_str(char *out, size_t n, const char *s) { size_t o = strlen(out); snprintf(out + o, n - o, "\"%s\"", s); }
 int webhook_event_index(const char *) { return -1; }
 void webhook_host(const char *url, char *out, size_t n) { snprintf(out, n, "%s", url); }
-int webhook_post(const char *, const char *, const char *) { return -1; }
+// a test's POST: host_webhook_status after host_webhook_ms; the last address and headers it got (the
+// tests check that the app sent them, never that an answer shows them)
+volatile int host_webhook_status = -1, host_webhook_ms, host_webhook_posts;
+char host_webhook_url[512], host_webhook_hdrs[1024];
+int webhook_post(const char *url, const char *, const char *hdrs)
+{
+	snprintf(host_webhook_url, sizeof host_webhook_url, "%s", url);
+	snprintf(host_webhook_hdrs, sizeof host_webhook_hdrs, "%s", hdrs ? hdrs : "");
+	if (host_webhook_ms) usleep(host_webhook_ms * 1000);
+	__sync_fetch_and_add(&host_webhook_posts, 1);
+	return host_webhook_status;
+}
 void webhook_send_async(const char *, const char *, const char *) {}
