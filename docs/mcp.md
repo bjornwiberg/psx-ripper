@@ -146,7 +146,7 @@ app and are not in it. No arguments.
 
 Lines of the app's log, `/dev_hdd0/tmp/psxrip.log`.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `from_line` | The first line, 0 = the log's first. Left out: the last lines |
 | `max_lines` | At most 500, default 100 |
@@ -201,7 +201,7 @@ game list's source and filter are not settings here: the game tools take them as
 Changes a setting as its screen would: the same checks and side effects, saved at once, logged in
 the audit log. Answers with the setting as `list_settings` gives it.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `key` | The key, as `list_settings` gives it |
 | `value` | One of the allowed values, or any text for a free-text setting. `4` and `"4"` are the same; `true`/`false` are `1`/`0` |
@@ -229,7 +229,7 @@ does △ (reset everything) on the console's pad: it turns all three Remote cont
 
 Opens one of the app's screens the way the pad goes there, and answers with the state.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `screen` | `home`, `settings`, `drive_settings`, `filename`, `webhooks`, `about`, `audit_log`, `remote_control`, `games` |
 | `drive` | Only with `drive_settings`, and required there |
@@ -254,7 +254,7 @@ Presses one button, as the pad would, and answers with the state. It is the fall
 a dialog and moving around a screen. Every action the screens offer has a tool of its own: use
 those for the work itself.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `button` | `cross`, `circle`, `triangle`, `square`, `up`, `down`, `left`, `right`, `start`, `select`, `l1`, `r1`, `l2`, `r2` |
 
@@ -319,7 +319,7 @@ The file names a [file name pattern](user-guide.md#where-the-rips-go) gives, as 
 preview shows them, without changing anything. Use it to try a pattern before
 `set_setting name_pattern` or `rename_game`.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `pattern` | `%T` title, `%N` Redump's name, `%D` disc ID, `%R` region, other characters as they are (at most 95 bytes). Empty: `%T [%D]` |
 | `drive` | Only this drive's disc. Left out: every drive with an identified disc, or an example disc when none has one |
@@ -342,7 +342,7 @@ preview shows them, without changing anything. Use it to try a pattern before
 
 Sets settings back to their defaults, as △ does.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `drive` | That drive's own settings go back to the standard, as △ *All standard* in its settings; its destination stays. Refused while a job runs on the drive |
 | `confirm` | Without `drive`: every setting, as △ and *yes* in the settings. Must be `true`, or nothing is reset |
@@ -379,7 +379,7 @@ TV (started from the pad, the result is a dialog as before): `get_app_info` has 
 `redump_copy.last_download`. A failed download keeps the copy there was. While it runs, every
 other request is refused at once with what is going on.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `cancel` | `true` stops the download that runs, as ○ does: `{"result":{"cancelled":true},…}` |
 
@@ -443,7 +443,7 @@ game list's source or filter (saved by earlier versions) says *No longer a setti
 `audit_undo` undoes one item, as △ and *yes* on the audit screen do; `audit_redo` applies an
 undone item again, as △ (*Redo*) and *yes*. The audit screen shows on the TV meanwhile.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `row` | A row's `id`: a setting, a sector, a file move, or an undo row |
 | `job` | A job's number: all its kept changes (a repair's sectors, a rename's or a trash move's files) |
@@ -502,7 +502,7 @@ app shows the hard disk with no filter.
 
 The game list, read on its own without touching the screen.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `source` | Default `all` |
 | `filter` | See above |
@@ -569,7 +569,7 @@ filter panel set them. They last until the app restarts: neither is saved or in 
 each start shows the hard disk with no filter (the answer's `note` says so). Use it to show the
 agent's findings on the TV; `list_games` reads the games.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `source` | `hdd`, `usbN` or `all`. Left out: the source shown now |
 | `filter` | The criteria to set (as above); each one left out keeps its value. `"clear"` (or `{}`) clears them, as L1 does. `show` (`games` or `trash`) is the panel's Show: it switches only the view, as in the panel |
@@ -634,7 +634,7 @@ games*, and *No game list check runs: there is nothing to cancel.*
 Renames every file of the game (all its discs, the `.cue`'s `FILE` lines too), as START in the
 rename view does. Logged in the audit log and undoable there.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `id` | The game |
 | `pattern` | `%T` title, `%N` Redump's name, `%D` disc ID, `%R` region, other characters as they are (at most 95 bytes). Empty: `%T [%D]` |
@@ -672,7 +672,7 @@ to restore.*
 Deletes every game in the trash of **one** source, as START and *yes* in the trash do. This is
 final: the files cannot be restored, not even from the audit log.
 
-| Argument | |
+| Argument | Meaning |
 |---|---|
 | `source` | Required: `hdd` or `usbN`. `all` is refused: a trash is emptied one source at a time |
 | `confirm` | Must be `true`; without it nothing is deleted |
@@ -701,7 +701,7 @@ Refusals:
 
 `get_state` names the screen:
 
-| `screen` | |
+| `screen` | The screen shown |
 |---|---|
 | `home` | The drives' tabs |
 | `settings` | The settings |

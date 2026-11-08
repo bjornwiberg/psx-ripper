@@ -37,7 +37,7 @@ discs at the same time. They run on the PS3's USB power; no Y-cable is needed.
 
 ## The screen
 
-![A drive's tab](images/tabs.jpg)
+![The internal drive's tab ripping Lunar - Silver Star Story Complete (Disc 2) at 11 %, next to the tabs USB 0 at 23 % and USB 1 at 16 %. Below: the destination, the file name, a progress bar, 34816 of 309530 sectors, time left and speed, and Cancel rip on the circle button](images/tabs.jpg)
 
 Every drive has a **tab**: *Internal* (the PS3's drive), and *USB 0* / *USB 1* for SuperDrives,
 named after the USB port. **L1 / R1** (or up / down) move between the tabs. The tab shows the
@@ -348,7 +348,7 @@ everything, ○ goes back.
 ## Audit log
 
 PSX RiPPER writes down every change it makes, so you can see what changed, when, and what
-started it, and undo it. Open it from the settings (*Audit log*; *Ändringslogg* in Swedish).
+started it, and undo it. Open it from the settings (*Audit log*; *<span lang="sv">Ändringslogg</span>* in Swedish).
 
 **What is logged**
 
@@ -396,7 +396,7 @@ undo shows how far it got; closing the app stops it, and what was undone until t
 undone.
 
 **Redo**: every undo is itself logged, as its own row. A row marked *(undone)* can be redone:
-select it and △ says *Redo* (*Gör om* in Swedish); it applies the change again and the row is no
+select it and △ says *Redo* (*<span lang="sv">Gör om</span>* in Swedish); it applies the change again and the row is no
 longer undone, so △ undoes it again, as often as you like. (The undo rows stay in the list as
 history; △ on the newest one does the same.) A setting gets the value the change gave
 it, as long as it still has the value the undo put back. A sector gets the repaired bytes again,
