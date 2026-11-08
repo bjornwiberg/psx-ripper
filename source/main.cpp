@@ -138,6 +138,7 @@ static GameFilter g_games_filter = {0, 0, 0, 0};
 // Config keys an older version saved and this one ignores: an old line is read without complaint and
 // dropped on the next save; the audit log's old rows stay readable but have nothing to undo.
 static bool cfg_key_retired(const char *key) { return !strcmp(key, "games_source") || !strcmp(key, "games_filter"); }
+static int cfg_retired(const char *key) { return cfg_key_retired(key); }   // (the audit's hook: its old rows have nothing to undo)
 // A filter as four numbers (format, Redump, errors, other) in their ranges (old audit rows); 0 when not.
 static int games_filter_parse(const char *v, GameFilter *f)
 {
@@ -4885,6 +4886,7 @@ static void av_reason(const AuditReason &rs, char *out, size_t n, Tr tr = T)
 		else snprintf(out, n, tr(STR_AW_NOT_PUT_BACK), (int)rs.lba, rs.file);
 		break;
 	case AW_NOT_RESTORED: snprintf(out, n, tr(STR_AW_NOT_RESTORED), rs.file); break;
+	case AW_RETIRED: snprintf(out, n, "%s", tr(STR_AW_RETIRED)); break;
 	default: snprintf(out, n, "%s", tr(STR_AUDIT_NO_UNDO)); break;
 	}
 }
@@ -10828,6 +10830,7 @@ int main(int argc, char *argv[])
 	audit_set_hooks(set_setting_hook, recheck_hook);
 	audit_set_move_hooks(gm_moved_hook, gm_busy_hook);
 	audit_set_progress(audit_undo_tick);
+	audit_set_retired(cfg_retired);
 	int had_cfg = cfg_load();
 	audit_apply_cap();   // also without a config file (the default size)
 	cfg_prime();   // so the first change after the boot is logged

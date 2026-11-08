@@ -476,6 +476,7 @@ enum StrId {
 	STR_CAN_NO_EXIT,
 	STR_GC_NOTHING,
 	STR_GM_DOT,   // a rename to a name starting with a dot (hidden)
+	STR_AW_RETIRED,   // an old row of a config key the app no longer has
 	STR_COUNT
 };
 

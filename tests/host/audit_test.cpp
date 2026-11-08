@@ -491,6 +491,35 @@ static void private_setting_not_reversible(int &bad)
 	audit_set_hooks(NULL, NULL);
 }
 
+// a setting the app no longer has (a retired config key, as games_source and games_filter): its old
+// rows are not undoable and say so, also through an undo row's chain; the hook is never called
+static int retired_key(const char *k) { return !strcmp(k, "games_filter"); }
+static void retired_setting_not_reversible(int &bad)
+{
+	fresh();
+	hooks_reset();
+	audit_set_retired(retired_key);
+	audit_setting(AU_PAD, "games_filter", "0,0,0,0", "1,0,0,0");
+	audit_setting(AU_PAD, "speed", "0", "1");
+	AuditRow r[4];
+	CHECK(audit_events(AU_SETTINGS, NULL, r, 4) == 2 && r[1].reversible == 0 && r[1].why == AW_RETIRED && r[0].reversible == 1);
+	char why[128] = "";
+	AuditReason rs;
+	CHECK(audit_undo_row(r[1].id, why, sizeof why, &rs) == -1 && rs.code == AW_RETIRED && !strcmp(rs.what, "games_filter") &&
+	      strstr(why, "no longer a setting") && g_set_calls == 0);
+	// a row undone before the key was retired: its undo row (the redo) says the same
+	audit_set_retired(NULL);
+	audit_setting(AU_PAD, "games_filter", "1,0,0,0", "2,0,0,0");
+	uint32_t id = newest_setting_id();
+	CHECK(audit_undo_row(id, why, sizeof why) == 0 && g_set_calls == 1);
+	audit_set_retired(retired_key);
+	int n = audit_events(AU_SETTINGS, NULL, r, 4);
+	CHECK(n >= 2 && !strcmp(r[0].kind, "undo") && r[0].reversible == 0 && r[0].why == AW_RETIRED);
+	CHECK(audit_undo_row(r[0].id, why, sizeof why, &rs) == -1 && rs.code == AW_RETIRED && g_set_calls == 1);
+	audit_set_retired(NULL);
+	audit_set_hooks(NULL, NULL);
+}
+
 static void recheck_called_once_per_file(int &bad)
 {
 	fresh();
@@ -1715,6 +1744,7 @@ int main()
 		{"undo_sector", undo_sector}, {"undo_refused_when_changed", undo_refused_when_changed},
 		{"undo_job_newest_first", undo_job_newest_first}, {"undo_job_stops_at_refusal", undo_job_stops_at_refusal},
 		{"undo_missing_blob", undo_missing_blob}, {"undo_setting", undo_setting}, {"private_setting_not_reversible", private_setting_not_reversible},
+		{"retired_setting_not_reversible", retired_setting_not_reversible},
 		{"recheck_called_once_per_file", recheck_called_once_per_file}, {"undo_disc_since", undo_disc_since},
 		{"recheck_gets_sectors", recheck_gets_sectors}, {"undo_refused_unfinished", undo_refused_unfinished},
 		{"undo_unfinished_repair", undo_unfinished_repair},

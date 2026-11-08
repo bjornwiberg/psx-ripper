@@ -480,6 +480,7 @@ static const char *en[STR_COUNT] = {
 	"Circle on the home screen exits the app; MCP does not exit it. Use the controller.",
 	"Nothing to check: every game here has a Redump result or cannot be checked",
 	"The new name starts with a dot, which hides the game: choose another pattern",
+	"No longer a setting: nothing to undo",
 };
 
 static const char *sv[STR_COUNT] = {
@@ -956,6 +957,7 @@ static const char *sv[STR_COUNT] = {
 	"Cirkel på startskärmen avslutar appen; MCP avslutar den inte. Använd handkontrollen.",
 	"Inget att kontrollera: varje spel här har ett Redump-resultat eller kan inte kontrolleras",
 	"Det nya namnet börjar med en punkt, vilket döljer spelet: välj ett annat mönster",
+	"Inte längre en inställning: inget att ångra",
 };
 
 static const char **table = en;

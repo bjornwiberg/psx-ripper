@@ -46,6 +46,7 @@ static std::map<uint32_t, bool> g_rips;
 static std::map<std::string, uint32_t> g_made;
 static uint64_t g_cap = 256ull << 20, g_blob_total;   // the audit_mb setting; all job<N>.bin together
 static int (*g_set_setting)(const char *key, const char *value);
+static int (*g_retired)(const char *key);   // a config key the app no longer has (its rows: nothing to undo)
 static void (*g_recheck)(const char *file, const uint32_t *lbas, const uint8_t *zero, int n, int redo);
 static int (*g_tick)(uint32_t done, uint32_t total);
 static int (*g_moved)(const char *from, const char *to);
@@ -600,6 +601,12 @@ static const UndoState::Setting *chain_setting(const UndoState &s, const UndoSta
 static const char *setting_block(const AuditRow &r, const UndoState &s, const char *key, const std::string &now,
                                  char *msg, size_t n, AuditReason *rs)
 {
+	if (g_retired && g_retired(key)) {   // no longer a setting: there is nothing to put the value back into
+		reason(rs, AW_RETIRED, r);
+		if (rs) copyn(rs->what, sizeof rs->what, key);
+		snprintf(msg, n, "%.100s is no longer a setting", key);
+		return msg;
+	}
 	auto it = s.cur.find(key);
 	if (it == s.cur.end() || it->second != now) {
 		reason(rs, AW_SETTING_CHANGED, r);
@@ -1380,6 +1387,11 @@ void audit_set_hooks(int (*set_setting)(const char *key, const char *value),
 {
 	g_set_setting = set_setting;
 	g_recheck = recheck;
+}
+
+void audit_set_retired(int (*retired)(const char *key))
+{
+	g_retired = retired;
 }
 
 void audit_set_progress(int (*tick)(uint32_t done, uint32_t total))

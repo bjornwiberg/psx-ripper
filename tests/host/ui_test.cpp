@@ -3831,6 +3831,22 @@ static void mcp_games_scenarios()
 		need(setting_rows("games_source", AU_APP) == sa && setting_rows("games_filter", AU_APP) == fa, "a start: no audit rows for the old lines");
 		need(set_setting_hook("games_filter", "0,0,0,0") != 0 && set_setting_hook("games_source", "hdd") != 0 && filter_is(0, 0, 0, 0) &&
 		     !strcmp(g_games_source, "hdd") && !saved_has("games_filter") && !saved_has("games_source"), "the undo of an old row is refused");
+		// and the audit log shows them as not undoable, with the reason in words (no triangle that always fails)
+		audit_set_retired(cfg_retired);
+		{
+			static AuditRow ev[8];
+			int ne = audit_events(AU_SETTINGS, NULL, ev, 8), seen = 0;
+			for (int i = 0; i < ne; i++) {
+				if (strcmp(ev[i].kind, "setting") || (strcmp(ev[i].what, "games_filter") && strcmp(ev[i].what, "games_source"))) continue;
+				seen++;
+				char en[200], svt[200];
+				av_reason(av_row_reason(ev[i]), en, sizeof en, T_en);
+				av_reason(av_row_reason(ev[i]), svt, sizeof svt, T_sv);
+				need(!ev[i].reversible && ev[i].why == AW_RETIRED && !strcmp(en, "No longer a setting: nothing to undo") &&
+				     !strcmp(svt, "Inte längre en inställning: inget att ångra"), "an old row: not undoable, the reason in en and sv", en);
+			}
+			need(seen == 2, "both old rows are listed");
+		}
 		ui_trace = keep_trace;
 	}
 	h.ui("go_screen", "home", outb, sizeof outb);
