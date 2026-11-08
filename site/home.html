@@ -21,17 +21,53 @@
   </figure>
 </section>
 
+<section class="sec" id="repair" aria-labelledby="repair-h">
+  <h2 class="label" id="repair-h">Scratched disc? Rip it now, fix it later</h2>
+  <div class="cols">
+    <div>
+      <p>Most rippers make you start over when a disc has bad sectors. PSX RiPPER finishes the rip,
+        writes every sector it could not read into the rip's log, and lets you come back for
+        <em>only those sectors</em>, as many times as you like.</p>
+      <ol class="steps">
+        <li>Rip the disc. The tab says <em>Known errors: n sectors</em>.</li>
+        <li>Take it out, clean or polish it, or try it in another drive.</li>
+        <li>Put it back and press <span class="g g-square g-inline" aria-label="square">□</span> Repair. Only the
+          listed sectors are read again, the ones that come back are written into the image, and the
+          rip is checked against Redump again.</li>
+      </ol>
+    </div>
+    <div>
+      <p>A repair never makes a rip worse: a sector is only written when it reads correctly, and
+        what a repair writes is in the audit log, so it can be undone there.</p>
+      <p>Repeat it with a fresh clean, a slower speed, or a SuperDrive instead of the PS3's drive,
+        until the rip turns verified. With automatic start on, putting the disc back starts the
+        repair by itself.</p>
+      <p class="spec"><code>&lt;name&gt;.bin.log</code> lists the bad sectors · the audit log keeps what a repair changed</p>
+    </div>
+  </div>
+</section>
+
 <section class="sec" id="features" aria-labelledby="features-h">
   <h2 class="label" id="features-h">What it does</h2>
   <div class="grid">
+    <article class="feat">
+      <h3>Feed it discs, walk away</h3>
+      <p>Turn on <em>Rip immediately when a disc is inserted</em> and <em>Eject the disc when done</em>: insert a disc, the rip starts by itself, and the finished disc comes out. Swap and
+        go again, on up to three drives at once, each with its own settings.</p>
+      <p>A disc that was already ripped with known errors is repaired instead of ripped again. A
+        webhook can tell your phone when each rip is done or failed, and a disc already in a drive
+        when the app starts is never ripped by surprise.</p>
+      <p class="spec">autostart · eject · per-drive settings · webhooks</p>
+    </article>
+
     <article class="feat">
       <h3>Bit-perfect rips</h3>
       <p>Raw 2352-byte sectors, every track including CD audio, with pregaps read from the Q
         subchannel. Every data sector is checked against its EDC/ECC. Video and sound sectors
         have no checksum, so they are read again and compared. Unreadable sectors are retried
         slowly.</p>
-      <p><strong>Repair</strong> re-reads only the sectors the rip log lists, so you can clean a
-        disc and try again later without a full re-rip. It never makes a rip worse.</p>
+      <p><a href="#repair"><strong>Repair</strong></a> re-reads only the sectors the rip log lists, so you
+        can clean a disc and try again later without a full re-rip. It never makes a rip worse.</p>
       <p class="spec"><code>name.bin</code> <code>.cue</code> <code>.bin.md5</code> <code>.bin.log</code></p>
     </article>
 
@@ -171,7 +207,7 @@
         <li>Copy it to the PS3 with a USB stick, FTP or webMAN's <em>Install PKG</em>.</li>
         <li>Install it with <em>Package Manager → Install Package Files</em>. Installing over an
           older version keeps your settings.</li>
-        <li>Start <strong>PSX RiPPER</strong> from the Game column, insert a disc and press
+        <li>Start <strong>PSX RiPPER</strong> from the XMB (where it shows depends on your setup), insert a disc and press
           <span class="g g-cross g-inline" aria-label="cross">✕</span>.</li>
       </ol>
       <p>Rips go to <code>/dev_hdd0/PSXISO/</code> by default. Mount the <code>.cue</code> with

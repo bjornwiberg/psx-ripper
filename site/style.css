@@ -145,6 +145,11 @@ img { max-width: 100%; height: auto; display: block; }
   border: 1.5px solid currentColor; color: var(--cross); font-size: 0.9em;
   background: rgb(157 183 255 / 0.12);
 }
+.g-square {
+  width: 1.35em; height: 1.35em; border-radius: 0.22em;
+  border: 1.5px solid currentColor; color: var(--square); font-size: 0.75em;
+  background: rgb(243 160 220 / 0.12);
+}
 .g-pill {
   padding: 0.22em 0.6em; border-radius: 999px;
   border: 1px solid #8b90b8; color: var(--text);
