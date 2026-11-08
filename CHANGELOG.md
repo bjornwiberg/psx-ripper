@@ -5,6 +5,19 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.0](https://github.com/bjornwiberg/psx-ripper/compare/v1.3.0...v1.4.0) (2026-11-08)
+
+
+### Features
+
+* MCP server for app control ([#33](https://github.com/bjornwiberg/psx-ripper/issues/33)) ([f21b75e](https://github.com/bjornwiberg/psx-ripper/commit/f21b75ed18780f3fec0656988234d04886d064e1))
+
+
+### Bug fixes
+
+* a rip refused while another drive rips says why, not that a repair uses the whole screen ([#31](https://github.com/bjornwiberg/psx-ripper/issues/31)) ([4bdc716](https://github.com/bjornwiberg/psx-ripper/commit/4bdc7162fa2638355e784abfcc50dbeb3471beed))
+* game list groups discs named CD1, CD 2 or Disc 3, and drops the number from the row's name ([#32](https://github.com/bjornwiberg/psx-ripper/issues/32)) ([6b6fef4](https://github.com/bjornwiberg/psx-ripper/commit/6b6fef4b49e40d741f3db717c06aa3fd19ef90c6))
+
 ## [1.3.0](https://github.com/bjornwiberg/psx-ripper/compare/v1.2.0...v1.3.0) (2026-11-07)
 
 
