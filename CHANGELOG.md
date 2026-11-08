@@ -5,6 +5,13 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.1](https://github.com/bjornwiberg/psx-ripper/compare/v1.4.0...v1.4.1) (2026-11-08)
+
+
+### Bug fixes
+
+* no rip starts for a disc already in the internal drive at app start ([#35](https://github.com/bjornwiberg/psx-ripper/issues/35)) ([fb3249b](https://github.com/bjornwiberg/psx-ripper/commit/fb3249b15897a29aee2e05bc329e567282bbe164))
+
 ## [1.4.0](https://github.com/bjornwiberg/psx-ripper/compare/v1.3.0...v1.4.0) (2026-11-08)
 
 
