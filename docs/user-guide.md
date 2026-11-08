@@ -32,7 +32,7 @@ discs at the same time. They run on the PS3's USB power; no Y-cable is needed.
 1. Download `psxripper-<version>.pkg` from the [releases](https://github.com/bjornwiberg/psx-ripper/releases/latest).
 2. Copy it to the PS3: a USB stick, FTP, or webMAN's *Install PKG*.
 3. Install it with *Package Manager → Install Package Files* and start **PSX RiPPER** from the
-   XMB (the column it shows in depends on your setup). Installing a newer version over an older
+   XMB, under *Game* (webMAN may list it under *Unknown*). Installing a newer version over an older
    one keeps your settings.
 
 ## The screen
