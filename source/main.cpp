@@ -763,7 +763,15 @@ static void sysutil_callback(u64 status, u64 param, void *usrdata)
 static uint64_t now_ms();
 static volatile uint64_t g_unmount_until = 0;
 static void disc_eject_cb(void) { if (now_ms() < g_unmount_until) return; g_cards[0].inserted = 0; g_cards[0].present = 0; }
-static void disc_insert_cb(u32 type, char *title) { g_cards[0].inserted = 1; g_cards[0].present = 1; }
+// The system also reports the disc that is already in the drive as inserted, a moment after the app
+// registers (at start, after a reboot): until g_disc_settle_until an insert is that disc, which is
+// identified but never ripped by itself (as a USB drive's disc at start).
+static volatile uint64_t g_disc_settle_until = 0;
+static void disc_insert_cb(u32 type, char *title)
+{
+	if (now_ms() < g_disc_settle_until) { g_cards[0].present = 1; return; }
+	g_cards[0].inserted = 1; g_cards[0].present = 1;
+}
 
 static void lv1_storage_unpatch();
 static void program_exit_callback()
@@ -11591,6 +11599,7 @@ int main(int argc, char *argv[])
 	{ sys_ppu_thread_t t; sysThreadCreate(&t, usb_presence_thread, NULL, 1500, 0x4000, 0, (char *)"psxusbpoll"); }
 	{ struct stat ps; if (stat("/dev_hdd0/tmp/psxrip.usbprobe", &ps) == 0) { logf("usbprobe: start"); usb_optical_probe(); logf("usbprobe: done"); } }
 	webman_unmount();   // a game image webMAN mounted earlier would hide the internal drive's disc
+	g_disc_settle_until = now_ms() + 20000;
 	sysDiscRegisterDiscChangeCallback(disc_eject_cb, disc_insert_cb);
 	if (!exit_requested) home_screen();   // rips run on their cards, from the home screen; it returns to exit
 	// cancel what still rips and wait for it: the files are cleaned up and lv1 unpatched
