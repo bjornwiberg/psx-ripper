@@ -220,7 +220,10 @@ img { max-width: 100%; height: auto; display: block; }
 /* ------------------------------------------------------------------ docs pages */
 
 .doc { max-width: var(--wide); margin: 0 auto; padding: 2.5rem 1rem 0; }
-.prose { max-width: var(--measure); font-size: 0.97rem; }
+/* the docs use the same container as the header (one left and right edge); running text keeps a
+   readable measure inside it, while headings, tables and code use the full width */
+.prose { font-size: 0.97rem; }
+.prose p, .prose ul, .prose ol, .prose dl, .prose blockquote { max-width: var(--measure); }
 .prose h1 {
   margin: 0 0 1.5rem; color: var(--ink); font-size: clamp(1.8rem, 5vw, 2.4rem); line-height: 1.15;
 }
@@ -233,9 +236,18 @@ img { max-width: 100%; height: auto; display: block; }
 .prose h2 a, .prose h3 a { color: inherit; }
 .prose p, .prose ul, .prose ol { margin: 0 0 0.9rem; }
 .prose li { margin-bottom: 0.3rem; }
-/* a list item that is only a link (a page's contents) is a 44 px target (WCAG 2.5.5) */
-.prose li.only-link { margin-bottom: 0; }
-.prose li.only-link > a { display: inline-flex; align-items: center; min-height: 44px; min-width: 44px; }
+/* "On this page": a compact list in columns, read top to bottom, column by column. Each row is
+   32 px: at least 24 by 24 with no overlap (WCAG 2.5.8 AA), not 44 (2.5.5 AAA; see the statement) */
+.toc { margin: 0 0 1.6rem; }
+.prose .toc-h {
+  margin: 0 0 0.3rem; padding: 0; border: 0; color: var(--dim); font-size: 0.9rem; font-weight: 400;
+}
+.prose .toc ul {
+  max-width: none; margin: 0; padding: 0; list-style: none;
+  columns: 3 15rem; column-gap: 2rem;
+}
+.prose .toc li { margin: 0; break-inside: avoid; }
+.prose .toc a { display: inline-flex; align-items: center; min-height: 32px; min-width: 24px; }
 .prose li > ul, .prose li > ol { margin: 0.3rem 0 0; }
 .prose strong { color: var(--ink); }
 .prose blockquote {

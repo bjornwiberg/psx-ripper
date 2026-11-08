@@ -233,10 +233,13 @@ def mark_external(content):
 def scrollables(body):
     """Code blocks and tables can scroll sideways on a narrow screen; a keyboard user reaches them
     with Tab and scrolls them with the arrow keys (WCAG 2.1.1). A table sits in a named region,
-    named after the heading it is under. A list item that is only a link (a page's contents)
-    gets a class, so the style sheet can make it a 44 px target."""
+    named after the heading it is under. A list of links to the page's own sections becomes an
+    "On this page" navigation."""
     body = body.replace("<pre>", '<pre tabindex="0">')
-    body = re.sub(r"<li>(<a [^>]*>[^<]*</a>)</li>", r'<li class="only-link">\1</li>', body)
+    # a list of nothing but links to this page's sections is its table of contents
+    body = re.sub(r'<ul>\n((?:<li><a href="#[^"]*">[^<]*</a></li>\n)+)</ul>',
+                  r'<nav class="toc" aria-labelledby="toc-h"><h2 id="toc-h" class="toc-h">On this page</h2>'
+                  r'\n<ul>\n\1</ul></nav>', body)
     out, heading, pos, used = [], "", 0, {}
     for m in re.finditer(r"<h[1-6][^>]*>(.*?)</h[1-6]>|<table>.*?</table>", body, re.S):
         out.append(body[pos:m.start()])
