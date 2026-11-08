@@ -4088,6 +4088,16 @@ static void mcp_app_scenarios()
 }
 
 // ---------------------------------------------------------------- MCP: the app's other changing tools
+// A tick for the long undo's tests: while g_hold_undo the undo stays at this tick (the UI thread keeps
+// answering requests through it); g_block_first_tick holds its first tick without any answer.
+static volatile int g_hold_undo, g_block_first_tick;
+static int held_tick(uint32_t done, uint32_t total)
+{
+	while (g_block_first_tick) usleep(1000);
+	int r = audit_undo_tick(done, total);
+	while (g_hold_undo) { audit_undo_tick(done, total); usleep(2000); }
+	return r;
+}
 // reset_settings (D1), redump_download (D2), webhook_test, show_game, audit_undo and audit_redo (D3):
 // requests the UI thread (home_screen here, on a thread of its own) takes as the pad would.
 static void mcp_app_ui_scenarios()
@@ -4260,7 +4270,20 @@ static void mcp_app_ui_scenarios()
 		info();
 		need(has("\"source\":\"remote\""), "get_app_info: the pad's download (remote view's pad)", O);
 		call("press_button", "cross");
+		// the download's thread cannot be started: answered at once (-8), and the log does not say started
 		host_thread_rd = 0;
+		std::string lg0 = read_file("out/psxrip.log");
+		rc = call("redump_download", "");
+		need(rc != 0 && has("could not be started"), "redump_download: the thread cannot be started", O);
+		need(wait_for([] { return !g_dl_running; }), "the unstarted download ends");
+		bg_frames(4);
+		std::string lg = read_file("out/psxrip.log").substr(lg0.size());
+		need(lg.find("redump download started") == std::string::npos && lg.find("redump download result -8") != std::string::npos,
+		     "redump_download: no \"started\" in the log when the thread did not start", lg.c_str());
+		state();
+		need(has("\"dialog\":null"), "D2: no dialog after an unstarted download", O);
+		info();
+		need(has("\"last_download\":{\"result\":\"failed\",\"discs\":null,\"error\":-8"), "get_app_info: failed (-8)", O);
 		call("go_screen", "home");
 	}
 	// webhook_test: the HTTP status, never the address or headers; off the UI thread, at most 4 s
@@ -4274,6 +4297,10 @@ static void mcp_app_ui_scenarios()
 		g_webhook_hdr_on = 1;
 		host_webhook_status = 204; host_webhook_ms = 0;
 		int posts = host_webhook_posts;
+		{ UiLock lock; g_ui.osk = 1; }   // the user may be typing a new address: as the other changing tools
+		rc = h.webhook_test(outb, sizeof outb); out = outb; said.push_back(out);
+		{ UiLock lock; g_ui.osk = 0; }
+		need(rc != 0 && has("on-screen keyboard is open") && host_webhook_posts == posts, "webhook_test: refused while the on-screen keyboard is open", O);
 		rc = h.webhook_test(outb, sizeof outb); out = outb; said.push_back(out);
 		need(rc == 0 && json_ok(out.c_str()) && has("{\"sent\":true,\"status\":204,\"ok\":true}"), "webhook_test: the status", O);
 		need(host_webhook_posts == posts + 1 && !strcmp(host_webhook_url, SECRET_URL) && strstr(host_webhook_hdrs, SECRET_HDR), "webhook_test: sent to the address with its headers");
@@ -4344,6 +4371,16 @@ static void mcp_app_ui_scenarios()
 		need(rc == 0 && has("\"result\":{\"redone\":") && g_std.speed == 2, "audit_redo row: applied again", O);
 		rc = undo(1, row, 0);
 		need(rc != 0 && has("is not undone. audit_undo undoes it.") && g_std.speed == 2, "audit_redo on a row that is not undone: refused", O);
+		// the answer names the rows' real source (undo), and masks a secret in the label as audit_log does
+		{
+			snprintf(g_webhook, sizeof g_webhook, "http://10.0.0.9:8123/api/webhook/SECRETWEBHOOKID");
+			audit_setting(AU_PAD, "name_pattern", "%T [%D]", "%T /api/webhook/SECRETWEBHOOKID");
+			uint32_t pr = newest_row(AU_SETTINGS, "setting", "name_pattern");
+			rc = undo(0, pr, 0);
+			need(rc == 0 && has("[secret]") && !has("SECRETWEBHOOKID") && !has("10.0.0.9"), "audit_undo: a secret in the label is masked", O);
+			need(has("the source undo") && has("by mcp") && !has("source MCP"), "audit_undo: the note names the source undo", O);
+			g_webhook[0] = 0;
+		}
 		set("webhook", "http://192.0.2.10/hook");
 		rc = undo(0, newest_row(AU_SETTINGS, "setting", "webhook"), 0);
 		need(rc != 0 && has(T_en(STR_AW_SECRET)), "audit_undo of a secret: refused with the screen's reason", O);
@@ -4391,6 +4428,57 @@ static void mcp_app_ui_scenarios()
 		need(sector(150) == 0x11 && sector(4) == 0x11, "the long undo undid every sector");
 		rc = call("go_screen", "home");
 		need(rc == 0 && has("\"screen\":\"home\""), "the slot is free after it", O);
+		// a long undo of a whole disc held at its ticks: get_state's what is in English and masked; every other
+		// request is refused at once while it runs
+		{
+			snprintf(g_webhook, sizeof g_webhook, "http://10.0.0.9:8123/api/webhook/SECRETWEBHOOKID");
+			uint32_t sj = audit_job_begin(AU_PAD, "SLES_099.99", "Hold /api/webhook/SECRETWEBHOOKID", "repair");
+			for (int i = 4; i < 200; i++) audit_sector(sj, "out/au_img.bin", i, b, a);
+			audit_job_end(sj, "finished");
+			host_lang = PS3_LANG_SWEDISH; lang_init();
+			g_hold_undo = 1;
+			audit_set_progress(held_tick);
+			rc = undo(0, 0, 0, "SLES_099.99", 1);
+			need(rc == 0 && has("\"result\":{\"started\":true,\"what\":\"disc SLES_099.99\""), "a held disc undo: answered started", O);
+			state();
+			need(has("\"audit_undo\":{\"what\":\"Hold [secret]\"") && !has("SECRETWEBHOOKID"), "get_state audit_undo.what: masked", O);
+			rc = call("go_screen", "home");
+			need(rc != 0 && has("An undo in the audit log runs"), "a request while a long undo runs: refused at once", O);
+			rc = undo(0, row, 0);
+			need(rc != 0 && has("An undo in the audit log runs"), "another undo while a long undo runs: refused at once", O);
+			g_hold_undo = 0;
+			need(wait_for([] { UiState u; ui_snapshot(u); return u.scr == SCR_AUDIT_LOG; }), "the held undo ends");
+			// a job's what is the label in English while the console is in Swedish
+			uint32_t ej = audit_job_begin(AU_PAD, "SLES_011.35", "Alundra", "repair");
+			for (int i = 4; i < 200; i++) audit_sector(ej, "out/au_img.bin", i, b, a);
+			audit_job_end(ej, "finished");
+			g_hold_undo = 1;
+			rc = undo(0, 0, ej);
+			need(rc == 0 && has("\"started\":true"), "a held job undo: answered started", O);
+			state();
+			need(has("\"audit_undo\":{\"what\":\"Repair\"") , "get_state audit_undo.what: in English with the console in Swedish", O);
+			g_hold_undo = 0;
+			need(wait_for([] { UiState u; ui_snapshot(u); return u.scr == SCR_AUDIT_LOG; }), "the held job undo ends");
+			host_lang = PS3_LANG_ENGLISH_US; lang_init();
+			g_webhook[0] = 0;
+		}
+		// the early answer when MCP has already given up (the first tick after 5 s): the slot is freed
+		// once, and the next request is taken
+		{
+			uint32_t gj = audit_job_begin(AU_PAD, "SLES_011.35", "Alundra", "repair");
+			for (int i = 4; i < 200; i++) audit_sector(gj, "out/au_img.bin", i, a, b);
+			audit_job_end(gj, "finished");
+			g_block_first_tick = 1;
+			audit_set_progress(held_tick);
+			uint64_t t0 = now_ms();
+			rc = undo(0, 0, gj);
+			need(rc != 0 && has("did not finish it within") && now_ms() - t0 >= 4500, "an undo whose first tick comes after 5 s: MCP gives up", O);
+			g_block_first_tick = 0;
+			need(wait_for([] { UiState u; ui_snapshot(u); return u.scr == SCR_AUDIT_LOG && !g_undo_mcp; }), "that undo ends");
+			bg_frames(4);
+			rc = call("go_screen", "home");
+			need(rc == 0 && has("\"screen\":\"home\""), "the slot is free after an early answer to nobody", O);
+		}
 		g_undo_early_ms = 3000;
 		audit_set_progress(NULL);
 	}

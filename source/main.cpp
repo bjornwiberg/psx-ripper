@@ -3913,7 +3913,26 @@ static volatile uint32_t g_dl_done, g_dl_total;
 static volatile int g_dl_phase, g_dl_abort, g_dl_result, g_dl_finished;
 static volatile int g_dl_running;   // the download screen is up (get_state shows its progress)
 // The last download's result, for get_app_info: discs (> 0), cancelled (-7) or failed (another < 0).
-static struct { volatile int set; int result; char version[64]; time_t at; AuditSrc src; } g_dl_last;
+// Written by the UI thread under g_dl_seq (odd while it writes), read by MCP's thread as a whole copy
+// (dl_last_copy): never one download's result with another's version or time.
+struct DlLast { int set; int result; char version[64]; time_t at; AuditSrc src; };
+static DlLast g_dl_last;
+static volatile unsigned g_dl_seq;
+static DlLast dl_last_copy()
+{
+	DlLast d;
+	for (int tries = 0;; tries++) {
+		unsigned s = g_dl_seq;
+		__sync_synchronize();
+		if (!(s & 1)) {
+			memcpy(&d, &g_dl_last, sizeof(d));
+			__sync_synchronize();
+			if (g_dl_seq == s) return d;
+		}
+		if (tries >= 100) { memset(&d, 0, sizeof(d)); return d; }   // (the writer holds it for microseconds)
+		usleep(1000);
+	}
+}
 static void download_thread(void *arg)
 {
 	rd_lock();
@@ -3938,7 +3957,7 @@ static void redump_download_screen(AuditSrc src, int by_tool)
 		if (started) { g_req.res = strdup("{\"started\":true,\"note\":\"The download runs: get_state shows how far (redump_download), get_app_info the result.\"}"); g_req_flip = 1; }
 		else ui_req_done(-1, "The download could not be started.");
 	}
-	logf("redump download started%s", by_tool ? " by mcp" : "");
+	if (started) logf("redump download started%s", by_tool ? " by mcp" : "");
 	pad_pressed();
 	uint32_t shown = 101, shown_kb = ~0u;
 	int last_phase = -1, shown_abort = 0;
@@ -3971,15 +3990,15 @@ static void redump_download_screen(AuditSrc src, int by_tool)
 	u64 rv;
 	if (started) sysThreadJoin(tid, &rv);
 	logf("redump download result %d", g_dl_result);
-	g_dl_last.set = 0;
-	__sync_synchronize();
+	char dver[64] = "";
+	if (g_dl_result > 0) rd_local_info(dver, sizeof(dver), NULL);
+	__sync_fetch_and_add(&g_dl_seq, 1);   // odd: being written
 	g_dl_last.result = g_dl_result;
 	g_dl_last.at = time(NULL);
 	g_dl_last.src = src;
-	g_dl_last.version[0] = 0;
-	if (g_dl_result > 0) rd_local_info(g_dl_last.version, sizeof(g_dl_last.version), NULL);
-	__sync_synchronize();
+	snprintf(g_dl_last.version, sizeof(g_dl_last.version), "%s", dver);
 	g_dl_last.set = 1;
+	__sync_fetch_and_add(&g_dl_seq, 1);
 	g_dl_running = 0;
 	if (g_dl_result == -7 || exit_requested) return;   // cancelled
 	if (by_tool) return;   // no dialog to answer on the TV: get_app_info has the result
@@ -4717,7 +4736,7 @@ static uint32_t av_last[AV_MAX];
 static AuditRow av_rows[AV_MAX];
 static const AuditDom av_doms[] = {AU_RIPS, AU_SETTINGS, AU_FILES};
 static volatile int g_files_busy;   // a game's files are being moved or deleted (an action, an undo): busy, no deploy now
-static void audit_label(const struct AuditView &v, int i, char *out, size_t n);
+static void audit_label(const struct AuditView &v, int i, char *out, size_t n, Tr tr = T);
 #define AV_NDOMS 3
 // Level 1 of rips and files lists discs (a file action's disc: its set's ID; the trash's emptying: .trash).
 static int av_discs(const AuditView &v) { return v.level == 1 && (v.dom == AU_RIPS || v.dom == AU_FILES); }
@@ -5000,14 +5019,14 @@ static void av_row_label(const AuditRow &r, char *out, size_t n, Tr tr = T)
 static StrId av_dom_name(AuditDom d) { return d == AU_RIPS ? STR_AUDIT_DOM_RIPS : d == AU_FILES ? STR_AUDIT_DOM_FILES : STR_AUDIT_DOM_SETTINGS; }
 
 // Entry i of the level: its label, and the value at the right (when, and where it came from).
-static void audit_label(const AuditView &v, int i, char *out, size_t n)
+static void audit_label(const AuditView &v, int i, char *out, size_t n, Tr tr)
 {
 	out[0] = 0;
-	if (v.level == 0) snprintf(out, n, "%s", T(av_dom_name(av_doms[i])));
-	else if (av_discs(v)) { if (i < v.n) snprintf(out, n, "%s", !strcmp(av_keys[i], ".trash") ? T(STR_GL_V_TRASH) : av_names[i]); }
+	if (v.level == 0) snprintf(out, n, "%s", tr(av_dom_name(av_doms[i])));
+	else if (av_discs(v)) { if (i < v.n) snprintf(out, n, "%s", !strcmp(av_keys[i], ".trash") ? tr(STR_GL_V_TRASH) : av_names[i]); }
 	else {
 		int k = v.level == 3 ? i - v.base : i;
-		if (k >= 0 && k < v.n) av_row_label(av_rows[k], out, n);
+		if (k >= 0 && k < v.n) av_row_label(av_rows[k], out, n, tr);
 	}
 }
 static void av_value(const AuditView &v, int i, char *out, size_t n)
@@ -5026,6 +5045,7 @@ static void av_value(const AuditView &v, int i, char *out, size_t n)
 // in the UI tests, which have no screen to flip).
 static int g_check_ui;
 static char g_wait_name[128];
+static char g_wait_en[128];   // the same in English: get_state's audit_undo.what (MCP's text is English)
 
 // Undoes the focused item; the list is read again and the focus stays on it. 0 = done, else why[]
 // says why not (English, for the log) and v.why has the reason for the screen.
@@ -5162,7 +5182,7 @@ static void audit_wait_draw(const char *name, uint32_t mb, StrId what = STR_AUDI
 static int g_wait_redo;   // the audit screen's undo running now is a redo
 static void audit_wait_tick(uint32_t sectors)
 {
-	undo_wait_state(g_wait_name, g_wait_redo, 1, (uint32_t)((uint64_t)sectors * RAW_SIZE >> 20));
+	undo_wait_state(g_wait_en, g_wait_redo, 1, (uint32_t)((uint64_t)sectors * RAW_SIZE >> 20));
 	audit_wait_draw(g_wait_name, (uint32_t)((uint64_t)sectors * RAW_SIZE >> 20));
 	g_drawn = 2;
 	g_backdrop_shown = 0;
@@ -5178,7 +5198,7 @@ static int audit_undo_tick(uint32_t done, uint32_t total)
 {
 	(void)total;
 	if (g_check_ui) {
-		undo_wait_state(g_wait_name, g_wait_redo, 0, (uint32_t)((uint64_t)done * RAW_SIZE >> 20));
+		undo_wait_state(g_wait_en, g_wait_redo, 0, (uint32_t)((uint64_t)done * RAW_SIZE >> 20));
 		audit_wait_draw(g_wait_name, (uint32_t)((uint64_t)done * RAW_SIZE >> 20), audit_wait_what(g_wait_redo));
 		g_drawn = 2;
 		g_backdrop_shown = 0;
@@ -5218,6 +5238,7 @@ static void audit_screen()
 			if (own_dialog(q, 1) == 1) {
 				char why[200];
 				snprintf(g_wait_name, sizeof(g_wait_name), "%s", label);   // a big undo shows it while it writes
+				audit_label(v, v.row, g_wait_en, sizeof(g_wait_en), T_en);
 				g_check_ui = 1;
 				g_wait_redo = redo;
 				int rc = audit_undo(v, why, sizeof(why));
@@ -8271,6 +8292,9 @@ static int js_end(Js &j, char *out, int n, const char *hint = NULL)
 
 
 // get_state: the screen, its row, the tab, an open dialog or keyboard, the hint bar, the drives.
+struct Secrets;   // (read_log's, below) a text that might hold a secret is masked
+static Secrets *secrets_load();
+static void js_masked(Js &j, const Secrets &x, const char *s);
 static int mcp_state(char *out, int n)
 {
 	Js j = js_begin(out, n);
@@ -8304,9 +8328,11 @@ static int mcp_state(char *out, int n)
 		js_put(j, ",\"redump_download\":{\"phase\":\"%s\",\"percent\":%u,\"kb\":%u,\"kb_total\":%u,\"cancelling\":%s}", ph ? "index" : "download",
 		       tot ? (unsigned)((uint64_t)done * 100 / tot) : 0, ph ? 0 : done / 1024, ph ? 0 : tot / 1024, g_dl_abort ? "true" : "false");
 	}
-	if (scr == SCR_AUDIT_UNDO) {   // an undo of the audit screen runs: what, and how far
+	if (scr == SCR_AUDIT_UNDO) {   // an undo of the audit screen runs: what (in English, masked as audit_log masks it), and how far
 		js_put(j, ",\"audit_undo\":{\"what\":");
-		js_str(j, u.wait_name);
+		Secrets *x = secrets_load();
+		if (x) js_masked(j, *x, u.wait_name); else js_put(j, "null");
+		free(x);
 		js_put(j, ",\"redo\":%s,\"step\":\"%s\",\"mb\":%u}", u.wait_redo ? "true" : "false", u.wait_check ? "checking" : "writing", u.wait_mb);
 	}
 	js_put(j, ",\"busy\":%s,", g_state_busy() ? "true" : "false");
@@ -9638,20 +9664,19 @@ static int mcp_app_info(char *out, int n)
 	js_put(j, ",\"fetched\":");
 	js_time(j, discs > 0 ? fetched : 0);
 	js_put(j, ",\"downloading\":%s,\"last_download\":", g_dl_running ? "true" : "false");
-	int set = g_dl_last.set;
-	__sync_synchronize();   // its fields were written before set
-	if (!set) js_put(j, "null");
+	DlLast dl = dl_last_copy();
+	if (!dl.set) js_put(j, "null");
 	else {
-		int r = g_dl_last.result;
+		int r = dl.result;
 		js_put(j, "{\"result\":\"%s\",\"discs\":", r > 0 ? "done" : r == -7 ? "cancelled" : "failed");
 		if (r > 0) js_put(j, "%d", r); else js_put(j, "null");
 		js_put(j, ",\"error\":");
 		if (r < 0 && r != -7) js_put(j, "%d", r); else js_put(j, "null");
 		js_put(j, ",\"version\":");
-		if (r > 0 && g_dl_last.version[0]) js_str(j, g_dl_last.version); else js_put(j, "null");
+		if (r > 0 && dl.version[0]) js_str(j, dl.version); else js_put(j, "null");
 		js_put(j, ",\"at\":");
-		js_time(j, g_dl_last.at);
-		js_put(j, ",\"source\":\"%s\"}", src_key(g_dl_last.src));
+		js_time(j, dl.at);
+		js_put(j, ",\"source\":\"%s\"}", src_key(dl.src));
 	}
 	js_put(j, "}}");
 	return js_end(j, out, n);
@@ -9983,8 +10008,8 @@ static int audit_mcp_do(AuditView &v, const UiReq &r, char *why, size_t wn, char
 		snprintf(key, sizeof(key), "%s", r.adisc);
 		snprintf(g_undo_item, sizeof(g_undo_item), "disc %s", key);
 		char (*keys)[96] = (char (*)[96])malloc((size_t)AU_MCP_MAX * 96), (*names)[96] = (char (*)[96])malloc((size_t)AU_MCP_MAX * 96);
-		int at = -1, files = 0;
-		if (keys && names) {
+		int at = -1, files = 0, oom = !keys || !names;
+		if (!oom) {
 			int nd = audit_discs(keys, names, NULL, NULL, AU_MCP_MAX, AU_RIPS);
 			for (int i = 0; i < nd; i++) if (!strcmp(keys[i], key)) at = i;
 			if (at >= 0) snprintf(shown, sizeof(shown), "%s", names[at]);
@@ -9992,7 +10017,8 @@ static int audit_mcp_do(AuditView &v, const UiReq &r, char *why, size_t wn, char
 			for (int i = 0; i < nd; i++) files |= !strcmp(keys[i], key);
 		}
 		free(keys); free(names);
-		if (at < 0) {
+		if (oom) { snprintf(why, wn, "Out of memory."); rc = -1; }
+		else if (at < 0) {
 			if (files) snprintf(why, wn, "%s", AU_FILES_DISC);
 			else snprintf(why, wn, "No disc \"%.95s\" in the domain rips: audit_log with domain rips lists them.", key);
 			rc = -1;
@@ -10012,8 +10038,8 @@ static int audit_mcp_do(AuditView &v, const UiReq &r, char *why, size_t wn, char
 	else if (!vd.can) snprintf(why, wn, "Not %s: %s", done, vd.why);
 	if (why[0]) { free(row); utf8_fix(why); return -1; }
 	// as after the screen's yes: the wait screen names it (in the console's language), a big one says how far
-	if (key[0]) snprintf(g_wait_name, sizeof(g_wait_name), "%s", shown);
-	else av_row_label(*row, g_wait_name, sizeof(g_wait_name));
+	if (key[0]) { snprintf(g_wait_name, sizeof(g_wait_name), "%s", shown); snprintf(g_wait_en, sizeof(g_wait_en), "%s", shown); }
+	else { av_row_label(*row, g_wait_name, sizeof(g_wait_name)); av_row_label(*row, g_wait_en, sizeof(g_wait_en), T_en); }
 	g_check_ui = 1;
 	g_wait_redo = vd.redo;
 	g_undo_mcp = 1; g_undo_early = 0; g_undo_t0 = now_ms();
@@ -10042,14 +10068,19 @@ static int audit_mcp_do(AuditView &v, const UiReq &r, char *why, size_t wn, char
 		utf8_fix(why);
 		return -1;
 	}
-	char b[800];
-	Js j = {b, (int)sizeof(b), 0, false};
+	// the label masked as audit_log masks it (the log keeps no secret, but this is the second line of defence)
+	Secrets *x = secrets_load();
+	char *b = (char *)malloc(4096);
+	if (!x || !b) { free(x); free(b); *res = strdup("{}"); return 0; }
+	Js j = {b, 4096, 0, false};
 	js_put(j, "{\"%s\":", done);
 	js_str(j, g_undo_item);
 	js_put(j, ",\"label\":");
-	js_str(j, label);
-	js_put(j, ",\"note\":\"Logged in the audit log with the source MCP; audit_log shows the item now.\"}");
+	js_masked(j, *x, label);
+	js_put(j, ",\"note\":\"Logged in the audit log as the screen's undo is, with the source undo (read_log notes it was by mcp); audit_log shows the item now.\"}");
 	*res = strdup(j.over ? "{}" : b);
+	free(b);
+	free(x);
 	return 0;
 }
 static char *undo_early_res()
@@ -10126,7 +10157,11 @@ static int mcp_webhook_test(char *out, int n)
 	{
 		UiState u;
 		ui_snapshot(u);
-		if (u.dlg_open) { dlg_open_text(out, n, u.dlg_text, u.dlg_q); utf8_fix(out); return -1; }   // as the other changing tools
+		if (u.osk) {   // as the other changing tools: the user may be typing a new address
+			snprintf(out, n, "Busy: the console's on-screen keyboard is open. It is answered on the console; try again when it is closed.");
+			return -1;
+		}
+		if (u.dlg_open) { dlg_open_text(out, n, u.dlg_text, u.dlg_q); utf8_fix(out); return -1; }
 	}
 	WhTest *t = (WhTest *)calloc(1, sizeof(WhTest));
 	if (!t) { snprintf(out, n, "Out of memory."); return -1; }
@@ -10887,6 +10922,7 @@ static void recheck_hook(const char *file, const uint32_t *lbas, const uint8_t *
 	if (g_check_ui) {   // the audit screen's undo: reading the whole image takes a while, the screen says so
 		const char *slash = strrchr(base, '/');
 		snprintf(g_wait_name, sizeof(g_wait_name), "%s", slash ? slash + 1 : base);
+		snprintf(g_wait_en, sizeof(g_wait_en), "%s", g_wait_name);
 		audit_wait_tick(0);
 		g_check_tick = audit_wait_tick;
 	}

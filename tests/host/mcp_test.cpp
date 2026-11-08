@@ -815,6 +815,8 @@ static void app_actions(int &bad)
 	for (const char *t : {"audit_undo", "audit_redo", "reset_settings", "redump_download", "show_game"})
 		if (!has_desc(t, "instead of press_button")) { printf("  %s does not steer away from press_button\n", t); CHECK(0); }
 	CHECK(has_desc("audit_undo", "audit_redo") && has_desc("audit_redo", "audit_undo") && has_desc("audit_undo", "confirm"));
+	// the rows an undo writes keep the source undo (as the screen's); read_log says it was by mcp
+	CHECK(has_desc("audit_undo", "the source undo") && has_desc("audit_undo", "by mcp") && !has_desc("audit_undo", "source MCP"));
 	CHECK(has_desc("reset_settings", "MCP stays on") && has_desc("redump_download", "get_state") && has_desc("webhook_test", "never"));
 	CHECK(has_desc("set_setting", "audit_mb") && has_desc("press_button", "audit_undo") && has_desc("press_button", "reset_settings"));
 	// audit_undo / audit_redo: exactly one of row, job and disc; a disc only with confirm: true

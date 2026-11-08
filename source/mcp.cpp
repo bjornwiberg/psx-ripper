@@ -428,8 +428,8 @@ static const Tool k_tools[] = {
 		"(job: its number, e.g. a repair's sectors or a rename's files) or every kept change of a rip's disc (disc: its key in the domain rips; "
 		"only with confirm: true, as it rewrites the image's sectors and checks the rip again). The call is the confirmation for a row or a job. "
 		"Refused with the audit screen's reason when it cannot be undone now, and when it is undone already: audit_redo applies it again. "
-		"A long undo answers started: get_state shows its progress (screen audit_undo) and audit_log the result. Logged in the audit log with the "
-		"source MCP. Use this instead of press_button.", {
+		"A long undo answers started: get_state shows its progress (screen audit_undo) and audit_log the result. Logged in the audit log as the "
+		"screen's undo is, with the source undo (read_log notes it was by mcp). Use this instead of press_button.", {
 		{"row", A_ROWID, false, "An audit row's id, as audit_log gives it"},
 		{"job", A_JOBID, false, "A job's number, as audit_log gives it"},
 		{"disc", A_DISC, false, "A disc's key in the domain rips, as audit_log gives it: all its kept changes"},

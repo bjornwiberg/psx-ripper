@@ -457,7 +457,7 @@ confirmation the screen asks for. The undo rows are logged as the screen's are (
 `{"row":12}`:
 
 ```json
-{"result":{"undone":"row 12","label":"Read speed: Max → 4×","note":"Logged in the audit log with the source MCP; audit_log shows the item now."},
+{"result":{"undone":"row 12","label":"Read speed: Max → 4×","note":"Logged in the audit log as the screen's undo is, with the source undo (read_log notes it was by mcp); audit_log shows the item now."},
  "state":{"screen":"audit_log",…}}
 ```
 
