@@ -120,9 +120,10 @@ img { max-width: 100%; height: auto; display: block; }
 
 /* The button bar at the bottom of every app screen, used as the site's actions. */
 .pad {
-  list-style: none; margin: 2.2rem 0 0; padding: 0;
-  display: flex; flex-wrap: wrap; justify-content: center; gap: 0.6rem 1.8rem;
+  list-style: none; margin: 2.2rem auto 0; padding: 0;
+  display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 0.9rem 1.8rem;
 }
+.pad li:first-child { flex-basis: 100%; display: flex; justify-content: center; }   /* the download on its own row, the rest centred under it */
 .key {
   display: inline-flex; align-items: center; gap: 0.55rem;
   padding: 0.35rem 0.2rem;
