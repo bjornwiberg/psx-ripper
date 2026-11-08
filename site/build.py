@@ -129,7 +129,7 @@ def mark_external(content):
             return m.group(0)
         extra = ' target="_blank" rel="noopener"'
         if "class=" in attrs:
-            if "btn" not in attrs:
+            if "btn" not in attrs and 'class="gh"' not in attrs:
                 before = re.sub(r'class="', 'class="ext ', before) if 'class="' in before else before
                 after = re.sub(r'class="', 'class="ext ', after) if 'class="' in after else after
         else:

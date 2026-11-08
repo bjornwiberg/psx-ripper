@@ -340,3 +340,14 @@ a.ext::after {
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M4.5 1.5h6v6M10.5 1.5 4 8M8.5 7v3.5h-7v-7H5' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
           mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M4.5 1.5h6v6M10.5 1.5 4 8M8.5 7v3.5h-7v-7H5' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
 }
+
+/* GitHub: an Octocat at the right end of the header */
+.gh { margin-left: auto; display: inline-flex; color: var(--text); opacity: 0.85; padding: 0.2rem; }
+.gh:hover { color: var(--ink); opacity: 1; }
+.gh svg { width: 1.45rem; height: 1.45rem; }
+
+@media (max-width: 760px) {
+  .top nav { order: 3; flex-basis: 100%; }   /* on a phone: brand and Octocat on one row, the tabs under */
+  .gh { order: 2; }
+  .top::after { order: 4; }
+}
