@@ -64,11 +64,17 @@
   <li>Docs pages, the changelog and this page have an &ldquo;On this page&rdquo; list of their
     sections: a column beside the text on a wide screen, which marks the section you are reading
     (for screen readers too), and a list under the summary on a narrow one.</li>
-  <li><strong>Search</strong> opens in a dialog. The field keeps focus while the arrow keys move
-    through the results, which are grouped by page; Enter opens a result, Escape first empties
-    the field and then closes the dialog, and focus goes back to the Search button. The number of
-    results is announced to screen readers. While the dialog is open the page behind it cannot be
-    reached or scrolled. Matches are shown in bold and underlined, not only in colour. Search runs
+  <li><strong>Search</strong>: on a wide screen the header has a search field. Moving to it with
+    Tab only puts focus there; typing in it, pressing the down arrow or Enter, clicking it, or
+    pressing &ldquo;/&rdquo; or &ldquo;s&rdquo; anywhere outside a text field opens the results in
+    a dialog, with what you typed. Shift+Tab from the dialog&rsquo;s field closes it and goes back
+    to the tabs. On a narrower screen a Search button opens it. The field
+    keeps focus while the arrow keys move through the results, which are grouped by page with
+    passages of each match; Enter opens a result. Escape or the Close button closes the dialog and
+    keeps your search, which the header then shows; the clear button empties it. The number of
+    matches is announced to screen readers. While the dialog is open the page behind it cannot be
+    reached or scrolled. Matches are marked like a highlighter, dark text in an amber box, not only by colour, and
+    never underlined, so they cannot be taken for the result links, which are underlined. Search runs
     entirely in your browser with lunr, a search library served from this site: what you type is
     not sent anywhere, and no third party is involved.</li>
   <li>The current page is marked in the navigation, for screen readers too, and by a bold label
@@ -105,7 +111,8 @@
     <em>Alternative:</em> every page is reachable from the tabs, and each page&rsquo;s sections from
     its &ldquo;On this page&rdquo; list.</li>
   <li><strong>The search dialog</strong> is the browser&rsquo;s own modal dialog. Tab moves
-    between the field, the &ldquo;more on this page&rdquo; buttons and the Close button; after the
+    between the field, the clear button, the &ldquo;more on this page&rdquo; buttons and the Close
+    button; after the
     last of them some browsers move focus to their own address bar before coming back. The page
     behind the dialog cannot be reached while it is open.</li>
   <li><strong>Reading level</strong> (WCAG 3.1.5). The docs pages, most of all &ldquo;How it

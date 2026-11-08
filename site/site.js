@@ -18,8 +18,9 @@ if (typeof document === "undefined") {
     return lunr(function () {
       this.ref("i");
       this.field("title", { boost: 10 });
+      this.field("page", { boost: 4 });
       this.field("text");
-      docs.forEach((d, i) => this.add({ i, title: d.title, text: d.text }));
+      docs.forEach((d, i) => this.add({ i, title: d.title, page: d.page, text: d.text }));
     });
   };
   onmessage = async ({ data: { id, q } }) => {
@@ -34,7 +35,11 @@ if (typeof document === "undefined") {
               query.term(w, { usePipeline: false, wildcard: lunr.Query.wildcard.TRAILING });
             }))
         : [];
-      postMessage({ id, results: hits.map((h) => ({ ...docs[h.ref], terms: Object.keys(h.matchData.metadata) })) });
+      const results = hits.map((h) => ({ ...docs[h.ref], score: h.score, terms: Object.keys(h.matchData.metadata) }));
+      // each page's own text (its start, with "In short"), as the lead under its title
+      const leads = {};
+      for (const r of results) leads[r.location.split("#")[0]] ??= docs.find((d) => d.location === r.location.split("#")[0])?.text;
+      postMessage({ id, results, leads });
     } catch (err) {
       postMessage({ id, error: String(err) });
     }
@@ -106,7 +111,7 @@ if (typeof document === "undefined") {
         const on = ({ data }) => {
           if (data.id !== id) return;
           worker.removeEventListener("message", on);
-          data.error ? reject(new Error(data.error)) : resolve({ id, results: data.results });
+          data.error ? reject(new Error(data.error)) : resolve({ id, results: data.results, leads: data.leads });
         };
         worker.addEventListener("message", on);
         worker.addEventListener("error", reject, { once: true });
@@ -134,17 +139,25 @@ if (typeof document === "undefined") {
       s.append(text.slice(at));
       return s;
     };
-    // about 160 characters of the text around the first match
-    const excerpt = (text, rx) => {
-      if (!text) return null;
-      rx.lastIndex = 0;
-      const m = rx.exec(text);
-      rx.lastIndex = 0;
-      let start = m ? Math.max(0, m.index - 60) : 0;
-      if (start > 0) start = text.indexOf(" ", start) + 1 || start;
-      let end = Math.min(text.length, start + 170);
-      if (end < text.length) end = text.lastIndexOf(" ", end) > start ? text.lastIndexOf(" ", end) : end;
-      return highlight((start > 0 ? "…" : "") + text.slice(start, end) + (end < text.length ? " …" : ""), rx, "r-ex");
+    // Up to three passages of about 350 characters around the matches, nearby matches merged into
+    // one passage; with no match in the text (a match in the title only), its start.
+    const passages = (text, rx) => {
+      if (!text) return [];
+      const spans = [];
+      for (const m of text.matchAll(rx)) {
+        let a = Math.max(0, m.index - 140);
+        const b = Math.min(text.length, m.index + m[0].length + 200);
+        const last = spans[spans.length - 1];
+        if (last && a <= last[1] && b - last[0] <= 480) last[1] = b;
+        else spans.push([last ? Math.max(a, last[1]) : a, b]);
+      }
+      if (!spans.length) spans.push([0, Math.min(text.length, 350)]);
+      return spans.slice(0, 3).map(([a, b]) => {
+        if (a > 0) a = text.indexOf(" ", a) + 1 || a;
+        const sp = text.lastIndexOf(" ", b);
+        if (b < text.length && sp > a) b = sp;
+        return highlight((a > 0 ? "\u2026" : "") + text.slice(a, b) + (b < text.length ? " \u2026" : ""), rx, "r-ex");
+      });
     };
     const opt = (cls, url, ...kids) => {
       const o = el("li", { id: `search-opt-${n++}`, role: "option", className: cls }, ...kids);
@@ -163,7 +176,8 @@ if (typeof document === "undefined") {
       // keep it in view by scrolling the list only, never the page
       const r = o.getBoundingClientRect();
       const lr = list.getBoundingClientRect();
-      if (r.top < lr.top) list.scrollTop -= lr.top - r.top + 8;
+      // (its top first, when it is taller than the list)
+      if (r.top < lr.top || r.height > lr.height - 16) list.scrollTop += r.top - lr.top - 8;
       else if (r.bottom > lr.bottom) list.scrollTop += r.bottom - lr.bottom + 8;
     };
     const clear = (msg = "") => {
@@ -185,18 +199,19 @@ if (typeof document === "undefined") {
       const hits = reply.results;
       if (!hits.length) return clear(`No matching documents for “${term}”.`);
       const typed = term.toLowerCase().split(/[\s\-]+/).filter(Boolean);
-      // results grouped by page, the pages in the order of their best match
+      // results grouped by page; the page with the most and best matches first
       const pages = new Map();
       for (const h of hits) {
         const url = h.location.split("#")[0];
-        if (!pages.has(url)) pages.set(url, { title: h.page, top: null, subs: [], words: new Set(typed) });
+        if (!pages.has(url)) pages.set(url, { title: h.page, top: null, subs: [], words: new Set(typed), score: 0 });
         const g = pages.get(url);
         h.terms.forEach((t) => g.words.add(t));
+        g.score += h.score;
         if (h.location.includes("#")) g.subs.push(h);
         else g.top = h;
       }
       n = 0;
-      const groups = [...pages].map(([url, g], k) => {
+      const groups = [...pages].sort((a, b) => b[1].score - a[1].score).map(([url, g], k) => {
         const rx = matcher([...g.words]);
         // the page's own entry: an icon, its title and, if it matched, a passage before its first
         // section; then its sections, the best first
@@ -205,8 +220,8 @@ if (typeof document === "undefined") {
         const icon = el("span", { className: "r-icon" });
         icon.innerHTML = ICON;
         const page = opt("r-page", url, icon, title);
-        if (g.top) page.append(excerpt(g.top.text, rx) || "");
-        const sec = g.subs.map((s) => opt("r-sub", s.location, highlight(s.title, rx, "r-title"), excerpt(s.text, rx) || ""));
+        page.append(...passages(g.top ? g.top.text : reply.leads[url], rx));
+        const sec = g.subs.map((s) => opt("r-sub", s.location, highlight(s.title, rx, "r-title"), ...passages(s.text, rx)));
         const box = (...kids) => {
           const ul = el("ul", { role: "listbox" }, ...kids);
           ul.setAttribute("aria-labelledby", title.id);
@@ -222,17 +237,73 @@ if (typeof document === "undefined") {
       list.hidden = false;
       q.setAttribute("aria-expanded", "true");
       q.removeAttribute("aria-activedescendant");
-      status.textContent = `${hits.length} matching ${hits.length === 1 ? "document" : "documents"}`;
+      status.textContent = `${hits.length} ${hits.length === 1 ? "match" : "matches"} on ${pages.size} ${pages.size === 1 ? "page" : "pages"}`;
     };
 
-    opener.addEventListener("click", () => {
-      dlg.showModal();
-      q.select();
+    // The query and the results stay when the dialog closes (Escape, Close, a click outside), as
+    // in MkDocs: the header's search shows the query, and reopening shows the same results. Only
+    // the clear button empties it.
+    const clearBtn = dlg.querySelector(".search-clear");
+    const label = opener.querySelector(".search-label");
+    const field = bar.querySelector(".search-field");
+    const sync = () => {
+      const v = q.value.trim();
+      field.value = q.value;
+      label.textContent = v || "Search";
+      opener.setAttribute("aria-label", v ? `Search: ${v}` : "Search");
+      opener.classList.toggle("has-query", !!v);
+      clearBtn.hidden = !q.value;
+    };
+    const show = (caret = q.value.length) => {
+      if (!dlg.open) dlg.showModal();
+      q.focus();
+      q.setSelectionRange(caret, caret);
       ask("").catch(() => {}); // start building the index
+    };
+    opener.addEventListener("click", () => show());
+    // On a wide screen the header has a real search field. Typing in it opens the dialog at once,
+    // with the text and the caret moved to the dialog's field (no keystroke is lost); ↓ or Enter
+    // open it too, with the results of the query so far.
+    field.hidden = false;
+    field.addEventListener("input", () => {
+      q.value = field.value;
+      if (!q.value) return clear(), sync();
+      show(field.selectionStart);
+      q.dispatchEvent(new Event("input"));
+    });
+    field.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown" || e.key === "Enter") e.preventDefault(), show();
+    });
+    // A click opens it at once. Tab only moves focus to the field: opening a dialog on focus alone
+    // would be a change of context (WCAG 3.2.1). Shift+Tab from the dialog's field closes it and
+    // goes on backwards, to the item before the header field.
+    field.addEventListener("click", () => show());
+    q.addEventListener("keydown", (e) => {
+      if (e.key !== "Tab" || !e.shiftKey || !field.checkVisibility()) return;
+      e.preventDefault();
+      dlg.close();
+      const stops = [...bar.querySelectorAll("a, input, button")].filter((x) => x.checkVisibility());
+      stops[stops.indexOf(field) - 1]?.focus();
+    });
+    // "/" or "s" opens search, as in MkDocs, when focus is not in a text field
+    document.addEventListener("keydown", (e) => {
+      if ((e.key === "/" || e.key === "s") && !e.ctrlKey && !e.metaKey && !e.altKey && !dlg.open &&
+          !e.target.closest("input, textarea, select, [contenteditable]")) {
+        e.preventDefault();
+        show();
+      }
     });
     closeBtn.addEventListener("click", () => dlg.close());
+    dlg.addEventListener("close", sync);
+    clearBtn.addEventListener("click", () => {
+      q.value = "";
+      clear();
+      sync();
+      q.focus();
+    });
 
     q.addEventListener("input", () => {
+      sync();
       clearTimeout(timer);
       timer = setTimeout(run, 150);
     });

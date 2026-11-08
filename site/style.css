@@ -418,6 +418,15 @@ a:is([href^="http://"], [href^="https://"]):not(.btn, .gh, [href*="/download/"])
 /* The header's search: on a wide screen it looks like a field (it opens the search dialog); on a
    narrower one it is a 44 by 44 magnifier button named "Search". Its border has 3:1 or more
    against the header and the field (WCAG 1.4.11), its text 7:1 (WCAG 1.4.6). */
+.search-field {
+  flex: 1 1 11rem; max-width: 16rem; min-width: 0; min-height: 44px; margin: 0; padding: 0 0.6rem 0 2.2rem;
+  border: 1px solid #8b90b8; border-radius: 0; color: var(--ink); font: inherit; font-size: 0.9rem;
+  background: var(--panel) no-repeat 0.75rem center / 1rem
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='6.5' cy='6.5' r='4.8' fill='none' stroke='%23b0b6d8' stroke-width='1.8'/%3E%3Cpath d='m10.2 10.2 4 4' stroke='%23b0b6d8' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+.search-field::placeholder { color: var(--dim); opacity: 1; }
+.search-field::-webkit-search-cancel-button { filter: invert(1); }
+.search-field:hover { border-color: var(--ink); }
 .search-open {
   display: inline-flex; align-items: center; gap: 0.55rem; flex: 1 1 11rem; max-width: 16rem;
   min-height: 44px; margin: 0; padding: 0 0.8rem;
@@ -425,6 +434,9 @@ a:is([href^="http://"], [href^="https://"]):not(.btn, .gh, [href*="/download/"])
   font: inherit; font-size: 0.9rem; text-align: left; cursor: text;
 }
 .search-open:hover { color: var(--ink); border-color: var(--ink); }
+/* after a search, the field shows the query (white), and the magnifier an amber dot */
+.search-open.has-query { color: var(--ink); position: relative; }
+.search-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .search-open svg, .search-box > svg { width: 1rem; height: 1rem; flex: none; }
 
 /* the search dialog: a wide panel at the top right, over a dimmed page that does not scroll */
@@ -447,13 +459,14 @@ html:has(.search-dlg[open]) { overflow: hidden; }
 }
 .search-box input::placeholder { color: var(--dim); opacity: 1; }
 .search-box input::-webkit-search-cancel-button { filter: invert(1); }
-.search-close {
+.search-close, .search-clear {
   display: inline-grid; place-items: center; width: 44px; height: 44px; flex: none; margin: 0;
   padding: 0; border: 1px solid var(--rule); border-radius: 0; background: none; color: var(--text);
   cursor: pointer;
 }
-.search-close:hover { color: var(--ink); border-color: #8b90b8; }
-.search-close svg { width: 1.1rem; height: 1.1rem; }
+.search-close:hover, .search-clear:hover { color: var(--ink); border-color: #8b90b8; }
+.search-close svg, .search-clear svg { width: 1.1rem; height: 1.1rem; }
+.search-clear { border-color: transparent; }
 .search-status { margin: 0; padding: 0.6rem 1rem; color: var(--dim); font-size: 0.86rem; }
 .search-status:empty { display: none; }
 /* the results scroll inside the dialog, never the page behind it */
@@ -477,13 +490,19 @@ html:has(.search-dlg[open]) { overflow: hidden; }
 .r-page { position: relative; }
 .r-icon { position: absolute; left: 0.75rem; top: 0.7rem; color: var(--dim); }
 .r-icon svg { width: 1.1rem; height: 1.1rem; display: block; }
-.r-title { display: block; color: var(--link); font-weight: 600; }
+/* the titles are the links: blue (the page's white) and underlined */
+.r-title {
+  display: block; width: fit-content; color: var(--link); font-weight: 600;
+  text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 0.18em;
+}
 .r-page .r-title { color: var(--ink); font-weight: 700; font-size: 1.02rem; }
-.r-ex { display: block; margin-top: 0.15rem; color: var(--text); font-size: 0.86rem; line-height: 1.5; }
-/* a match: white, bold and underlined, so colour is not the only cue */
-.search-list mark {
-  background: none; color: var(--ink); font-weight: 700;
-  text-decoration: underline; text-decoration-thickness: 2px; text-underline-offset: 0.15em;
+.r-ex { display: block; margin-top: 0.3rem; color: var(--text); font-size: 0.86rem; line-height: 1.55; }
+/* a match: a highlighter box, amber with dark text (10:1), never underlined, so it cannot be
+   taken for a link; the box shape is the cue, not the colour alone. It stays the same in the
+   active row. */
+.search-list mark, .search-list [role="option"]:hover mark, .search-list [aria-selected="true"] mark {
+  padding: 0 0.12em; border-radius: 2px; background: var(--amber); color: #0b0e24;
+  text-decoration: none; -webkit-box-decoration-break: clone; box-decoration-break: clone;
 }
 .search-list summary {
   display: flex; align-items: center; min-height: 44px; margin-left: 2.6rem; padding: 0 0.5rem;
@@ -506,7 +525,7 @@ html:has(.search-dlg[open]) { overflow: hidden; }
 
 /* Wide: one row. The brand and the tabs on the left, the search and the Octocat on the right. */
 @media (min-width: 63rem) {
-  .menu-btn { display: none; }
+  .menu-btn, .search-open { display: none; }
   .top { column-gap: 1rem; }
   .top nav { margin-right: auto; }
   .tabs { gap: 0.3rem; }
@@ -517,6 +536,7 @@ html:has(.search-dlg[open]) { overflow: hidden; }
    Menu button; the open menu is a column of the same links under the row. The search becomes a
    magnifier button. */
 @media (max-width: 62.99rem) {
+  .search-field { display: none; }
   html.js .top { column-gap: 0.75rem; }
   html.js .brand { margin-right: auto; }
   html.js .gh { margin-left: 0; }
@@ -527,6 +547,10 @@ html:has(.search-dlg[open]) { overflow: hidden; }
   html.js .tabs a { justify-content: flex-start; font-size: 0.9rem; padding: 0.3rem 0.8rem; }
   .search-open { flex: none; min-width: 44px; justify-content: center; padding: 0; }
   .search-open svg { width: 1.2rem; height: 1.2rem; }
+  .search-open.has-query::after {
+    content: ""; position: absolute; top: 7px; right: 7px; width: 8px; height: 8px;
+    border-radius: 50%; background: var(--amber);
+  }
   .search-open .search-label {
     position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap;
   }
