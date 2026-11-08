@@ -48,8 +48,9 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
   console's, `/status.json` for scripts (its own switch), and **webhooks** (for example to Home
   Assistant) for every event.
 - **MCP**: an AI agent such as Claude Code can read the screen, the drives and the log, start and
-  cancel rips, change settings and check, rename or trash games, with the pad's own checks and
-  every change in the audit log. Off by default, home network only. See [MCP](docs/mcp.md).
+  cancel rips, change and reset settings, check, rename or trash games, and read and undo the audit
+  log: everything the app can do, with the pad's own checks and every change in the audit log. Off
+  by default, home network only. See [MCP](docs/mcp.md).
 - Its own on-screen UI in English and Swedish, picked from the system language. Works fully
   offline once installed.
 

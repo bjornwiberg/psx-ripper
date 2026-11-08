@@ -143,8 +143,8 @@ list says that Redump must be turned on. START is offered only while a game show
 
 **Sources**: SELECT steps through *Hard disk*, *USB 0*, *USB 1*, … (with the drive's name when the
 app can read it) and *All*, every source at once. In *All* the line under the list says where the
-selected game is. The choice lasts until the app restarts: each start shows the hard disk. A USB drive that is pulled out shows *… is not
-connected*.
+selected game is. The choice lasts until the app restarts: each start shows the hard disk. A USB
+drive that is pulled out shows *… is not connected*.
 
 **The summary** at the top counts the whole source, not only the rows a filter shows, for
 example *142 games · 98 verified · 6 with errors · 12 re-rip · 1 broken*.
@@ -421,8 +421,10 @@ be undone.
 | status.json | `http://<the PS3's address>:8090/status.json` gives the state of every drive for scripts |
 
 All three are off until you turn them on; after an update from a version without these switches,
-*Remote view* on keeps the remote view and status.json on. The settings row shows *On* and the address while any of them is
-on. None has a password: keep them on your home network.
+*Remote view* on keeps the remote view and status.json on. The settings row shows *On* and the
+address while any of them is on. None has a password: keep them on your home network. △ (reset
+everything) in the settings turns all three off; a reset an agent makes over MCP keeps them as
+they are, so the agent keeps its connection.
 
 **Webhooks** send an HTTP POST with a JSON body when something happens (a disc identified, a rip
 started, progress, finished, failed, a repair finished, the disc ejected, the app started), for

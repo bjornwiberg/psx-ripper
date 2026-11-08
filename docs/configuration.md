@@ -97,9 +97,12 @@ web server answers 404, or nothing when all three switches are off.
   "title":"Mega Man X4","serial":"SLUS_005.61","size_mb":564,"redump_name":"Mega Man X4 (USA)",
   "redump":"unchecked","already_ripped":false,"known_errors":0,
   "destination":"/dev_hdd0/PSXISO","file":"Mega Man X4 [SLUS_005.61]",
+  "free_gb":338,
   "job":{"phase":"verifying","percent":29,"sectors_done":251793,"sectors_total":251793,
-         "pass_done":12000,"pass_total":41237,"unreadable":0,"fixed":1,"bad":0}},
- {"drive":"usb","id":"usb0","port":0,"model":"Apple SuperDrive","state":"empty",
+         "pass_done":12000,"pass_total":41237,"unreadable":0,"fixed":1,"bad":0,
+         "events":["Sector 120345 fixed by re-reading (checksum)",
+                   "41237 sectors (video and sound) have no checksum: they are read once more and compared"]}},
+ {"drive":"usb","id":"usb0","port":0,"model":"Apple SuperDrive","state":"empty","free_gb":338,
   "last":{"result":"done","disc":"Alundra (Europe) (SLES_011.35)","summary":"klar på 14:02",
           "redump":"verified","needs_repair":false}}]}
 ```
@@ -111,7 +114,9 @@ web server answers 404, or nothing when all three switches are off.
 - `redump` (the disc here, and the last rip): `verified`, `no_match`, `unchecked`.
 - `job` while a drive works: `phase` is `reading`, `verifying` (sectors without a checksum read
   again), `rereading` (slow re-reads of unreadable sectors), `finishing`, `checking` (an earlier
-  rip against Redump) or `repairing`; `percent` is the phase's own progress.
+  rip against Redump) or `repairing`; `percent` is the phase's own progress; `events` are the
+  tab's event lines (newest first, at most 20), in English.
+- `free_gb`: the free space at the drive's destination, as its tab shows it.
 - `last`: the last rip, repair or check on that drive (`done`, `failed`, `cancelled`); it stays
   after the disc is ejected. `summary` is the text the app shows, in its language.
 
