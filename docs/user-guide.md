@@ -166,7 +166,7 @@ marks: *Duplicate*, when the same disc is there twice (the same disc ID and size
 Redump name; with *All*, also on another source), and *.sbi missing*, for a PAL game that uses
 LibCrypt and has no `.sbi`. The line under the list names the other copy of a duplicate.
 
-**Filter** (R1): four criteria, all of which must match; a game of several discs matches when one
+**Filter**, opened with R1: four criteria, all of which must match; a game of several discs matches when one
 of its discs matches them all. ↑↓ select a row, ← → change it, L1 sets all to *Any*, ○ closes and
 applies. The filter lasts until the app restarts: each start shows every game.
 
@@ -181,7 +181,7 @@ applies. The filter lasts until the app restarts: each start shows every game.
 The criteria set are shown above the list (for example *2048 · Not checked*) with *n of m*, the
 rows shown of all.
 
-**Details** (✕): for each disc its status, format, disc ID, Redump's name, when and on which drive
+**Details**, opened with ✕: for each disc its status, format, disc ID, Redump's name, when and on which drive
 it was ripped, the size, the place, whether there is a cover picture, when it was last checked,
 LibCrypt, the other copy of a duplicate, every track with its MD5, the sectors with errors and the
 set's files. ↑↓ and L2/R2 scroll, □ checks the game, △ moves it to the trash, ✕ renames it, ○ goes
@@ -230,7 +230,7 @@ drive or a check is using the game, or when the `.cue` is too big to be rewritte
 ### The trash
 
 **△** moves the game, all its files, to `.trash` in the same `PSXISO` folder. Nothing is deleted.
-To see the trash, open the filter (R1) and set *Show* to *Trash*. There, **△** restores the
+To see the trash, open the filter with R1 and set *Show* to *Trash*. There, **△** restores the
 selected game to its folder, and **START** empties the trash after a question that names the
 number of games and their size: ✕ deletes, ○ keeps them.
 

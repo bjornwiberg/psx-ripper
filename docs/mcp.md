@@ -23,7 +23,7 @@ buttons are only needed to answer a dialog. MCP is the
 
 ## Turning it on
 
-START opens the settings. On **Remote control**, **✕** opens a menu with three switches; ← → (or ✕)
+START opens the settings. On **Remote control**, **✕** opens a menu with three switches; ← → or ✕
 turn the selected one on or off:
 
 | Row | What it does |
