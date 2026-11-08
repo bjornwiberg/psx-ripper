@@ -114,6 +114,30 @@ def page(shell, *, title, current, to_root, body, version, description, main_cla
     return out.replace("{{version}}", html.escape(version))
 
 
+EXT_A = re.compile(r'<a ((?:(?!>).)*?)href="(https?://[^"]+|mailto:[^"]+)"((?:(?!>).)*)>')
+
+
+def mark_external(content):
+    """External links open in a new tab and get the small arrow (class ext); buttons and mail links
+    keep their look but still open in a new tab when they leave the site."""
+    def fix(m):
+        before, url, after = m.group(1), m.group(2), m.group(3)
+        attrs = before + after
+        if url.startswith("https://psxripper.bjrn.nu") or "target=" in attrs:
+            return m.group(0)
+        if url.startswith("mailto:") or "btn-dl" in attrs or "/download/" in url:   # a download stays in this tab
+            return m.group(0)
+        extra = ' target="_blank" rel="noopener"'
+        if "class=" in attrs:
+            if "btn" not in attrs:
+                before = re.sub(r'class="', 'class="ext ', before) if 'class="' in before else before
+                after = re.sub(r'class="', 'class="ext ', after) if 'class="' in after else after
+        else:
+            extra += ' class="ext"'
+        return f'<a {before}href="{url}"{after}{extra}>'
+    return EXT_A.sub(fix, content)
+
+
 def main():
     version = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+([-+][\w.]+)?", version):
@@ -175,7 +199,7 @@ def main():
         if "{{" in content:
             sys.exit(f"{rel}: a placeholder was not filled: "
                      f"{re.search(r'{{[^}]*}}', content).group(0)}")
-        (OUT / rel).write_text(content, encoding="utf-8")
+        (OUT / rel).write_text(mark_external(content), encoding="utf-8")
         print(f"_site/{rel}")
 
 

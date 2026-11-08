@@ -121,7 +121,7 @@ img { max-width: 100%; height: auto; display: block; }
 /* The button bar at the bottom of every app screen, used as the site's actions. */
 .pad {
   list-style: none; margin: 2.2rem auto 0; padding: 0;
-  display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 0.9rem 1.8rem;
+  display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 0.9rem;
 }
 .pad li:first-child { flex-basis: 100%; display: flex; justify-content: center; }   /* the download on its own row, the rest centred under it */
 .key {
@@ -332,3 +332,11 @@ img { max-width: 100%; height: auto; display: block; }
   border: 1px solid #4f6bc4; background: rgb(79 107 196 / 0.15);
 }
 .btn-alt:hover { background: rgb(79 107 196 / 0.3); }
+
+/* a link that leaves the site opens in a new tab: a small arrow says so */
+a.ext::after {
+  content: ""; display: inline-block; width: 0.7em; height: 0.7em; margin-left: 0.22em;
+  vertical-align: 0.05em; background-color: currentColor; opacity: 0.75;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M4.5 1.5h6v6M10.5 1.5 4 8M8.5 7v3.5h-7v-7H5' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M4.5 1.5h6v6M10.5 1.5 4 8M8.5 7v3.5h-7v-7H5' fill='none' stroke='black' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / contain no-repeat;
+}
