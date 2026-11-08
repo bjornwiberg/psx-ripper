@@ -1,0 +1,142 @@
+<article class="prose">
+<h1>Accessibility statement</h1>
+<p class="summary"><strong>In short:</strong> this website aims to be usable by everyone, with a
+  keyboard, a screen reader, zoomed in or on a small screen. Most of it meets the strictest level
+  of the web accessibility guidelines. The screenshots and a few other things do not fully, and
+  this page says which and why. If something does not work for you, tell us and we will fix it.</p>
+
+<p>PSX RiPPER is a free, open-source hobby project by Björn Wiberg. This statement follows the
+  structure of the EU model accessibility statement (Commission Implementing Decision (EU)
+  2018/1523), adapted to a private project.</p>
+
+<h2 id="scope">What this statement covers</h2>
+<p>This statement covers this website, psxripper.bjrn.nu: the home page, the five docs pages
+  (user guide, configuration, MCP, FAQ, how it works), the changelog, the glossary, this page and
+  the &ldquo;not found&rdquo; page.</p>
+<p>It does not cover:</p>
+<ul>
+  <li>The PS3 app itself. It runs on a games console, on a TV, and is used with the console&rsquo;s
+    pad; its screen is drawn by the app, not by a web browser, so the web guidelines below do not
+    apply to it, and it has not been assessed against the software clauses of EN&nbsp;301&nbsp;549.
+    The app&rsquo;s remote view and its MCP server let you use it from a phone, a computer or an
+    agent instead of the pad.</li>
+  <li>Other websites this site links to, such as GitHub and redump.org.</li>
+</ul>
+
+<h2 id="status">Compliance status</h2>
+<p>This website is <strong>partially compliant</strong> with
+  <a href="https://www.w3.org/TR/WCAG22/">WCAG 2.2</a> level AAA, because of the exceptions listed
+  under <a href="#not-accessible">Content that is not accessible</a>.</p>
+<p>It is <strong>partially compliant</strong> with EN&nbsp;301&nbsp;549 V3.2.1. Clause 9 (web
+  content, which equals WCAG 2.1 level AA) is met on every page that was checked; the
+  &ldquo;partially&rdquo; comes from clause 12 (documentation and support), see below.</p>
+
+<h3 id="what-conforms">What works</h3>
+<ul>
+  <li>Every page has a header, a site navigation, a main area and a footer, one main heading, and
+    headings in order. A &ldquo;Skip to content&rdquo; link is the first thing the Tab key
+    reaches.</li>
+  <li>Every link and control can be reached and used with a keyboard, in reading order, with no
+    trap. Code examples and tables that scroll sideways can be focused and scrolled with the arrow
+    keys.</li>
+  <li>The focused element always has a 3&nbsp;px ring, drawn just outside it: amber on the
+    page&rsquo;s navy (at least 8.4:1), white around the lime download button (at least 3.9:1
+    against its glow).</li>
+  <li>Text has a contrast of at least 7:1 against its background, including the lightest part of
+    the page&rsquo;s gradient. Button borders, the pad-button symbols and the focus ring have at
+    least 3:1.</li>
+  <li>Links, buttons and tabs that are not part of a sentence are at least 44 by 44 CSS pixels.</li>
+  <li>The pages work at a width of 320 CSS pixels (400&nbsp;% zoom) without sideways scrolling,
+    and with larger line, letter, word and paragraph spacing. Nothing on the site moves or
+    flashes.</li>
+  <li>Lines of text are at most about 80 characters long, with a line height of 1.6.</li>
+  <li>The current page is marked in the navigation, for screen readers too, and by a bold label
+    and a white bar, not only by colour.</li>
+  <li>The pad buttons in the text (the cross, circle, triangle and square symbols) are read out as
+    &ldquo;cross&rdquo;, &ldquo;circle&rdquo; and so on. Decorative images are hidden from screen
+    readers, and every screenshot has a text alternative that says what it shows.</li>
+  <li>Links say where they go; links that open a new tab say so, for screen readers as well. The
+    GitHub icon link is named &ldquo;Source on GitHub&rdquo;.</li>
+  <li>Every page says in plain words, at the top, what it is about. Technical words and
+    abbreviations (such as EDC/ECC, MCP, CFW, SBI, LibCrypt, MD5 and Redump) link to the
+    <a href="glossary.html">glossary</a> the first time they are used on a page.</li>
+  <li>The language of the pages is set to English, and the few Swedish words in the text are
+    marked as Swedish.</li>
+</ul>
+
+<h2 id="not-accessible">Content that is not accessible</h2>
+<p>These parts of the site do not meet WCAG 2.2 level AAA, or meet it only through an exception
+  in the guidelines:</p>
+<ul>
+  <li><strong>The screenshots.</strong> They are pictures of the app&rsquo;s own screen, so the
+    text in them is an image, in English or Swedish, in the app&rsquo;s colours. Some of that text
+    is smaller and dimmer than 7:1, and it cannot be resized, recoloured or read out (WCAG 1.4.6
+    and 1.4.9). Showing the real screen is the point of a screenshot, so it is not replaced by
+    text. <em>Alternative:</em> each screenshot has a text alternative and a caption, and the
+    <a href="docs/user-guide.html">user guide</a> describes every screen in text.</li>
+  <li><strong>Colours and layout cannot be chosen on the site</strong> (WCAG 1.4.8). The site has
+    one dark colour scheme and no setting of its own for colours or text width. <em>Alternative:</em>
+    the site uses no fixed colours that block your browser&rsquo;s or system&rsquo;s own colour,
+    contrast and reading-view settings. The forced-colours (high contrast) modes of Windows and
+    other systems have not been tested.</li>
+  <li><strong>Reading level</strong> (WCAG 3.1.5). The docs pages, most of all &ldquo;How it
+    works&rdquo;, MCP and Configuration, explain technical things and need more than a
+    lower-secondary reading level. <em>Alternative:</em> a plain-language summary at the top of
+    every page, and the glossary.</li>
+  <li><strong>The changelog</strong> is written from the project&rsquo;s commit messages. Its
+    entries are short and technical, and its links are version numbers, issue numbers and commit
+    codes. <em>Alternative:</em> each of those links has a hidden description for screen
+    readers (for example &ldquo;commit fb3249b&rdquo;), and the release notes on GitHub hold the
+    same information.</li>
+  <li><strong>Code examples</strong> show the app&rsquo;s real output, which in a few places holds
+    Swedish text (for example a Swedish label in a JSON reply). It is not marked as Swedish,
+    because it is data, not prose.</li>
+  <li><strong>Links in sentences</strong> are as large as the text around them, not 44 by 44
+    pixels. WCAG allows this (2.5.5, inline exception).</li>
+</ul>
+<p>Against EN&nbsp;301&nbsp;549 V3.2.1, clause 12:</p>
+<ul>
+  <li>12.1.2 (the documentation is accessible): met. The docs are these web pages, checked as
+    above.</li>
+  <li>12.2.2 to 12.2.4 (support): met as far as a hobby project has support. You can ask for help
+    or report a problem through GitHub issues, which needs a GitHub account, or by e-mail, which
+    does not. Both are linked in the footer of every page.</li>
+  <li>12.1.1 (the documentation lists the accessibility features): <strong>partially
+    met.</strong> This page lists the website&rsquo;s accessibility features. The app&rsquo;s
+    documentation does not yet have a section on the app&rsquo;s own accessibility features
+    (for example the remote view and MCP as other ways to control it), because the app was not
+    assessed.</li>
+</ul>
+
+<h2 id="how-checked">How this statement was prepared</h2>
+<p>This statement was prepared on <strong>8 November 2026</strong>, by a self-assessment of every
+  page listed under <a href="#scope">What this statement covers</a>:</p>
+<ul>
+  <li>the automated checker axe-core 4.10 (all WCAG 2.0, 2.1 and 2.2 A, AA and AAA rules, and
+    its best practices) in Google Chrome, at 1280 and 320 CSS pixels wide: no violations;</li>
+  <li>a script that computes the contrast of every text, border and focus colour from the style
+    sheet, against both ends of the background gradient, and a second one that checks the
+    computed colours of every piece of text on every page;</li>
+  <li>a script that moves through every page with the Tab key and checks the skip link, the
+    order, traps, the focus ring and target sizes, and checks 320 pixel width, text spacing and
+    line length;</li>
+  <li>a review of the page structure, headings, names, text alternatives and language by
+    hand.</li>
+</ul>
+<p>The site has not been tested by people with disabilities, or by hand with a screen reader such
+  as VoiceOver or NVDA. Line length was measured in the Verdana font, which is used where DejaVu
+  Sans is not installed.</p>
+
+<h2 id="feedback">Feedback and contact</h2>
+<p>If something on this site does not work for you, or you need a page in another form, tell us:</p>
+<ul>
+  <li>open an <a href="https://github.com/bjornwiberg/psx-ripper/issues">issue on GitHub</a>
+    (needs a GitHub account), or</li>
+  <li>write to <a href="mailto:b@bjrn.nu">b@bjrn.nu</a>.</li>
+</ul>
+
+<h2 id="enforcement">Enforcement procedure</h2>
+<p>PSX RiPPER is a private hobby project. It is not a public sector body, so the EU Web
+  Accessibility Directive does not apply to it and there is no public enforcement body to turn to.
+  Problems are fixed through the contacts above.</p>
+</article>

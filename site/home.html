@@ -1,8 +1,5 @@
 <section class="hero" aria-labelledby="hero-title">
-  <div class="title-row">
-    <a class="mcp-tag" href="#mcp" title="MCP: AI agents can run the app">[MCP]</a>
-    <h1 id="hero-title">PSX RiPPER</h1>
-  </div>
+  <h1 id="hero-title">PSX RiPPER</h1>
   <p class="lede">A PS3 homebrew app that rips your own PlayStation&nbsp;1 discs to bit-perfect
     <code>.bin</code>/<code>.cue</code> images and checks every rip against Redump.</p>
 
@@ -148,9 +145,9 @@
           checks as the pad, and every change lands in the audit log with the source MCP.</p>
         <p>It is off by default. While it is on, <span class="amber">[MCP]</span> shows at the
           left of the title on the console's screen. There is no login, so keep it on your home
-          network. <a href="docs/mcp.html">Every tool, with examples</a></p>
+          network. <a href="docs/mcp.html">Every MCP tool, with examples</a></p>
       </div>
-      <pre class="term" aria-label="Connect Claude Code to the console"><code><span class="c"># use your console's address (Settings → Remote control shows it)</span>
+      <pre class="term" tabindex="0" role="region" aria-label="Command: connect Claude Code to the console"><code><span class="c"># use your console's address (Settings → Remote control shows it)</span>
 <span class="p">$</span> claude mcp add --transport http psx-ripper http://192.168.1.50:8090/mcp</code></pre>
     </article>
   </div>
@@ -163,37 +160,37 @@
   <div class="gallery">
     <figure>
       <a href="img/rip-usb0.jpg"><img src="img/rip-usb0.jpg" width="960" height="540" loading="lazy"
-         alt="An Apple USB SuperDrive's tab ripping Legend of Legaia while the other two drives rip too"></a>
+         alt="An Apple USB SuperDrive's tab ripping Legend of Legaia while the other two drives rip too"><span class="sr-only"> (full-size image)</span></a>
       <figcaption>Three rips at once: a SuperDrive's tab, with every drive's progress on the tabs</figcaption>
     </figure>
     <figure>
       <a href="img/games.jpg"><img src="img/games.jpg" width="960" height="540" loading="lazy"
-         alt="The game list: every PS1 image on the hard disk with its Redump status and format"></a>
+         alt="The game list: every PS1 image on the hard disk with its Redump status and format"><span class="sr-only"> (full-size image)</span></a>
       <figcaption>The game list: Redump status for every image on the drive</figcaption>
     </figure>
     <figure>
       <a href="img/home.jpg"><img src="img/home.jpg" width="960" height="540" loading="lazy"
-         alt="A drive's tab waiting for a disc, with tabs for the internal drive and two USB SuperDrives"></a>
+         alt="A drive's tab waiting for a disc, with tabs for the internal drive and two USB SuperDrives"><span class="sr-only"> (full-size image)</span></a>
       <figcaption>A tab per drive: the internal drive and two SuperDrives</figcaption>
     </figure>
     <figure>
       <a href="img/game-detail.jpg"><img src="img/game-detail.jpg" width="960" height="540" loading="lazy"
-         alt="A game's details: status, format, disc ID, Redump name, track MD5s and files"></a>
+         alt="A game's details: status, format, disc ID, Redump name, track MD5s and files"><span class="sr-only"> (full-size image)</span></a>
       <figcaption>A game's details: Redump result, tracks and files</figcaption>
     </figure>
     <figure>
       <a href="img/settings.jpg"><img src="img/settings.jpg" width="960" height="540" loading="lazy"
-         alt="The settings: read speed, re-reads, sector check, file name, Redump"></a>
+         alt="The settings: read speed, re-reads, sector check, file name, Redump"><span class="sr-only"> (full-size image)</span></a>
       <figcaption>Settings</figcaption>
     </figure>
     <figure>
       <a href="img/audit-log.jpg"><img src="img/audit-log.jpg" width="960" height="540" loading="lazy"
-         alt="The audit log: rips, settings and files"></a>
+         alt="The audit log: rips, settings and files"><span class="sr-only"> (full-size image)</span></a>
       <figcaption>The audit log: rips, settings and files</figcaption>
     </figure>
     <figure>
       <a href="img/remote-control.jpg"><img src="img/remote-control.jpg" width="960" height="540" loading="lazy"
-         alt="Remote control: switches for the remote view, MCP and status.json"></a>
+         alt="Remote control: switches for the remote view, MCP and status.json"><span class="sr-only"> (full-size image)</span></a>
       <figcaption>Remote control: remote view, MCP and status.json</figcaption>
     </figure>
   </div>
