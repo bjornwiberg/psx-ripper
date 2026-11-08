@@ -354,3 +354,11 @@ a:is([href^="http://"], [href^="https://"]):not(.btn, .gh, [href*="/download/"])
   .gh { order: 2; }
   .top::after { order: 4; }
 }
+
+/* START, SELECT and the shoulder buttons in running text: a pill as on the console */
+.g-key {
+  display: inline-block; padding: 0.05em 0.5em; margin: 0 0.05em;
+  border: 1px solid #8b90b8; border-radius: 999px; background: #2a2f57;
+  color: var(--ink); font-size: 0.72em; font-weight: 600; letter-spacing: 0.04em;
+  line-height: 1.35; vertical-align: 0.12em;
+}

@@ -129,6 +129,45 @@ def mark_external(content):
     return EXT_A.sub(fix, content)
 
 
+RING = '<circle cx="12" cy="12" r="10.5" fill="rgb(255 255 255 / 0.06)" stroke="#e8ecff" stroke-width="1.5"/>'
+GLYPH = {   # the pad's face buttons as the console draws them: a white ring, the symbol in its colour
+    "✕": ("cross", '<path d="M8 8l8 8M16 8l-8 8" stroke="#9db7ff" stroke-width="1.7" stroke-linecap="round"/>'),
+    "○": ("circle", '<circle cx="12" cy="12" r="4.6" fill="none" stroke="#ff8aa6" stroke-width="1.7"/>'),
+    "△": ("triangle", '<path d="M12 7.2 16.6 15.3H7.4Z" fill="none" stroke="#74e0bb" stroke-width="1.6" stroke-linejoin="round"/>'),
+    "□": ("square", '<rect x="7.5" y="7.5" width="9" height="9" rx="1" fill="none" stroke="#f3a0dc" stroke-width="1.6"/>'),
+}
+PILL_RE = re.compile(r"(?<![\w.-])(START|SELECT|L1|R1|L2|R2)(?![\w.-])")
+SKIP_TAGS = ("code", "pre", "script", "style", "title", "svg", "a")
+
+
+def glyph(ch):
+    name, inner = GLYPH[ch]
+    return (f'<span class="g g-btn" role="img" aria-label="{name}"><svg viewBox="0 0 24 24" '
+            f'aria-hidden="true">{RING}{inner}</svg></span>')
+
+
+def buttonize(content):
+    """Every pad button named in running text looks like it does on the console: the face buttons
+    as rings with their symbol, START, SELECT and the shoulder buttons as pills. Text inside code,
+    links and the head is left alone."""
+    content = re.sub(r"<strong>(START|SELECT|L1|R1|L2|R2)</strong>", r"\1", content)
+    out, depth = [], 0
+    for part in re.split(r"(<[^>]+>)", content):
+        if part.startswith("<"):
+            m = re.match(r"<(/?)([a-zA-Z0-9]+)", part)
+            if m and m.group(2).lower() in SKIP_TAGS and not part.endswith("/>"):
+                depth += -1 if m.group(1) else 1
+            out.append(part)
+            continue
+        if depth > 0 or not part:
+            out.append(part)
+            continue
+        part = "".join(glyph(c) if c in GLYPH else c for c in part)
+        part = PILL_RE.sub(r'<span class="g-key">\1</span>', part)
+        out.append(part)
+    return "".join(out)
+
+
 def main():
     version = (ROOT / "version.txt").read_text(encoding="utf-8").strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+([-+][\w.]+)?", version):
@@ -190,7 +229,7 @@ def main():
         if "{{" in content:
             sys.exit(f"{rel}: a placeholder was not filled: "
                      f"{re.search(r'{{[^}]*}}', content).group(0)}")
-        (OUT / rel).write_text(mark_external(content), encoding="utf-8")
+        (OUT / rel).write_text(mark_external(buttonize(content)), encoding="utf-8")
         print(f"_site/{rel}")
 
 
