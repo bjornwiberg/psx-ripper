@@ -121,7 +121,7 @@ made: its format, whether it is free of errors, and whether it matches Redump. O
 settings: START, then **✕** on the first row, *Games*.
 
 **What it lists**: every `.bin`/`.cue`, `.iso` and `.img` in the `PSXISO` folder of the source,
-in alphabetical order. The discs of one game in one folder (*Disc 1*, *Disc 2*, …) are one row,
+in alphabetical order. The discs of one game in one folder (*Disc 1*, *Disc 2*, … or *CD1*, *CD2*, … in names from other tools) are one row,
 *n discs*, and the row shows the worst status of its discs. Up to 1000 discs per source are
 listed; with more, the list says so.
 
