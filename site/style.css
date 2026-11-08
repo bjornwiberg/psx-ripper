@@ -312,3 +312,23 @@ img { max-width: 100%; height: auto; display: block; }
 }
 
 .foot .made { color: var(--text); font-size: 0.95rem; }
+
+/* the hero's buttons: one clear download, two plain links under it */
+.btn {
+  display: inline-flex; align-items: center; gap: 0.6rem;
+  border-radius: 0.6rem; text-decoration: none; font-weight: 600;
+}
+.btn:hover { text-decoration: none; }
+.btn-dl {
+  padding: 0.85rem 1.6rem; font-size: 1.2rem;
+  color: #0b0e24; background: linear-gradient(#c8f26a, #a6db3f);
+  box-shadow: 0 0.5rem 1.6rem -0.4rem rgb(166 219 63 / 0.55), inset 0 1px 0 rgb(255 255 255 / 0.5);
+}
+.btn-dl:hover { background: linear-gradient(#d6f88a, #b3e64f); }
+.btn-dl svg { width: 1.3em; height: 1.3em; }
+.btn-dl small { font-weight: 500; opacity: 0.7; }
+.btn-alt {
+  padding: 0.5rem 1.1rem; font-size: 1rem; color: var(--ink);
+  border: 1px solid #4f6bc4; background: rgb(79 107 196 / 0.15);
+}
+.btn-alt:hover { background: rgb(79 107 196 / 0.3); }
