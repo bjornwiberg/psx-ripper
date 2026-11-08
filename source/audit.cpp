@@ -840,6 +840,29 @@ int audit_events(AuditDom dom, const char *disc, AuditRow *out, int max)
 	return n;
 }
 
+// The first row the test takes, marked as the queries mark it; 0 when none.
+template <class F> static int find_row(F take, AuditRow *out)
+{
+	int found = 0;
+	UndoState st;
+	lock();
+	build_state(st);
+	scan_log([&](const AuditRow &r) { if (!found && take(r)) { *out = r; found = 1; } });
+	if (found) {
+		fetch_roots(st, out, 1);
+		mark(*out, st);
+	}
+	unlock();
+	return found;
+}
+
+int audit_row(uint32_t id, AuditRow *out) { return id ? find_row([id](const AuditRow &r) { return r.id == id; }, out) : 0; }
+
+int audit_job_row(uint32_t job, AuditRow *out)
+{
+	return job ? find_row([job](const AuditRow &r) { return r.job == job && !strcmp(r.kind, "job"); }, out) : 0;
+}
+
 int audit_rows(uint32_t job, AuditRow *out, int first, int max)
 {
 	int n = 0, seen = 0;

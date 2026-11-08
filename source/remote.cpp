@@ -324,7 +324,7 @@ static void client_thread(void *arg)
 			free(out);
 		}
 	} else if (!strncmp(req, "GET /status.json", 16)) {
-		const int JN = 8192;   // a few drives with their jobs; each client its own buffer
+		const int JN = 16384;   // a few drives with their jobs and events; each client its own buffer
 		char *js = (char *)malloc(JN);
 		if (js) {
 			snprintf(js, JN, "{}");

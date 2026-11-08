@@ -520,7 +520,7 @@ struct Track {
 	uint32_t lba;
 };
 struct LcEntry { uint32_t lba; uint8_t q[10]; };
-struct RipEvent { char text[120]; uint32_t col; };
+struct RipEvent { char text[120]; uint32_t col; StrId fmt; uint32_t lba; char why[8]; };   // fmt, lba, why: the text again in another language
 struct Ctx {
 	// the drive
 	int g_fd;
@@ -1958,23 +1958,29 @@ static int unverifiable(const uint8_t *s)
 // re-reads them in long runs at full speed (no seeking back and forth while ripping).
 #define MAX_UV (256 * 1024)
 
-// Recent events for the progress screen ("Sector 125454 fixed by re-reading"), newest last.
+// "EDC" -> plain words for the screen ("" none); tr: another language (MCP's English)
+static const char *why_words(const char *why, Tr tr = T)
+{
+	if (!why || !why[0]) return "";
+	if (!strcmp(why, "EDC")) return tr(STR_WHY_CHECKSUM);
+	if (!strcmp(why, "ECC")) return tr(STR_WHY_ECC);
+	return tr(STR_WHY_HEADER);
+}
+// An event's text in a language.
+static void ev_text(const RipEvent &e, Tr tr, char *out, size_t n) { snprintf(out, n, tr(e.fmt), e.lba, why_words(e.why, tr)); }
+
+// Recent events for the progress screen ("Sector 125454 fixed by re-reading"), newest last. why: the
+// sector check's code (EDC, ECC, the header), shown in words.
 static void rip_event(uint32_t col, StrId fmt, uint32_t lba, const char *why = NULL)
 {
 	if (g_nev == NEV) { memmove(g_ev, g_ev + 1, sizeof(RipEvent) * (NEV - 1)); g_nev--; }
-	snprintf(g_ev[g_nev].text, sizeof(g_ev[g_nev].text), T(fmt), lba, why ? why : "");
-	g_ev[g_nev].col = col;
+	RipEvent &e = g_ev[g_nev];
+	e.fmt = fmt; e.lba = lba; e.col = col;
+	snprintf(e.why, sizeof(e.why), "%s", why ? why : "");
+	ev_text(e, T, e.text, sizeof(e.text));
 	__sync_synchronize();
 	g_nev++;
 	g_ev_seq++;
-}
-
-// "EDC" -> plain words for the screen
-static const char *why_words(const char *why)
-{
-	if (!strcmp(why, "EDC")) return T(STR_WHY_CHECKSUM);
-	if (!strcmp(why, "ECC")) return T(STR_WHY_ECC);
-	return T(STR_WHY_HEADER);
 }
 
 static uint64_t fnv64(const uint8_t *p, int n)
@@ -2370,10 +2376,10 @@ static void rip_thread(void *arg)
 					if (read_cd(lba + i, 1, g_sec) == 0 && !check_sector(lba + i, g_sec)) { memcpy(sp, g_sec, SECT_Q); fixed = 1; }
 				}
 				g_rr_max = 0;
-				if (fixed) { g_recovered++; note_suspect(lba + i, sp); rip_event(0x7CE0A0, STR_EV_FIXED, lba + i, why_words(why)); logf("sector %u: %s, fixed by re-read %d", lba + i, why, tries); }
+				if (fixed) { g_recovered++; note_suspect(lba + i, sp); rip_event(0x7CE0A0, STR_EV_FIXED, lba + i, why); logf("sector %u: %s, fixed by re-read %d", lba + i, why, tries); }
 				else {
 					note_hard(lba + i, 1);
-					rip_event(0xFF8A80, STR_EV_STILLBAD, lba + i, why_words(why));
+					rip_event(0xFF8A80, STR_EV_STILLBAD, lba + i, why);
 					if (++g_badsect <= 32) logf("bad sector %u: %s, still wrong after %d re-reads", lba + i, why, tries);
 				}
 			}
@@ -3883,6 +3889,9 @@ static void eta_text(const Card &k, char *out, size_t n)
 // Downloads the Redump dat to the console and builds the local index (progress dialog, O cancels).
 static volatile uint32_t g_dl_done, g_dl_total;
 static volatile int g_dl_phase, g_dl_abort, g_dl_result, g_dl_finished;
+static volatile int g_dl_running;   // the download screen is up (get_state shows its progress)
+// The last download's result, for get_app_info: discs (> 0), cancelled (-7) or failed (another < 0).
+static struct { volatile int set; int result; char version[64]; time_t at; AuditSrc src; } g_dl_last;
 static void download_thread(void *arg)
 {
 	rd_lock();
@@ -3920,6 +3929,13 @@ static void redump_download_screen()
 	u64 rv;
 	sysThreadJoin(tid, &rv);
 	logf("redump download result %d", g_dl_result);
+	g_dl_last.result = g_dl_result;
+	g_dl_last.at = time(NULL);
+	g_dl_last.src = g_input_src;
+	g_dl_last.version[0] = 0;
+	if (g_dl_result > 0) rd_local_info(g_dl_last.version, sizeof(g_dl_last.version), NULL);
+	__sync_synchronize();
+	g_dl_last.set = 1;
 	if (g_dl_result == -7 || exit_requested) return;   // cancelled
 	char msg[256], ver[64] = "";
 	if (g_dl_result > 0) {
@@ -4214,11 +4230,11 @@ static void ui_text_fit(UiFont f, int x, int y, uint32_t col, const char *text, 
 // File name patterns ready to pick; anything else is the own pattern.
 static const char *FN_PRESETS[] = {"%T [%D]", "%T (%R)", "%T (%R) [%D]", "%N"};
 static char g_name_own[96] = "";   // the last own pattern, kept while a ready-made one is picked
-static void fn_label(const char *pat, char *out, size_t n)
+static void fn_label(const char *pat, char *out, size_t n, Tr tr = T)
 {
 	static const StrId lbl[] = {STR_FN_P1, STR_FN_P2, STR_FN_P3, STR_FN_P4};
-	for (int i = 0; i < 4; i++) if (!strcmp(pat, FN_PRESETS[i])) { snprintf(out, n, "%s", T(lbl[i])); return; }
-	snprintf(out, n, T(STR_FN_OWN), pat);
+	for (int i = 0; i < 4; i++) if (!strcmp(pat, FN_PRESETS[i])) { snprintf(out, n, "%s", tr(lbl[i])); return; }
+	snprintf(out, n, tr(STR_FN_OWN), pat);
 }
 static void fn_step(int d)
 {
@@ -4817,7 +4833,7 @@ static const char *av_src(AuditSrc s)
 
 // A config key as the settings name it, and a value as they show it.
 static void gl_key_name(const char *key, const GlSource *src, int nsrc, char *out, size_t n, Tr tr = T);
-static void gl_criteria_text(const GameFilter &f, char *out, size_t n);
+static void gl_criteria_text(const GameFilter &f, char *out, size_t n, Tr tr = T);
 static const char *av_key_label(const char *key, Tr tr = T)
 {
 	static const struct { const char *key; StrId s; } names[] = {
@@ -4829,20 +4845,21 @@ static const char *av_key_label(const char *key, Tr tr = T)
 	if (!strncmp(key, "webhook_header", 14)) return tr(STR_WH_HEADERS);
 	return key;
 }
-static void av_setting_val(const char *key, const char *val, char *out, size_t n)
+static void av_setting_val(const char *key, const char *val, char *out, size_t n, Tr tr = T)
 {
 	int v = atoi(val);
 	GameFilter f;
+	auto opt = [&](const SetOpt *o, int cnt, int x) { int i = opt_index(o, cnt, x); if (i >= 0) opt_label(o[i], tr, out, n); else snprintf(out, n, "%d", x); };
 	if (!val[0]) out[0] = 0;
-	else if (!strcmp(key, "speed") && v >= 0 && v <= 3) fmt_speed(v, out, n);
-	else if (!strcmp(key, "check") && v >= CHECK_OFF && v <= CHECK_BITPERFECT) fmt_check(v, out, n);
+	else if (!strcmp(key, "speed") && v >= 0 && v <= 3) opt(OPTS(o_speed), v);
+	else if (!strcmp(key, "check") && v >= CHECK_OFF && v <= CHECK_BITPERFECT) opt(OPTS(o_check), v);
 	else if (!strcmp(key, "eject") || !strcmp(key, "autostart") || !strcmp(key, "remote") || !strcmp(key, "webhook_on") || !strcmp(key, "webhook_headers_on"))
-		fmt_onoff(v, out, n);
-	else if (!strcmp(key, "redump")) snprintf(out, n, "%s", v == RD_ONLINE ? T(STR_RD_ONLINE) : v == RD_LOCAL ? T(STR_RD_LOCAL) : T(STR_OFF));
-	else if (!strcmp(key, "audit_mb")) snprintf(out, n, T(STR_AUDIT_MB_VAL), v);
-	else if (!strcmp(key, "name_pattern")) fn_label(val, out, n);
-	else if (!strcmp(key, "games_source")) gl_key_name(val, NULL, 0, out, n);
-	else if (!strcmp(key, "games_filter") && games_filter_parse(val, &f)) gl_criteria_text(f, out, n);
+		opt(OPTS(o_onoff), v ? 1 : 0);
+	else if (!strcmp(key, "redump")) snprintf(out, n, "%s", v == RD_ONLINE ? tr(STR_RD_ONLINE) : v == RD_LOCAL ? tr(STR_RD_LOCAL) : tr(STR_OFF));
+	else if (!strcmp(key, "audit_mb")) snprintf(out, n, tr(STR_AUDIT_MB_VAL), v);
+	else if (!strcmp(key, "name_pattern")) fn_label(val, out, n, tr);
+	else if (!strcmp(key, "games_source")) gl_key_name(val, NULL, 0, out, n, tr);
+	else if (!strcmp(key, "games_filter") && games_filter_parse(val, &f)) gl_criteria_text(f, out, n, tr);
 	else snprintf(out, n, "%s", val);
 }
 
@@ -4897,7 +4914,7 @@ static AuditReason av_row_reason(const AuditRow &r)
 }
 
 // What a row did, in words.
-static void av_row_label(const AuditRow &r, char *out, size_t n)
+static void av_row_label(const AuditRow &r, char *out, size_t n, Tr tr = T)
 {
 	if (!strcmp(r.kind, "job")) {
 		static const struct { const char *what; StrId s; } jobs[] = {
@@ -4905,32 +4922,32 @@ static void av_row_label(const AuditRow &r, char *out, size_t n)
 			{"restore", STR_HINT_RESTORE}, {"empty", STR_HINT_EMPTY_TRASH}, {"migrate", STR_AUDIT_MIGRATE}};
 		StrId s = STR_HINT_RIP;
 		for (auto &j : jobs) if (!strcmp(r.what, j.what)) s = j.s;
-		snprintf(out, n, "%s", T(s));
+		snprintf(out, n, "%s", tr(s));
 	}
 	else if (!strcmp(r.kind, "move")) { const char *a = strrchr(r.before, '/'); snprintf(out, n, "%s", a ? a + 1 : r.before); }   // the file (where to: the footer)
-	else if (!strcmp(r.kind, "delete")) { const char *a = strrchr(r.before, '/'); snprintf(out, n, T(STR_AUDIT_DELETED), a ? a + 1 : r.before); }
-	else if (!strcmp(r.kind, "sector")) snprintf(out, n, T(STR_AUDIT_SECTOR), (unsigned)r.lba);
+	else if (!strcmp(r.kind, "delete")) { const char *a = strrchr(r.before, '/'); snprintf(out, n, tr(STR_AUDIT_DELETED), a ? a + 1 : r.before); }
+	else if (!strcmp(r.kind, "sector")) snprintf(out, n, tr(STR_AUDIT_SECTOR), (unsigned)r.lba);
 	else if (!strcmp(r.kind, "setting")) {
-		if (r.norev) snprintf(out, n, "%s", av_key_label(r.what));   // a secret: only set / cleared was logged
+		if (r.norev) snprintf(out, n, "%s", av_key_label(r.what, tr));   // a secret: only set / cleared was logged
 		else {
 			char a[96], b[96];
-			av_setting_val(r.what, r.before, a, sizeof(a));
-			av_setting_val(r.what, r.after, b, sizeof(b));
-			snprintf(out, n, "%s: %s → %s", av_key_label(r.what), a, b);
+			av_setting_val(r.what, r.before, a, sizeof(a), tr);
+			av_setting_val(r.what, r.after, b, sizeof(b), tr);
+			snprintf(out, n, "%s: %s → %s", av_key_label(r.what, tr), a, b);
 		}
 	}
 	else if (!strcmp(r.kind, "result"))
-		snprintf(out, n, "%s", T(!strcmp(r.after, "finished") ? STR_TAB_DONE : !strcmp(r.after, "cancelled") ? STR_TAB_CANCELLED :
+		snprintf(out, n, "%s", tr(!strcmp(r.after, "finished") ? STR_TAB_DONE : !strcmp(r.after, "cancelled") ? STR_TAB_CANCELLED :
 		                         !strcmp(r.after, "disc_lost") ? STR_WH_SHORT_10 : STR_TAB_FAILED));
 	else if (!strcmp(r.kind, "redump")) {
-		if (!strncmp(r.after, "verified", 8)) snprintf(out, n, T(STR_RD_CARD_OK), r.after[8] ? r.after + 9 : "");
-		else snprintf(out, n, "%s", T(!strcmp(r.after, "no_match") ? STR_RD_NOMATCH : !strcmp(r.after, "not_found") ? STR_RD_NOTFOUND : STR_RD_UNCHECKED));
+		if (!strncmp(r.after, "verified", 8)) snprintf(out, n, tr(STR_RD_CARD_OK), r.after[8] ? r.after + 9 : "");
+		else snprintf(out, n, "%s", tr(!strcmp(r.after, "no_match") ? STR_RD_NOMATCH : !strcmp(r.after, "not_found") ? STR_RD_NOTFOUND : STR_RD_UNCHECKED));
 	}
-	else if (!strcmp(r.kind, "undo")) snprintf(out, n, T(STR_AUDIT_UNDO_ROW), r.what);
+	else if (!strcmp(r.kind, "undo")) snprintf(out, n, tr(STR_AUDIT_UNDO_ROW), r.what);
 	else snprintf(out, n, "%s %.100s", r.kind, r.what);   // a kind this screen does not know yet
 	if (r.undone) {
 		size_t l = strlen(out);
-		snprintf(out + l, n - l, " %s", T(STR_AUDIT_UNDONE));
+		snprintf(out + l, n - l, " %s", tr(STR_AUDIT_UNDONE));
 	}
 }
 
@@ -5985,22 +6002,22 @@ static const StrId gl_f_fmt[] = {STR_GL_F_ANY, STR_COUNT, STR_COUNT};   // 2352 
 static const StrId gl_f_rd[] = {STR_GL_F_ANY, STR_GL_ST_VERIFIED, STR_GL_ST_UNCHECKED, STR_GL_ST_NOMATCH, STR_GL_RD_NOTVERIFIED};
 static const StrId gl_f_err[] = {STR_GL_F_ANY, STR_GL_ERR_WITH, STR_GL_ERR_WITHOUT};
 static const StrId gl_f_oth[] = {STR_GL_F_ANY, STR_GL_O_BROKEN, STR_GL_O_DUPS, STR_GL_O_SBI};
-static const char *gl_f_word(int crit, int val)
+static const char *gl_f_word(int crit, int val, Tr tr = T)
 {
-	if (crit == 0) return val == 1 ? "2352" : val == 2 ? "2048" : T(gl_f_fmt[0]);
-	return T(crit == 1 ? gl_f_rd[val] : crit == 2 ? gl_f_err[val] : gl_f_oth[val]);
+	if (crit == 0) return val == 1 ? "2352" : val == 2 ? "2048" : tr(gl_f_fmt[0]);
+	return tr(crit == 1 ? gl_f_rd[val] : crit == 2 ? gl_f_err[val] : gl_f_oth[val]);
 }
 // The criteria set, "2048 · Not checked", or "All games" when none is.
-static void gl_criteria_text(const GameFilter &f, char *out, size_t n)
+static void gl_criteria_text(const GameFilter &f, char *out, size_t n, Tr tr)
 {
 	int v[4] = {f.fmt, f.redump, f.errors, f.other};
 	out[0] = 0;
 	for (int c = 0; c < 4; c++) {
 		if (!v[c]) continue;
 		size_t l = strlen(out);
-		snprintf(out + l, n - l, "%s%s", l ? " · " : "", gl_f_word(c, v[c]));
+		snprintf(out + l, n - l, "%s%s", l ? " · " : "", gl_f_word(c, v[c], tr));
 	}
-	if (!out[0]) snprintf(out, n, "%s", T(STR_GL_ALL_GAMES));
+	if (!out[0]) snprintf(out, n, "%s", tr(STR_GL_ALL_GAMES));
 }
 
 // A row's value: its status, format and discs or tracks, and its marks (duplicate, no .sbi).
@@ -8006,14 +8023,22 @@ static void drives_json(char *js, int n)
 			str("destination", k.dest[0] ? k.dest : HDD_DIR);
 			str("file", k.fname);
 		}
+		put(",\"free_gb\":%u", (unsigned)(dest_free_mb(k.dest[0] ? k.dest : HDD_DIR) / 1024));   // as the tab shows it
 		if (k.job) {   // what the job does now
 			OnCard o(c);
 			uint32_t pos = g_readpos > g_done ? g_readpos : g_done;
 			int inpass = g_pass2_total && (k.repairing || g_phase == 1 || g_phase == 2);
 			const char *phase = k.repairing ? "repairing" : g_phase == 1 ? "verifying" : g_phase == 2 ? "rereading" : g_phase == 3 ? "finishing" : g_phase == 4 ? "checking" : "reading";
 			unsigned pct = inpass ? (unsigned)((uint64_t)g_pass2_done * 100 / g_pass2_total) : g_total ? (unsigned)((uint64_t)(pos > g_total ? g_total : pos) * 100 / g_total) : 0;
-			put(",\"job\":{\"phase\":\"%s\",\"percent\":%u,\"sectors_done\":%u,\"sectors_total\":%u,\"pass_done\":%u,\"pass_total\":%u,\"unreadable\":%u,\"fixed\":%u,\"bad\":%u}",
+			put(",\"job\":{\"phase\":\"%s\",\"percent\":%u,\"sectors_done\":%u,\"sectors_total\":%u,\"pass_done\":%u,\"pass_total\":%u,\"unreadable\":%u,\"fixed\":%u,\"bad\":%u,\"events\":[",
 			    phase, pct, pos, g_total, g_pass2_done, g_pass2_total, g_readerrs, g_recovered, g_badsect);
+			for (int e = g_nev - 1; e >= 0; e--) {   // the tab's events, newest first, in English
+				char t[160];
+				ev_text(g_ev[e], T_en, t, sizeof(t));
+				put(e < g_nev - 1 ? "," : "");
+				json_str(js, n, t);
+			}
+			put("]}");
 		}
 		if (k.res[0]) {   // the last rip, repair or check on this drive (stays after the eject)
 			put(",\"last\":{\"result\":\"%s\"", k.res_failed == 2 ? "cancelled" : k.res_failed ? "failed" : "done");
@@ -9329,17 +9354,18 @@ static int log_line(FILE *f, char *buf, int n)   // the next line without its ne
 #define LOG_SHOWN 1023                  // a line shows at most this many bytes of the log
 #define LOG_READ (LOG_SHOWN + 512 + 1)  // read: a secret (< 512 bytes) that starts within them is read whole
 #define LOG_CLEAN (LOG_SHOWN * 8 + 16)  // a shown line with each secret byte as "[secret]" at the worst
-static int mcp_read_log(int from, int max, char *out, int n)
+// The secrets as they are now: the address, its path (the secret id), each header and its value,
+// however short (a path "/" alone is none); longest first, so the whole address goes before its path.
+// read_log and audit_log show "[secret]" where one appears.
+struct Secrets { char s[LOG_SECRETS][512]; int n; };
+static Secrets *secrets_load()
 {
-	if (max < 1) max = 1;
-	if (max > MCP_MAX_LOG_LINES) max = MCP_MAX_LOG_LINES;
-	char *sec = (char *)malloc(LOG_SECRETS * 512), *line = (char *)malloc(LOG_READ), *clean = (char *)malloc(LOG_CLEAN);
-	if (!sec || !line || !clean) { free(sec); free(line); free(clean); snprintf(out, n, "Out of memory."); return -1; }
-	int ns = 0;
-	{   // the secrets as they are now: the address, its path (the secret id), each header and its value,
-		// however short (a path "/" alone is none)
+	Secrets *x = (Secrets *)malloc(sizeof(Secrets));
+	if (!x) return NULL;
+	x->n = 0;
+	{
 		CfgLock lock;
-		auto add = [&](const char *s, size_t len) { if (len >= 1 && len < 512) { memcpy(sec + ns * 512, s, len); sec[ns * 512 + len] = 0; ns++; } };
+		auto add = [&](const char *s, size_t len) { if (len >= 1 && len < 512) { memcpy(x->s[x->n], s, len); x->s[x->n][len] = 0; x->n++; } };
 		add(g_webhook, strlen(g_webhook));
 		const char *h = strstr(g_webhook, "://"), *path = h ? strchr(h + 3, '/') : NULL;
 		if (path && strlen(path) >= 2) add(path, strlen(path));
@@ -9349,9 +9375,33 @@ static int mcp_read_log(int from, int max, char *out, int n)
 			if (c) { c++; while (*c == ' ') c++; add(c, strlen(c)); }
 		}
 	}
-	for (int a = 0; a < ns; a++)   // longest first: the whole address goes before its path
-		for (int b = a + 1; b < ns; b++)
-			if (strlen(sec + b * 512) > strlen(sec + a * 512)) { char t[512]; memcpy(t, sec + a * 512, 512); memcpy(sec + a * 512, sec + b * 512, 512); memcpy(sec + b * 512, t, 512); }
+	for (int a = 0; a < x->n; a++)
+		for (int b = a + 1; b < x->n; b++)
+			if (strlen(x->s[b]) > strlen(x->s[a])) { char t[512]; memcpy(t, x->s[a], 512); memcpy(x->s[a], x->s[b], 512); memcpy(x->s[b], t, 512); }
+	return x;
+}
+// The first `shown` bytes of in with each secret replaced (a secret that starts in them whole) into
+// out (n: room for every byte as "[secret]": shown * 8 + 16).
+static void secrets_mask(const Secrets &x, const char *in, size_t shown, char *out, size_t n)
+{
+	size_t o = 0;
+	for (const char *p = in; *p && (size_t)(p - in) < shown && o + 9 < n; ) {
+		int hit = 0;
+		for (int k = 0; k < x.n && !hit; k++) {
+			size_t sl = strlen(x.s[k]);
+			if (!strncmp(p, x.s[k], sl)) { o += snprintf(out + o, n - o, "[secret]"); p += sl; hit = 1; }
+		}
+		if (!hit) out[o++] = *p++;
+	}
+	out[o] = 0;
+}
+static int mcp_read_log(int from, int max, char *out, int n)
+{
+	if (max < 1) max = 1;
+	if (max > MCP_MAX_LOG_LINES) max = MCP_MAX_LOG_LINES;
+	Secrets *sec = secrets_load();
+	char *line = (char *)malloc(LOG_READ), *clean = (char *)malloc(LOG_CLEAN);
+	if (!sec || !line || !clean) { free(sec); free(line); free(clean); snprintf(out, n, "Out of memory."); return -1; }
 	Js j = js_begin(out, n);
 	int total = 0, got = 0, cut = 0;
 	FILE *f = fopen(LOG_PATH, "r");
@@ -9368,16 +9418,7 @@ static int mcp_read_log(int from, int max, char *out, int n)
 	while (f && log_line(f, line, LOG_READ)) {
 		int at = total++;
 		if (at < from || got >= max || cut) continue;
-		size_t o = 0;   // the line's first LOG_SHOWN bytes with each secret replaced (a secret that starts in them whole)
-		for (const char *p = line; *p && p - line < LOG_SHOWN && o + 9 < LOG_CLEAN; ) {
-			int hit = 0;
-			for (int s = 0; s < ns && !hit; s++) {
-				size_t sl = strlen(sec + s * 512);
-				if (!strncmp(p, sec + s * 512, sl)) { o += snprintf(clean + o, LOG_CLEAN - o, "[secret]"); p += sl; hit = 1; }
-			}
-			if (!hit) clean[o++] = *p++;
-		}
-		clean[o] = 0;
+		secrets_mask(*sec, line, LOG_SHOWN, clean, LOG_CLEAN);
 		int keep = j.o;
 		js_put(j, got ? "," : "");
 		js_str(j, clean);
@@ -9392,8 +9433,361 @@ static int mcp_read_log(int from, int max, char *out, int n)
 	return js_end(j, out, n);
 }
 
+// ---- get_app_info, audit_log and preview_name: they only read, on MCP's thread.
+
+static const char *const SRC_KEYS[] = {"pad", "remote", "app", "mcp", "undo"};   // AuditSrc as MCP names it
+static const char *src_key(AuditSrc s) { return s >= AU_PAD && s <= AU_UNDO ? SRC_KEYS[s] : "app"; }
+// A UTC time as ISO 8601 ("2026-11-08T14:05:00Z"); "" for none.
+static void iso_utc(time_t t, char *out, size_t n)
+{
+	struct tm *g = t > 0 ? gmtime(&t) : NULL;
+	if (!g || !strftime(out, n, "%Y-%m-%dT%H:%M:%SZ", g)) out[0] = 0;
+}
+static void js_time(Js &j, time_t t)
+{
+	char b[32];
+	iso_utc(t, b, sizeof(b));
+	if (b[0]) js_str(j, b); else js_put(j, "null");
+}
+
+// get_app_info: About, the console's address, parallel rips, the local Redump copy.
+static int mcp_app_info(char *out, int n)
+{
+	Js j = js_begin(out, n);
+	char ip[20], ver[64] = "";
+	remote_ip(ip, sizeof(ip));
+	time_t fetched = 0;
+	int discs = rd_local_info(ver, sizeof(ver), &fetched);
+	js_put(j, "{\"version\":");
+	js_str(j, APP_VERSION);
+	js_put(j, ",\"about\":{\"description\":");
+	js_str(j, T_en(STR_ABOUT_DESC));
+	js_put(j, ",\"author\":");
+	js_str(j, APP_AUTHOR);
+	js_put(j, ",\"email\":");
+	js_str(j, APP_EMAIL);
+	js_put(j, ",\"source\":");
+	js_str(j, APP_URL);
+	js_put(j, ",\"libraries\":");
+	js_str(j, T_en(STR_ABOUT_LIBS));
+	js_put(j, ",\"license\":");
+	js_str(j, T_en(STR_ABOUT_LICENSE));
+	js_put(j, ",\"note\":");
+	js_str(j, T_en(STR_ABOUT_SONY));
+	js_put(j, "},\"address\":\"http://%s:%d\",\"mcp\":\"http://%s:%d/mcp\",\"parallel_rips\":%s", ip, REMOTE_PORT, ip, REMOTE_PORT, g_parallel ? "true" : "false");
+	js_put(j, ",\"redump_copy\":{\"discs\":%d,\"version\":", discs > 0 ? discs : 0);
+	if (discs > 0) js_str(j, ver); else js_put(j, "null");
+	js_put(j, ",\"fetched\":");
+	js_time(j, discs > 0 ? fetched : 0);
+	js_put(j, ",\"downloading\":%s,\"last_download\":", g_dl_running ? "true" : "false");
+	int set = g_dl_last.set;
+	__sync_synchronize();   // its fields were written before set
+	if (!set) js_put(j, "null");
+	else {
+		int r = g_dl_last.result;
+		js_put(j, "{\"result\":\"%s\",\"discs\":", r > 0 ? "done" : r == -7 ? "cancelled" : "failed");
+		if (r > 0) js_put(j, "%d", r); else js_put(j, "null");
+		js_put(j, ",\"error\":");
+		if (r < 0 && r != -7) js_put(j, "%d", r); else js_put(j, "null");
+		js_put(j, ",\"version\":");
+		if (r > 0 && g_dl_last.version[0]) js_str(j, g_dl_last.version); else js_put(j, "null");
+		js_put(j, ",\"at\":");
+		js_time(j, g_dl_last.at);
+		js_put(j, ",\"source\":\"%s\"}", src_key(g_dl_last.src));
+	}
+	js_put(j, "}}");
+	return js_end(j, out, n);
+}
+
+// ---- audit_log: the audit screen's levels as JSON. Each item says whether audit_undo or audit_redo
+// can take it now (the core's own verdict, as the screen offers triangle), and why not, in English.
+#define AU_MCP_MAX 500   // the newest discs or events a level lists (offset + limit)
+static const char *au_dom_key(AuditDom d) { return d == AU_RIPS ? "rips" : d == AU_FILES ? "files" : "settings"; }
+static AuditDom au_dom(const char *k) { return !strcmp(k, "rips") ? AU_RIPS : !strcmp(k, "files") ? AU_FILES : AU_SETTINGS; }
+#define AU_FILES_DISC "A disc of the Files domain is undone by its jobs, one at a time: audit_log with the domain files and this disc lists them."
+// The verdict on undoing (or, when it is undone, redoing) a row, a job or a rips disc.
+struct AuVerdict { int can, redo; char why[300]; };
+static AuVerdict au_row_verdict(const AuditRow &r)
+{
+	AuVerdict v;
+	memset(&v, 0, sizeof(v));
+	if (!strcmp(r.kind, "job")) {   // a job: all its kept changes, as the screen's level 2
+		AuditReason rs;
+		memset(&rs, 0, sizeof(rs));
+		v.can = audit_job_reversible(r.job, &rs, &v.redo);
+		if (!v.can) av_reason(rs, v.why, sizeof(v.why), T_en);
+		return v;
+	}
+	v.can = r.reversible;
+	v.redo = r.redo;
+	if (!v.can) av_reason(av_row_reason(r), v.why, sizeof(v.why), T_en);
+	return v;
+}
+static AuVerdict au_disc_verdict(AuditDom dom, const char *key)
+{
+	AuVerdict v;
+	memset(&v, 0, sizeof(v));
+	if (dom != AU_RIPS) { snprintf(v.why, sizeof(v.why), "%s", AU_FILES_DISC); return v; }
+	AuditReason rs;
+	memset(&rs, 0, sizeof(rs));
+	v.can = audit_disc_reversible(key, &rs, &v.redo);
+	if (!v.can) av_reason(rs, v.why, sizeof(v.why), T_en);
+	return v;
+}
+static void js_verdict(Js &j, const AuVerdict &v)
+{
+	js_put(j, ",\"undo\":{\"can\":%s,\"redo\":%s,\"why\":", v.can ? "true" : "false", v.redo ? "true" : "false");
+	if (v.why[0]) js_str(j, v.why); else js_put(j, "null");
+	js_put(j, "}");
+}
+// A text that might hold a secret (the log keeps only set / cleared for one, but this is the second
+// line of defence): masked as read_log masks it.
+#define AU_SHOWN 400   // the longest text of a row (a label; a path is 256 bytes): MCP's thread has a small stack
+static void js_masked(Js &j, const Secrets &x, const char *s)
+{
+	char m[AU_SHOWN * 8 + 16];
+	secrets_mask(x, s, AU_SHOWN, m, sizeof(m));
+	js_str(j, m);
+}
+static void au_row_json(Js &j, const AuditRow &r, const Secrets &x)
+{
+	char lb[400];
+	js_put(j, "{\"id\":%u,\"kind\":", (unsigned)r.id);
+	js_str(j, r.kind);
+	if (r.job) js_put(j, ",\"job\":%u", (unsigned)r.job); else js_put(j, ",\"job\":null");
+	js_put(j, ",\"domain\":\"%s\",\"disc\":", au_dom_key(r.dom));
+	js_masked(j, x, r.disc);
+	js_put(j, ",\"what\":");
+	js_masked(j, x, r.what);
+	js_put(j, ",\"before\":");
+	js_masked(j, x, r.before);
+	js_put(j, ",\"after\":");
+	js_masked(j, x, r.after);
+	if (r.file[0]) { js_put(j, ",\"file\":"); js_masked(j, x, r.file); }
+	if (r.key[0]) { js_put(j, ",\"key\":"); js_str(j, r.key); }   // an undo row: the setting its chain goes back to
+	if (!strcmp(r.kind, "sector") || (!strcmp(r.kind, "undo") && r.file[0])) js_put(j, ",\"lba\":%u", (unsigned)r.lba);
+	js_put(j, ",\"source\":\"%s\",\"time\":", src_key(r.src));
+	js_time(j, (time_t)r.t);
+	av_row_label(r, lb, sizeof(lb), T_en);
+	js_put(j, ",\"undone\":%s,\"label\":", r.undone ? "true" : "false");
+	js_masked(j, x, lb);
+	js_verdict(j, au_row_verdict(r));
+	js_put(j, "}");
+}
+// Rows (an array of them) into the answer, a page: those that fit; the rest by next_offset (cut).
+// more: rows follow the n given. Returns the next offset, or -1 when there is no more.
+static int au_rows_json(Js &j, const AuditRow *rows, int n, int offset, int more, const Secrets &x, int *cut)
+{
+	int i = 0;
+	*cut = 0;
+	for (; i < n; i++) {
+		int at = j.o;
+		js_put(j, i ? "," : "");
+		au_row_json(j, rows[i], x);
+		if (i && (j.over || j.o > j.n - MG_TAIL)) { j.o = at; j.p[at] = 0; j.over = false; *cut = 1; break; }
+	}
+	return i < n || more ? offset + i : -1;
+}
+static void js_page(Js &j, int offset, int limit, int next, int cut)
+{
+	js_put(j, "],\"offset\":%d,\"limit\":%d,\"next_offset\":", offset, limit);
+	if (next >= 0) js_put(j, "%d", next); else js_put(j, "null");
+	js_put(j, ",\"cut\":%s", cut ? "true" : "false");
+}
+static int mcp_audit_log(const McpAuditQuery *q, char *out, int n)
+{
+	int off = q->offset > 0 ? q->offset : 0, lim = q->limit > 0 && q->limit <= MCP_MAX_GAMES ? q->limit : MCP_DEFAULT_GAMES;
+	Secrets *x = secrets_load();
+	if (!x) { snprintf(out, n, "Out of memory."); return -1; }
+	int rc = 0;
+	Js j = js_begin(out, n);
+	if (q->job) {   // a job's rows, in order (the screen's level 3)
+		AuditRow *rows = (AuditRow *)malloc((size_t)(lim + 1) * sizeof(AuditRow));
+		AuditRow *ev = (AuditRow *)malloc(sizeof(AuditRow));
+		if (!rows || !ev) { free(rows); free(ev); free(x); snprintf(out, n, "Out of memory."); return -1; }
+		if (!audit_job_row(q->job, ev)) { snprintf(out, n, "No job %u in the audit log: audit_log gives the jobs.", (unsigned)q->job); rc = -1; }
+		else {
+			int got = audit_rows(q->job, rows, off, lim + 1), cut;
+			js_put(j, "{\"job\":%u,\"event\":", (unsigned)q->job);
+			au_row_json(j, *ev, *x);
+			js_put(j, ",\"rows\":[");
+			int next = au_rows_json(j, rows, got > lim ? lim : got, off, got > lim, *x, &cut);
+			js_page(j, off, lim, next, cut);
+			js_put(j, "}");
+		}
+		free(rows);
+		free(ev);
+	} else if (!q->domain[0]) {   // the domains (the screen's level 0)
+		AuditRow one;
+		js_put(j, "{\"domains\":[");
+		const AuditDom doms[] = {AU_RIPS, AU_SETTINGS, AU_FILES};
+		for (int i = 0; i < 3; i++) {
+			AuditDom d = doms[i];
+			int empty = d == AU_SETTINGS ? audit_events(d, NULL, &one, 1) == 0 : audit_discs(NULL, NULL, NULL, NULL, 1, d) == 0;
+			js_put(j, "%s{\"domain\":\"%s\",\"label\":", i ? "," : "", au_dom_key(d));
+			js_str(j, T_en(av_dom_name(d)));
+			js_put(j, ",\"lists\":\"%s\",\"empty\":%s}", d == AU_SETTINGS ? "events" : "discs", empty ? "true" : "false");
+		}
+		js_put(j, "]}");
+	} else {
+		AuditDom dom = au_dom(q->domain);
+		int want = off + lim + 1 > AU_MCP_MAX ? AU_MCP_MAX : off + lim + 1;
+		if (dom != AU_SETTINGS && !q->disc[0]) {   // a domain's discs, newest first (level 1)
+			char (*keys)[96] = (char (*)[96])malloc((size_t)want * 96), (*names)[96] = (char (*)[96])malloc((size_t)want * 96);
+			uint32_t *last = (uint32_t *)malloc((size_t)want * sizeof(uint32_t));
+			if (!keys || !names || !last) { free(keys); free(names); free(last); free(x); snprintf(out, n, "Out of memory."); return -1; }
+			int nd = audit_discs(keys, names, NULL, last, want, dom), i = off, cut = 0;
+			js_put(j, "{\"domain\":\"%s\",\"discs\":[", q->domain);
+			for (; i < nd && i < off + lim; i++) {
+				int at = j.o;
+				js_put(j, i > off ? "," : "");
+				js_put(j, "{\"disc\":");
+				js_masked(j, *x, keys[i]);
+				js_put(j, ",\"name\":");
+				js_masked(j, *x, !strcmp(keys[i], ".trash") ? T_en(STR_GL_V_TRASH) : names[i]);
+				js_put(j, ",\"last\":");
+				js_time(j, (time_t)last[i]);
+				js_verdict(j, au_disc_verdict(dom, keys[i]));
+				js_put(j, "}");
+				if (i > off && (j.over || j.o > j.n - MG_TAIL)) { j.o = at; j.p[at] = 0; j.over = false; cut = 1; break; }
+			}
+			js_page(j, off, lim, i < nd ? i : -1, cut);
+			js_put(j, "}");
+			free(keys); free(names); free(last);
+		} else {   // the settings' events, or a disc's (levels 1 and 2), newest first
+			char name[96] = "";
+			if (q->disc[0]) {   // the disc must be one of the domain's (the screen lists them)
+				char (*keys)[96] = (char (*)[96])malloc((size_t)AU_MCP_MAX * 96), (*names)[96] = (char (*)[96])malloc((size_t)AU_MCP_MAX * 96);
+				if (!keys || !names) { free(keys); free(names); free(x); snprintf(out, n, "Out of memory."); return -1; }
+				int nd = audit_discs(keys, names, NULL, NULL, AU_MCP_MAX, dom), at = -1;
+				for (int i = 0; i < nd; i++) if (!strcmp(keys[i], q->disc)) at = i;
+				if (at >= 0) snprintf(name, sizeof(name), "%s", !strcmp(q->disc, ".trash") ? T_en(STR_GL_V_TRASH) : names[at]);
+				free(keys); free(names);
+				if (at < 0) {
+					snprintf(out, n, "No disc \"%.95s\" in the domain %s: audit_log with that domain lists its discs.", q->disc, q->domain);
+					utf8_fix(out);
+					free(x);
+					return -1;
+				}
+			}
+			AuditRow *rows = (AuditRow *)malloc((size_t)want * sizeof(AuditRow));
+			if (!rows) { free(x); snprintf(out, n, "Out of memory."); return -1; }
+			int ne = audit_events(dom, q->disc[0] ? q->disc : NULL, rows, want), cut = 0;
+			js_put(j, "{\"domain\":\"%s\"", q->domain);
+			if (q->disc[0]) {
+				js_put(j, ",\"disc\":");
+				js_masked(j, *x, q->disc);
+				js_put(j, ",\"name\":");
+				js_masked(j, *x, name);
+				js_verdict(j, au_disc_verdict(dom, q->disc));
+			}
+			js_put(j, ",\"events\":[");
+			int shown = ne > off ? ne - off : 0;
+			int next = au_rows_json(j, rows + (shown ? off : 0), shown > lim ? lim : shown, off, shown > lim, *x, &cut);
+			js_page(j, off, lim, next, cut);
+			js_put(j, "}");
+			free(rows);
+		}
+	}
+	free(x);
+	if (rc) return rc;
+	return js_end(j, out, n, "use a smaller limit");
+}
+
+// ---- preview_name: the names a pattern gives, as the File name view shows them (and the rename view
+// for a game), from MCP's thread: the drives' identified discs are read as status.json reads them.
+static int mcp_preview_name(const char *pattern, const char *drive, const char *id, char *out, int n)
+{
+	if (strlen(pattern) >= sizeof(g_name_pat)) { snprintf(out, n, "The pattern is too long: the File name view takes at most %d bytes.", (int)sizeof(g_name_pat) - 1); return -1; }
+	for (const unsigned char *p = (const unsigned char *)pattern; *p; p++)
+		if (*p < 0x20 || *p == 0x7F) { snprintf(out, n, "The pattern has a control character: the File name view cannot type one."); return -1; }
+	const char *pat = pattern[0] ? pattern : FN_PRESETS[0];   // as the view: an empty pattern is the first ready-made one
+	if (id) {   // a game: each disc's new name, as the rename view's preview
+		char src[8], key[8];
+		if (!gl_id_key(id, src, sizeof(src))) { snprintf(out, n, "No game has the id \"%.300s\": list_games gives the ids.", id); utf8_fix(out); return -1; }
+		snprintf(key, sizeof(key), "%s%s", gl_in_trash(strchr(id, ':') + 1) ? "t:" : "", src);
+		MgLock lock;
+		char allkey[8];
+		snprintf(allkey, sizeof(allkey), "%sall", key[0] == 't' ? "t:" : "");
+		const GlResult *r = g_mg;
+		if (!(r && r != &g_gl_oom && (!strcmp(r->key, key) || !strcmp(r->key, allkey)) && mg_fresh(r, g_mg_changes, r->key)))
+			r = mg_scan(&g_mg_one, &g_mg_one_changes, key);
+		int rc = mg_unlisted(r, src, out, n), di = rc ? -1 : gl_find_id(*r, id), gi = di >= 0 ? gl_game_of(*r, di) : -1;
+		if (rc) return rc;
+		if (gi < 0) { snprintf(out, n, "No game with the id \"%.300s\" is there now: list_games gives the ids.", id); utf8_fix(out); return -1; }
+		const Game &g = r->g[gi];
+		Js j = js_begin(out, n);
+		js_put(j, "{\"pattern\":");
+		js_str(j, pat);
+		js_put(j, ",\"id\":");
+		js_str(j, id);
+		js_put(j, ",\"name\":");
+		js_str(j, g.name);
+		js_put(j, ",\"discs\":[");
+		int same = 1;
+		for (int i = 0; i < g.ndiscs; i++) {
+			const GameDisc &d = r->d[g.first + i];
+			char fn[200], nw[220], now[260], did[260];
+			fn_game_name(pat, d, fn, sizeof(fn));
+			const char *dot = d.image[0] ? strrchr(d.image, '.') : NULL, *ext = dot && !strchr(dot, '/') ? dot : ".bin";
+			snprintf(nw, sizeof(nw), "%s%s", fn, ext);
+			snprintf(now, sizeof(now), "%s%s", fn_leaf(d.base), ext);
+			same &= !strcmp(fn, fn_leaf(d.base));
+			gl_disc_id(*r, d, did, sizeof(did));
+			js_put(j, "%s{\"id\":", i ? "," : "");
+			js_str(j, did);
+			js_put(j, ",\"now\":");
+			js_str(j, now);
+			js_put(j, ",\"new\":");
+			js_str(j, nw);
+			js_put(j, "}");
+		}
+		js_put(j, "],\"same\":%s}", same ? "true" : "false");   // same: rename_game would refuse (the name stays the same)
+		return js_end(j, out, n);
+	}
+	int one = -1;
+	if (drive && (one = drive_card(drive)) < 0) { snprintf(out, n, "No drive \"%s\" is there now; get_drives lists the drives.", drive); return -1; }
+	if (one >= 0 && g_cards[one].state != DISC_READY) { snprintf(out, n, "The drive %s has no identified disc: get_drives shows its state.", drive); return -1; }
+	Js j = js_begin(out, n);
+	js_put(j, "{\"pattern\":");
+	js_str(j, pat);
+	js_put(j, ",\"names\":[");
+	int list[NCARDS], nc = card_list(list), shown = 0;
+	for (int i = 0; i <= nc; i++) {   // each drive's identified disc (the view's preview), else an example
+		const char *rn, *tt, *sr;
+		char did[16] = "";
+		if (i < nc) {
+			const Card &k = g_cards[list[i]];
+			if (k.state != DISC_READY || (one >= 0 && list[i] != one)) continue;
+			drive_id(list[i], did, sizeof(did));
+			rn = k.rd_name; tt = k.title; sr = k.serial;
+		} else {
+			if (shown) break;
+			rn = "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)"; tt = "Croc 2"; sr = "SLES_020.88";
+		}
+		char fn[200], fb[220], ln[200];
+		name_from(pat, rn, tt, sr, fn, sizeof(fn));
+		snprintf(fb, sizeof(fb), "%s.bin", fn);
+		listed_name(fn, ln, sizeof(ln));
+		js_put(j, "%s{\"drive\":", shown ? "," : "");
+		if (did[0]) js_str(j, did); else js_put(j, "null");
+		js_put(j, ",\"disc\":");
+		js_str(j, tt);
+		js_put(j, ",\"serial\":");
+		js_str(j, sr);
+		js_put(j, ",\"file\":");
+		js_str(j, fb);
+		js_put(j, ",\"webman\":");
+		js_str(j, ln);
+		js_put(j, ",\"example\":%s}", i == nc ? "true" : "false");
+		shown++;
+	}
+	js_put(j, "]}");
+	return js_end(j, out, n);
+}
+
 static const McpHooks g_mcp_hooks = {mcp_state, remote_jpeg, mcp_drives, mcp_list_settings, mcp_set_setting, mcp_ui, mcp_read_log,
-                                     mcp_list_games, mcp_get_game, mcp_game};
+                                     mcp_list_games, mcp_get_game, mcp_game, mcp_app_info, mcp_audit_log, mcp_preview_name};
 
 static void event_json(char *js, size_t n, const char *event)
 {

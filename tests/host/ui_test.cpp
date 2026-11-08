@@ -3881,6 +3881,211 @@ static void mcp_games_scenarios()
 	if (bad) g_fail += bad; else printf("ok   MCP: the game list's tools (list, details, check, rename, trash, restore, empty, busy while checking)\n");
 }
 
+// ---------------------------------------------------------------- MCP: the app's other tools (ruling M11)
+// get_app_info, audit_log, preview_name and get_drives' events and free space: reading tools, on this
+// thread (as the web server's); nothing on the screen changes.
+static void mcp_app_scenarios()
+{
+	int bad = 0;
+	auto need = [&](bool ok, const char *what, const char *out = NULL) {
+		if (ok) return;
+		printf("FAIL mcp app: %s%s%.600s\n", what, out ? ": " : "", out ? out : "");
+		bad++;
+	};
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log out/au_img.bin");
+	audit_init("out/audit", &vf_io);
+	audit_set_hooks(set_setting_hook, NULL);
+	audit_set_retired(cfg_retired);
+	reset_all(); usb(0, 0); usb(1, 2);
+	for (int c = 0; c < 3; c++) g_cards[c].tried = 1;
+	disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
+	disc(1, "Croc 2", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "SLES_020.88", 654);
+	const char *SECRET_URL = "http://10.0.0.9:8123/api/webhook/SECRETWEBHOOKID", *SECRET_HDR = "Authorization: Bearer TOPSECRETTOKEN";
+	snprintf(g_webhook, sizeof g_webhook, "%s", SECRET_URL);
+	snprintf(g_webhook_hdr[0], sizeof g_webhook_hdr[0], "%s", SECRET_HDR);
+	g_std = DriveCfg{1, 4, 0, 1, 0, CHECK_BITPERFECT}; g_redump = RD_OFF; snprintf(g_name_pat, sizeof g_name_pat, "%s", FN_PRESETS[0]);
+	g_cfg_primed = false; g_input_src = AU_PAD; cfg_save();
+	const McpHooks &h = g_mcp_hooks;
+	mcp_init(&g_mcp_hooks, APP_VERSION);
+	static char outb[MCP_MAX_RESPONSE];
+	std::string out;
+	std::vector<std::string> said;
+	auto has = [&](const char *t) { return out.find(t) != std::string::npos; };
+	auto keep = [&](int rc) { out = outb; said.push_back(out); return rc; };
+	auto alog = [&](const char *dom, const char *disc, uint32_t job, int off = 0, int lim = 50) {
+		McpAuditQuery q;
+		memset(&q, 0, sizeof q);
+		snprintf(q.domain, sizeof q.domain, "%s", dom);
+		snprintf(q.disc, sizeof q.disc, "%s", disc);
+		q.job = job; q.offset = off; q.limit = lim;
+		return keep(h.audit_log(&q, outb, sizeof outb));
+	};
+	const char *o = NULL;
+	#define O (o = out.c_str())
+
+	// get_drives: the running job's events (the tab's list, newest first) in English whatever the
+	// console's language, and each destination's free space as the tab shows it
+	{
+		host_lang = PS3_LANG_SWEDISH; lang_init();
+		ripping(1, 1000, 291570, 0, 0, 0);
+		{ OnCard oc(1); rip_event(0x7CE0A0, STR_EV_RECOVERED, 4711); rip_event(0x7CE0A0, STR_EV_FIXED, 4712, "EDC"); }
+		char e1[160], e2[160];
+		snprintf(e1, sizeof e1, T_en(STR_EV_RECOVERED), 4711u, "");
+		snprintf(e2, sizeof e2, T_en(STR_EV_FIXED), 4712u, T_en(STR_WHY_CHECKSUM));
+		std::string want = std::string("\"events\":[\"") + e2 + "\",\"" + e1 + "\"]";
+		int rc = keep(h.drives(outb, sizeof outb));
+		need(rc == 0 && json_ok(out.c_str()) && has(want.c_str()), "get_drives: the job's events, newest first, in English", O);
+		{ OnCard oc(1); need(strstr(g_ev[1].text, T(STR_WHY_CHECKSUM)) != NULL, "the tab's event stays in the console's language", g_ev[1].text); }
+		need(has("\"free_gb\":338") && out.find("\"free_gb\"") != out.rfind("\"free_gb\""), "get_drives: free_gb of each drive's destination", O);
+		static char js[16384];
+		status_json(js, sizeof js);
+		need(json_ok(js) && strstr(js, want.c_str()) && strstr(js, "\"free_gb\":338"), "status.json has them too", js);
+		g_cards[1].job = 0;
+		{ OnCard oc(1); g_nev = 0; g_done = g_total = 0; }
+	}
+	// get_app_info: About in English, the address, parallel rips, the Redump copy and its last download
+	{
+		g_dl_last.set = 0;
+		int rc = keep(h.app_info(outb, sizeof outb));
+		need(rc == 0 && json_ok(out.c_str()), "get_app_info: valid JSON", O);
+		std::string desc = std::string("\"description\":\"") + T_en(STR_ABOUT_DESC) + "\"";
+		need(has("\"version\":\"" APP_VERSION "\"") && has(desc.c_str()) && has("\"author\":\"" APP_AUTHOR "\"") && has("\"source\":\"" APP_URL "\""),
+		     "get_app_info: the version and About's text", O);
+		need(has("\"license\":\"Free software under the GNU General Public License v3.\"") && has("\"libraries\":\"PSL1GHT"), "get_app_info: the licence and libraries", O);
+		need(has("\"address\":\"http://192.168.1.50:8090\"") && has("\"mcp\":\"http://192.168.1.50:8090/mcp\"") && has("\"parallel_rips\":true"),
+		     "get_app_info: the address and parallel rips", O);
+		need(has("\"redump_copy\":{\"discs\":1,\"version\":\"2026-06-15\",\"fetched\":null,\"downloading\":false,\"last_download\":null}"),
+		     "get_app_info: the Redump copy, no download yet", O);
+		g_dl_last.result = 21000; snprintf(g_dl_last.version, sizeof g_dl_last.version, "2026-11-01 10-00-00"); g_dl_last.at = 1762000000; g_dl_last.src = AU_MCP; g_dl_last.set = 1;
+		keep(h.app_info(outb, sizeof outb));
+		need(has("\"last_download\":{\"result\":\"done\",\"discs\":21000,\"error\":null,\"version\":\"2026-11-01 10-00-00\",\"at\":\"2025-11-01T12:26:40Z\",\"source\":\"mcp\"}"),
+		     "get_app_info: the last download", O);
+		g_dl_last.result = -3; g_dl_last.src = AU_PAD;
+		keep(h.app_info(outb, sizeof outb));
+		need(has("\"last_download\":{\"result\":\"failed\",\"discs\":null,\"error\":-3,\"version\":null,") && has("\"source\":\"pad\""), "get_app_info: a failed download", O);
+		g_dl_last.set = 0;
+	}
+	// audit_log: the screen's levels, every item with its verdict; secrets never shown
+	{
+		int rc = alog("", "", 0);
+		need(rc == 0 && json_ok(out.c_str()) && has("{\"domain\":\"rips\",\"label\":\"Rips\",\"lists\":\"discs\",\"empty\":true}") &&
+		     has("{\"domain\":\"settings\",\"label\":\"Settings\",\"lists\":\"events\",\"empty\":true}") && has("\"domain\":\"files\""), "audit_log: the three domains", O);
+		// a repair of Alundra with two sectors; the image has the new bytes, so the job can be undone
+		uint8_t a[2352], b[2352];
+		memset(a, 0x11, sizeof a); memset(b, 0x22, sizeof b);
+		{ FILE *f = fopen("out/au_img.bin", "wb"); for (int i = 0; i < 8; i++) fwrite(b, 1, sizeof b, f); fclose(f); }
+		uint32_t job = audit_job_begin(AU_MCP, "SLES_011.35", "Alundra", "repair");
+		audit_sector(job, "out/au_img.bin", 2, a, b);
+		audit_sector(job, "out/au_img.bin", 3, a, b);
+		audit_job_end(job, "finished");
+		audit_setting(AU_PAD, "speed", "0", "1");
+		audit_setting(AU_PAD, "name_pattern", "%T [%D]", "%T /api/webhook/SECRETWEBHOOKID");   // a secret in a plain row: shown as [secret]
+		audit_setting_private(AU_PAD, "webhook", "cleared", "set");
+		audit_setting(AU_APP, "games_filter", "0,0,0,0", "1,0,0,0");
+		uint32_t mv = audit_job_begin(AU_PAD, "SLES_011.35", "Alundra", "rename", AU_FILES);
+		audit_job_end(mv, "finished");
+		rc = alog("", "", 0);
+		need(rc == 0 && has("\"domain\":\"rips\",\"label\":\"Rips\",\"lists\":\"discs\",\"empty\":false") &&
+		     has("\"lists\":\"events\",\"empty\":false"), "audit_log: the domains have items now", O);
+		rc = alog("rips", "", 0);
+		need(rc == 0 && json_ok(out.c_str()) && has("{\"disc\":\"SLES_011.35\",\"name\":\"Alundra\",\"last\":\"") &&
+		     has("\"undo\":{\"can\":true,\"redo\":false,\"why\":null}") && has("\"next_offset\":null"), "audit_log rips: the disc, undoable", O);
+		rc = alog("files", "", 0);
+		need(rc == 0 && has("\"disc\":\"SLES_011.35\"") && has("\"can\":false") && has("undone by its jobs"), "audit_log files: a disc is undone by its jobs", O);
+		rc = alog("rips", "SLES_011.35", 0);
+		char jw[80];
+		snprintf(jw, sizeof jw, "\"kind\":\"job\",\"job\":%u,\"domain\":\"rips\"", (unsigned)job);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"domain\":\"rips\",\"disc\":\"SLES_011.35\",\"name\":\"Alundra\",\"undo\":{\"can\":true") && has(jw) &&
+		     has("\"label\":\"Repair\"") && has("\"source\":\"mcp\""), "audit_log a disc: its events, the job with its verdict", O);
+		rc = alog("", "", job);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"kind\":\"sector\"") && has("\"lba\":2,") && has("\"lba\":3,") && has("\"label\":\"Sector 2: changed\"") &&
+		     has("\"file\":\"out/au_img.bin\""), "audit_log a job: its rows, the sectors with their lba", O);
+		need(has("\"event\":{") && has("\"next_offset\":null"), "audit_log a job: its own row and no more", O);
+		rc = alog("", "", job, 0, 1);
+		need(rc == 0 && has("\"next_offset\":1") && has("\"limit\":1"), "audit_log a job: a page of one", O);
+		rc = alog("", "", job, 1, 1);
+		need(rc == 0 && has("\"offset\":1") && has("\"next_offset\":2"), "audit_log a job: the next page", O);
+		rc = alog("settings", "", 0);
+		need(rc == 0 && json_ok(out.c_str()) && has("\"label\":\"Read speed: Max \xe2\x86\x92 8\xc3\x97\"") && has("\"what\":\"speed\",\"before\":\"0\",\"after\":\"1\""),
+		     "audit_log settings: a setting's row in English, with its values", O);
+		need(has("\"what\":\"webhook\",\"before\":\"cleared\",\"after\":\"set\""),
+		     "audit_log settings: a secret's row says only set / cleared", O);
+		need(has("[secret]") && !has("SECRETWEBHOOKID"), "audit_log: a secret in a plain row is masked", O);
+		std::string ret = std::string("\"why\":\"") + T_en(STR_AW_RETIRED) + "\"";
+		need(has(ret.c_str()), "audit_log: an old games_filter row is not undoable (AW_RETIRED)", O);
+		std::string sec = std::string("\"why\":\"") + T_en(STR_AW_SECRET) + "\"";
+		need(has(sec.c_str()), "audit_log: a secret's row cannot be undone, and says why", O);
+		// refusals
+		rc = alog("", "", 999999);
+		need(rc != 0 && has("No job 999999"), "audit_log: an unknown job", O);
+		rc = alog("rips", "SLUS_999.99", 0);
+		need(rc != 0 && has("No disc \"SLUS_999.99\" in the domain rips"), "audit_log: an unknown disc", O);
+		// undone: the verdict says the next step is a redo
+		char why[200];
+		AuditReason rs;
+		need(audit_undo_job(job, why, sizeof why, &rs) == 0, "the repair is undone", why);
+		rc = alog("rips", "SLES_011.35", 0);
+		need(rc == 0 && has("\"undo\":{\"can\":true,\"redo\":true,\"why\":null}"), "audit_log: an undone job's next step is a redo", O);
+	}
+	// preview_name: the names the pattern gives for the drives' discs (the File name view), one drive's,
+	// or an example when no drive has a disc
+	{
+		char f0[200], f1[200], l0[200];
+		name_from("%T (%R)", "Alundra (Europe)", "Alundra", "SLES_011.35", f0, sizeof f0);
+		name_from("%T (%R)", "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv)", "Croc 2", "SLES_020.88", f1, sizeof f1);
+		listed_name(f0, l0, sizeof l0);
+		int rc = keep(h.preview_name("%T (%R)", NULL, NULL, outb, sizeof outb));
+		std::string w0 = std::string("{\"drive\":\"internal\",\"disc\":\"Alundra\",\"serial\":\"SLES_011.35\",\"file\":\"") + f0 + ".bin\",\"webman\":\"" + l0 + "\",\"example\":false}";
+		std::string w1 = std::string("\"drive\":\"usb0\",\"disc\":\"Croc 2\",\"serial\":\"SLES_020.88\",\"file\":\"") + f1 + ".bin\"";
+		need(rc == 0 && json_ok(out.c_str()) && has("\"pattern\":\"%T (%R)\"") && has(w0.c_str()) && has(w1.c_str()) && !has("usb2"), "preview_name: every drive's disc", O);
+		need(!strcmp(g_name_pat, FN_PRESETS[0]), "preview_name changes nothing");
+		rc = keep(h.preview_name("%D", "usb0", NULL, outb, sizeof outb));
+		need(rc == 0 && has("\"file\":\"SLES_020.88.bin\"") && !has("internal"), "preview_name: one drive", O);
+		rc = keep(h.preview_name("", "internal", NULL, outb, sizeof outb));
+		need(rc == 0 && has("\"pattern\":\"%T [%D]\""), "preview_name: an empty pattern is the first ready-made one", O);
+		rc = keep(h.preview_name("%T", "usb2", NULL, outb, sizeof outb));
+		need(rc != 0 && has("no identified disc"), "preview_name: a drive without a disc", O);
+		rc = keep(h.preview_name("%T", "usb5", NULL, outb, sizeof outb));
+		need(rc != 0 && has("No drive \"usb5\""), "preview_name: a drive that is not there", O);
+		rc = keep(h.preview_name("%T\t", NULL, NULL, outb, sizeof outb));
+		need(rc != 0 && has("control character"), "preview_name: a control character", O);
+		std::string longp(96, 'x');
+		rc = keep(h.preview_name(longp.c_str(), NULL, NULL, outb, sizeof outb));
+		need(rc != 0 && has("too long"), "preview_name: too long", O);
+		g_cards[0].state = g_cards[1].state = DISC_NONE;
+		rc = keep(h.preview_name("%T", NULL, NULL, outb, sizeof outb));
+		need(rc == 0 && has("\"drive\":null,\"disc\":\"Croc 2\"") && has("\"example\":true"), "preview_name: an example when no drive has a disc", O);
+		// a game: each disc's new name, as the rename view's preview
+		char keep_root[256];
+		snprintf(keep_root, sizeof keep_root, "%s", host_root);
+		gs_library();
+		const char *ALUNDRA = "hdd:/dev_hdd0/PSXISO/Alundra (Europe) [SLES_011.35]";
+		const char *FF9 = "hdd:/dev_hdd0/PSXISO/Final Fantasy IX (Europe) (Disc 1) [SLES_029.65]";
+		rc = keep(h.preview_name("%T", NULL, ALUNDRA, outb, sizeof outb));
+		need(rc == 0 && json_ok(out.c_str()) && has("\"now\":\"Alundra (Europe) [SLES_011.35].bin\",\"new\":\"Alundra.bin\"") && has("\"same\":false"),
+		     "preview_name: a game's new name", O);
+		rc = keep(h.preview_name("%N [%D]", NULL, ALUNDRA, outb, sizeof outb));
+		need(rc == 0 && has("\"same\":true"), "preview_name: the pattern that gives its name now", O);
+		rc = keep(h.preview_name("%D", NULL, FF9, outb, sizeof outb));
+		need(rc == 0 && has("\"new\":\"SLES_029.65.bin\"") && has("\"new\":\"SLES_329.65.bin\""), "preview_name: every disc of a game", O);
+		rc = keep(h.preview_name("%T", NULL, "hdd:/dev_hdd0/PSXISO/Nope", outb, sizeof outb));
+		need(rc != 0 && has("No game with the id"), "preview_name: an unknown game", O);
+		snprintf(host_root, sizeof host_root, "%s", keep_root);
+		mg_free();
+	}
+	for (const std::string &t : said)
+		if (t.find("SECRETWEBHOOKID") != std::string::npos || t.find("TOPSECRETTOKEN") != std::string::npos || t.find("10.0.0.9") != std::string::npos)
+			need(false, "a secret in an answer", t.c_str());
+	g_webhook[0] = 0; g_webhook_hdr[0][0] = 0;
+	host_lang = PS3_LANG_ENGLISH_US; lang_init();
+	system("rm -rf out/audit out/psxrip.cfg out/psxrip.log out/au_img.bin");
+	audit_init("out/audit", &vf_io);
+	audit_set_retired(NULL);
+	reset_all();
+	#undef O
+	if (bad) g_fail += bad; else printf("ok   MCP: get_app_info, audit_log, preview_name, get_drives' events and free space\n");
+}
+
 int main()
 {
 	setvbuf(stdout, NULL, _IONBF, 0);   // every line out before a crash
@@ -4539,6 +4744,7 @@ int main()
 	mcp_settings_scenarios();
 	mcp_ui_scenarios();
 	mcp_games_scenarios();
+	mcp_app_scenarios();
 	{ g_boxes.clear(); about_draw(); save("about-english"); size_t b0 = g_fail; check("about-english"); printf("%s about-english\n", g_fail == (int)b0 ? "ok  " : "FAIL"); }
 	printf("%s: %d problem(s)\n", g_fail ? "FAILED" : "passed", g_fail);
 	return g_fail ? 1 : 0;

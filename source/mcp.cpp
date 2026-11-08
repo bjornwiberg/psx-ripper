@@ -297,13 +297,15 @@ static void w_base64(W *w, const unsigned char *d, int n)
 
 enum ArgType { A_DRIVE, A_SCREEN, A_BUTTON, A_KEY, A_VALUE, A_FROM, A_MAX, A_SOURCE, A_FILTER, A_OFFSET, A_LIMIT, A_ID, A_PATTERN, A_CONFIRM,
                A_SOURCE1 /* one source: not all */, A_EXPECT, A_QUERY,
-               A_FSET /* show_games' filter: the criteria to set, or "clear" */ };
+               A_FSET /* show_games' filter: the criteria to set, or "clear" */,
+               A_DOMAIN /* the audit log's domain */, A_DISC /* a disc's key in the audit log */, A_JOBID /* an audit job's number */ };
 struct Arg { const char *name; ArgType type; bool required; const char *desc; };
-enum ToolKind { T_STATE, T_SHOT, T_DRIVES, T_LIST, T_SET, T_SCREEN, T_UI, T_LOG, T_GAMES, T_GAME, T_GACT };
+enum ToolKind { T_STATE, T_SHOT, T_DRIVES, T_LIST, T_SET, T_SCREEN, T_UI, T_LOG, T_GAMES, T_GAME, T_GACT, T_INFO, T_AUDIT, T_PREVIEW };
 #define NARGS 5   // a tool's arguments at most
 struct Tool { const char *name; ToolKind kind; bool reads; const char *desc; Arg args[NARGS]; };
 
 static const char *const k_screens[] = {"home", "settings", "drive_settings", "filename", "webhooks", "about", "audit_log", "remote_control", "games", NULL};
+static const char *const k_domains[] = {"rips", "settings", "files", NULL};
 static const char *const k_buttons[] = {"cross", "circle", "triangle", "square", "up", "down", "left", "right", "start", "select", "l1", "r1", "l2", "r2", NULL};
 // The game list's filter, as its panel has it: each criterion's values in the panel's order (the
 // first is "any"; McpGameQuery has the index), and Show (games or the trash).
@@ -323,6 +325,8 @@ static const struct { const char *name; const char *const *values; const char *d
 #define DRIVE_ARG {"drive", A_DRIVE, true, DRIVE_DESC}
 #define ID_ARG {"id", A_ID, true, "The game's id, as list_games gives it"}
 #define SOURCE_DESC "The source: hdd, usbN (the USB drive's port) or all (default all)"
+#define PATTERN_DESC "The pattern: %T the title, %N Redump's name, %D the disc ID, %R the region, other characters as they are " \
+	"(as the File name setting); empty = %T [%D]"
 #define CHECK_POLL "Answers at once with started: poll get_state for the progress (screen game_check; it reads nothing), and call list_games for the result when it has ended."
 static const Tool k_tools[] = {
 	{"get_state", T_STATE, true, "What the screen shows: the screen, the selected tab and row, an open dialog with its buttons, and every drive's state.", {}},
@@ -372,8 +376,7 @@ static const Tool k_tools[] = {
 	{"rename_game", T_GACT, false, "Renames every file of the game (all its discs, the .cue's FILE lines too) by a file name pattern, as START in the rename "
 		"view does, with its checks: refused when the name stays the same, a game of that name is there, or a drive or a check uses the game. Logged in the "
 		"audit log and undoable there. Returns the new names and ids. Use this instead of press_button.", {ID_ARG,
-		{"pattern", A_PATTERN, true, "The pattern: %T the title, %N Redump's name, %D the disc ID, %R the region, other characters as they are "
-			"(as the File name setting); empty = %T [%D]"}}},
+		{"pattern", A_PATTERN, true, PATTERN_DESC}}},
 	{"trash_game", T_GACT, false, "Moves the game, every file of it, to the trash of its source (PSXISO/.trash), as triangle in the game list does. Logged in "
 		"the audit log and undoable there. Use this instead of press_button.", {ID_ARG}},
 	{"restore_game", T_GACT, false, "Moves a game in the trash back to its folder, as triangle in the trash does. Use this instead of press_button.", {ID_ARG}},
@@ -391,6 +394,25 @@ static const Tool k_tools[] = {
 		"Use this instead of press_button.", {
 		{"source", A_SOURCE, false, "The source to show: hdd, usbN (the USB drive's port) or all; left out: the one shown now"},
 		{"filter", A_FSET, false, "The filter panel's criteria to set (each one left out keeps its value), or \"clear\" to clear them"}}},
+	{"get_app_info", T_INFO, true, "What About in the settings shows (the version, author, source, description, libraries and licence), the console's "
+		"MCP address, whether drives can rip at the same time, and the local Redump copy: its version, discs, when it was fetched, and the last "
+		"download's result. Read on its own without touching the screen.", {}},
+	{"audit_log", T_AUDIT, true, "The audit log as its screen shows it, read on its own without touching the screen. No arguments: the domains (rips, "
+		"settings, files). domain: its discs (rips, files) or its events (settings), newest first. domain and disc: that disc's events (jobs and "
+		"rows). job: the job's rows (sectors, file moves), in order. Every item says whether it can be undone now (undo: can, redo, why not): "
+		"audit_undo takes an item that is not undone, audit_redo one that is. A secret value (the webhook address, a header) is never shown. "
+		"Page with offset and limit: next_offset is the next page's offset (null: no more). Use this instead of press_button on the audit log.", {
+		{"domain", A_DOMAIN, false, "The domain: rips, settings or files"},
+		{"disc", A_DISC, false, "A disc's key, as audit_log gives it for the domain rips or files (with domain)"},
+		{"job", A_JOBID, false, "A job's number, as audit_log gives it: its rows (alone, without domain and disc)"},
+		{"offset", A_OFFSET, false, "The first item to give (0 = the first; default 0)"},
+		{"limit", A_LIMIT, false, "How many items, at most 200 (default 50)"}}},
+	{"preview_name", T_PREVIEW, true, "The file names a file name pattern gives, as the File name view's preview shows them, without changing anything: "
+		"for each drive's identified disc (or one drive's) with the name webMAN lists, or with id the new name of each disc of a game, as the "
+		"rename view shows it. Use it to try a pattern before set_setting name_pattern or rename_game.", {
+		{"pattern", A_PATTERN, true, PATTERN_DESC},
+		{"drive", A_DRIVE, false, "Only this drive's disc (leave out for every drive)"},
+		{"id", A_ID, false, "A game's id, as list_games gives it: its discs' new names (not with drive)"}}},
 };
 static const int k_ntools = sizeof(k_tools) / sizeof(k_tools[0]);
 
@@ -443,6 +465,9 @@ static void w_tools_list(W *w)
 			case A_ID: w_str(w, "\"type\":\"string\",\"minLength\":1"); break;
 			case A_PATTERN: w_str(w, "\"type\":\"string\",\"maxLength\":95"); break;
 			case A_CONFIRM: w_str(w, "\"type\":\"boolean\""); break;
+			case A_DOMAIN: w_str(w, "\"type\":\"string\","); w_enum(w, k_domains); break;
+			case A_DISC: w_fmt(w, "\"type\":\"string\",\"minLength\":1,\"maxLength\":%d", MCP_MAX_DISC); break;
+			case A_JOBID: w_str(w, "\"type\":\"integer\",\"minimum\":1"); break;
 			}
 			w_str(w, ",\"description\":");
 			w_esc(w, g.desc);
@@ -500,6 +525,7 @@ struct Args {
 	bool given[NARGS];
 	int num[NARGS];
 	McpGameQuery q;               // the game list's source, filter, offset and limit
+	McpAuditQuery aq;             // the audit log's domain, disc, job and page
 };
 
 static bool valid_source(const char *s)
@@ -575,6 +601,8 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 	memset(&a->q, 0, sizeof(a->q));
 	a->q.limit = MCP_DEFAULT_GAMES;
 	a->q.expect = -1;
+	memset(&a->aq, 0, sizeof(a->aq));
+	a->aq.limit = MCP_DEFAULT_GAMES;
 	if (obj) {
 		// every key must be one of the tool's, once
 		JIt it = j_members(obj, e);
@@ -599,7 +627,7 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			continue;
 		}
 		a->given[i] = true;
-		if (g.type == A_FROM || g.type == A_MAX || g.type == A_OFFSET || g.type == A_LIMIT) {
+		if (g.type == A_FROM || g.type == A_MAX || g.type == A_OFFSET || g.type == A_LIMIT || g.type == A_JOBID) {
 			// a plain non-negative integer: no sign, fraction or exponent
 			const char *end = j_skip(v, e);
 			int n = 0, top = g.type == A_MAX ? MCP_MAX_LOG_LINES : MCP_MAX_GAMES;
@@ -608,12 +636,18 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 				if (*p < '0' || *p > '9') ok = false;
 				else n = n * 10 + (*p - '0');
 			}
+			if (g.type == A_JOBID) {   // an id: 1 or more
+				if (!ok || n < 1) return set_err(er, -32602, g.name, "must be an integer of 1 or more");
+				a->num[i] = n;
+				a->aq.job = (uint32_t)n;
+				continue;
+			}
 			if (ranged && ok && (n < 1 || n > top)) ok = false;
 			if (!ok) return ranged ? set_err(er, -32602, g.name, "must be an integer from 1 to %d", top)
 			                       : set_err(er, -32602, g.name, "must be an integer of 0 or more");
 			a->num[i] = n;
-			if (g.type == A_OFFSET) a->q.offset = n;
-			if (g.type == A_LIMIT) a->q.limit = n;
+			if (g.type == A_OFFSET) a->q.offset = a->aq.offset = n;
+			if (g.type == A_LIMIT) a->q.limit = a->aq.limit = n;
 			continue;
 		}
 		if (g.type == A_FILTER) {
@@ -652,7 +686,7 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			continue;
 		}
 		if (*v != '"') return set_err(er, -32602, g.name, "must be a string");
-		int len = j_decode(v, e, a->str[i], g.type == A_VALUE || g.type == A_ID || g.type == A_PATTERN || g.type == A_QUERY ? MAX_VALUE : MAX_KEY);
+		int len = j_decode(v, e, a->str[i], g.type == A_VALUE || g.type == A_ID || g.type == A_PATTERN || g.type == A_QUERY || g.type == A_DISC ? MAX_VALUE : MAX_KEY);
 		if (len < 0) return set_err(er, -32602, g.name, "too long");
 		if ((int)strlen(a->str[i]) != len || strpbrk(a->str[i], "\r\n"))
 			return set_err(er, -32602, g.name, "must not contain line breaks or NUL");
@@ -680,6 +714,15 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 			if (len > MCP_MAX_QUERY) return set_err(er, -32602, g.name, "too long (at most %d bytes)", MCP_MAX_QUERY);
 			snprintf(a->q.query, sizeof(a->q.query), "%s", a->str[i]);
 			break;
+		case A_DOMAIN:
+			if (!in_list(a->str[i], k_domains)) return set_err(er, -32602, g.name, "must be one of rips, settings, files");
+			snprintf(a->aq.domain, sizeof(a->aq.domain), "%s", a->str[i]);
+			break;
+		case A_DISC:
+			if (!len) return set_err(er, -32602, g.name, "must not be empty");
+			if (len > MCP_MAX_DISC) return set_err(er, -32602, g.name, "too long (at most %d bytes: audit_log gives the keys)", MCP_MAX_DISC);
+			snprintf(a->aq.disc, sizeof(a->aq.disc), "%s", a->str[i]);
+			break;
 		default: break;
 		}
 	}
@@ -688,6 +731,13 @@ static int check_args(const Tool &t, const char *obj, const char *e, Args *a, Er
 		if (ds && !a->given[1]) return set_err(er, -32602, "drive", "required for drive_settings");
 		if (!ds && a->given[1]) return set_err(er, -32602, "drive", "only for drive_settings");
 	}
+	if (t.kind == T_AUDIT) {   // the screen's levels: a domain, a domain's disc, or a job alone
+		const McpAuditQuery &q = a->aq;
+		if (q.job && (q.domain[0] || q.disc[0])) return set_err(er, -32602, "job", "goes alone (a job's rows): leave out domain and disc");
+		if (q.disc[0] && !q.domain[0]) return set_err(er, -32602, "domain", "required with disc (rips or files: a disc's key is its domain's)");
+		if (q.disc[0] && !strcmp(q.domain, "settings")) return set_err(er, -32602, "disc", "only with the domain rips or files");
+	}
+	if (t.kind == T_PREVIEW && a->given[1] && a->given[2]) return set_err(er, -32602, "id", "give drive or id, not both");
 	return 0;
 }
 
@@ -764,6 +814,11 @@ static int tools_call(const char *params, const char *e, W *w, Err *er)
 		break;
 	case T_GAMES: if ((have = g_hooks.list_games)) r = g_hooks.list_games(&a->q, buf, n); break;
 	case T_GAME: if ((have = g_hooks.get_game)) r = g_hooks.get_game(a->str[0], buf, n); break;
+	case T_INFO: if ((have = g_hooks.app_info)) r = g_hooks.app_info(buf, n); break;
+	case T_AUDIT: if ((have = g_hooks.audit_log)) r = g_hooks.audit_log(&a->aq, buf, n); break;
+	case T_PREVIEW:
+		if ((have = g_hooks.preview_name)) r = g_hooks.preview_name(a->str[0], a->given[1] ? a->str[1] : NULL, a->given[2] ? a->str[2] : NULL, buf, n);
+		break;
 	case T_GACT: {
 		if (!(have = g_hooks.game)) break;
 		const char *id = NULL, *pat = NULL;

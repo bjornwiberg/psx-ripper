@@ -123,7 +123,8 @@ static void ping(int &bad)
 
 static const char *k_tools[] = {"get_state", "get_screenshot", "get_drives", "list_settings", "set_setting",
 	"go_screen", "go_tab", "press_button", "rip", "repair", "check", "cancel", "skip_rereads", "eject", "read_log",
-	"list_games", "get_game", "check_game", "check_games", "cancel_check", "rename_game", "trash_game", "restore_game", "empty_trash", "show_games"};
+	"list_games", "get_game", "check_game", "check_games", "cancel_check", "rename_game", "trash_game", "restore_game", "empty_trash", "show_games",
+	"get_app_info", "audit_log", "preview_name"};
 static const int k_ntools = sizeof(k_tools) / sizeof(k_tools[0]);
 
 static void tools_list(int &bad)
@@ -297,6 +298,8 @@ static void tool_errors(int &bad)
 			: !strcmp(k_tools[i], "get_game") || !strcmp(k_tools[i], "check_game") || !strcmp(k_tools[i], "trash_game") || !strcmp(k_tools[i], "restore_game") ? "{\"id\":\"hdd:/a\"}"
 			: !strcmp(k_tools[i], "rename_game") ? "{\"id\":\"hdd:/a\",\"pattern\":\"%T\"}"
 			: !strcmp(k_tools[i], "empty_trash") ? "{\"source\":\"hdd\",\"confirm\":true}"
+			: !strcmp(k_tools[i], "preview_name") ? "{\"pattern\":\"%T\"}"
+			: !strcmp(k_tools[i], "audit_log") ? "{}"
 			: (!strncmp(k_tools[i], "get_", 4) || !strcmp(k_tools[i], "list_settings") || !strcmp(k_tools[i], "read_log") || !strcmp(k_tools[i], "list_games") ||
 			   !strcmp(k_tools[i], "check_games") || !strcmp(k_tools[i], "cancel_check") || !strcmp(k_tools[i], "show_games")) ? "{}"
 			: "{\"drive\":\"usb0\"}";
@@ -725,6 +728,77 @@ static void games(int &bad)
 	mcp_init(&g_hooks, "1.2.3-test");
 }
 
+// ---- the app's other reading tools: get_app_info, audit_log (the query reaches the hook as the
+// screen's levels need it), preview_name
+static McpAuditQuery g_aq;   // the last audit query a hook got
+static std::string aq_text(const McpAuditQuery *q)
+{
+	char b[200];
+	snprintf(b, sizeof(b), "%s|%s|%u|%u|%d|%d|%d", q->domain, q->disc, (unsigned)q->row, (unsigned)q->job, q->offset, q->limit, q->confirm);
+	return b;
+}
+static int h_info(char *out, int n) { g_call = "app_info"; return answer(out, n); }
+static int h_alog(const McpAuditQuery *q, char *out, int n) { g_aq = *q; g_call = "audit_log|" + aq_text(q); return answer(out, n); }
+static int h_preview(const char *pat, const char *drive, const char *id, char *out, int n)
+{
+	g_call = std::string("preview|") + pat + "|" + (drive ? drive : "(null)") + "|" + (id ? id : "(null)");
+	return answer(out, n);
+}
+static void app_reads(int &bad)
+{
+	McpHooks hk = g_hooks;
+	hk.app_info = h_info; hk.audit_log = h_alog; hk.preview_name = h_preview;
+	mcp_init(&hk, "1.2.3-test");
+	g_ret = 0; g_answer = "{\"ok\":true}";
+	const char *esc = "{\\\"ok\\\":true}";
+	CHECK(call("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}") == 200 && valid_json(g_out));
+	CHECK(has("\"domain\":{\"type\":\"string\",\"enum\":[\"rips\",\"settings\",\"files\"]"));
+	CHECK(has("\"job\":{\"type\":\"integer\",\"minimum\":1"));
+	for (const char *t : {"get_app_info", "audit_log", "preview_name"}) {
+		char want[80];
+		snprintf(want, sizeof(want), "{\"name\":\"%s\",", t);
+		const char *d = strstr(g_out, want), *e = d ? strstr(d, "\"annotations\":{\"readOnlyHint\":true}") : NULL, *nx = d ? strstr(d + 1, "{\"name\":") : NULL;
+		CHECK(d && e && (!nx || e < nx));   // reading tools
+	}
+	CHECK(has_desc("audit_log", "never") && has_desc("audit_log", "secret"));
+	CHECK(has_desc("preview_name", "set_setting") && has_desc("preview_name", "rename_game"));
+	// get_app_info
+	CHECK(text_ok(tool("get_app_info", NULL), esc)); CHECK(g_call == "app_info");
+	CHECK(param_err(tool("get_app_info", "{\"x\":1}"), "x"));
+	// audit_log: the domains; a domain's discs or events; a disc's events; a job's rows; a page
+	CHECK(text_ok(tool("audit_log", NULL), esc)); CHECK(g_call == "audit_log|||0|0|0|50|0");
+	CHECK(text_ok(tool("audit_log", "{\"domain\":\"settings\"}"), esc)); CHECK(g_call == "audit_log|settings||0|0|0|50|0");
+	CHECK(text_ok(tool("audit_log", "{\"domain\":\"rips\",\"disc\":\"SLES_011.35\",\"offset\":9,\"limit\":200}"), esc));
+	CHECK(g_call == "audit_log|rips|SLES_011.35|0|0|9|200|0");
+	CHECK(text_ok(tool("audit_log", "{\"domain\":\"files\",\"disc\":\".trash\"}"), esc)); CHECK(g_call == "audit_log|files|.trash|0|0|0|50|0");
+	CHECK(text_ok(tool("audit_log", "{\"job\":42,\"limit\":1}"), esc)); CHECK(g_call == "audit_log|||0|42|0|1|0");
+	CHECK(param_err(tool("audit_log", "{\"domain\":\"mcp\"}"), "domain"));
+	CHECK(param_err(tool("audit_log", "{\"disc\":\"SLES_011.35\"}"), "domain"));   // a disc key is a domain's
+	CHECK(param_err(tool("audit_log", "{\"domain\":\"settings\",\"disc\":\"x\"}"), "disc"));
+	CHECK(param_err(tool("audit_log", "{\"job\":3,\"domain\":\"rips\"}"), "job"));
+	CHECK(param_err(tool("audit_log", "{\"job\":0}"), "job"));
+	CHECK(param_err(tool("audit_log", "{\"job\":\"3\"}"), "job"));
+	CHECK(param_err(tool("audit_log", "{\"job\":-3}"), "job"));
+	CHECK(param_err(tool("audit_log", "{\"domain\":\"rips\",\"disc\":\"\"}"), "disc"));
+	CHECK(param_err(tool("audit_log", "{\"limit\":201}"), "limit"));
+	{   // a disc key longer than the log keeps (95 bytes)
+		std::string a = "{\"domain\":\"rips\",\"disc\":\"" + std::string(96, 'x') + "\"}";
+		CHECK(param_err(tool("audit_log", a.c_str()), "disc"));
+	}
+	// preview_name: the pattern, for the drives, one drive or one game
+	CHECK(text_ok(tool("preview_name", "{\"pattern\":\"%T (%R)\"}"), esc)); CHECK(g_call == "preview|%T (%R)|(null)|(null)");
+	CHECK(text_ok(tool("preview_name", "{\"pattern\":\"\",\"drive\":\"usb0\"}"), esc)); CHECK(g_call == "preview||usb0|(null)");
+	CHECK(text_ok(tool("preview_name", "{\"pattern\":\"%N\",\"id\":\"hdd:/a\"}"), esc)); CHECK(g_call == "preview|%N|(null)|hdd:/a");
+	CHECK(param_err(tool("preview_name", "{}"), "pattern"));
+	CHECK(param_err(tool("preview_name", "{\"pattern\":\"%T\",\"drive\":\"usb0\",\"id\":\"hdd:/a\"}"), "id"));
+	CHECK(param_err(tool("preview_name", "{\"pattern\":\"%T\",\"drive\":\"cd\"}"), "drive"));
+	// a refusal is the app's text
+	g_ret = -1; g_answer = "No job 42 in the audit log.";
+	CHECK(tool("audit_log", "{\"job\":42}") == 200 && has("\"text\":\"No job 42 in the audit log.\"}],\"isError\":true}"));
+	g_ret = 0; g_answer = "{\"ok\":true}";
+	mcp_init(&g_hooks, "1.2.3-test");
+}
+
 int main()
 {
 	setvbuf(stdout, NULL, _IOLBF, 0);
@@ -734,6 +808,7 @@ int main()
 		{"bad_arguments", bad_arguments}, {"tool_errors", tool_errors}, {"screenshot", screenshot},
 		{"protocol_errors", protocol_errors}, {"notifications", notifications}, {"too_large", too_large},
 		{"depth", depth}, {"fuzz", fuzz}, {"small_buffer", small_buffer}, {"games", games},
+		{"app_reads", app_reads},
 	};
 	for (auto &t : tests) {
 		int bad = 0;

@@ -113,6 +113,10 @@ int audit_discs(char (*keys)[96], char (*names)[96], int *events, uint32_t *last
 int audit_events(AuditDom dom, const char *disc, AuditRow *out, int max);
 // All rows of one job in log order, skipping the first `first`.
 int audit_rows(uint32_t job, AuditRow *out, int first, int max);
+// One row by its id, and a job's own row (kind "job") by the job's number, with the same computed
+// fields as the queries give. 1 when found, else 0.
+int audit_row(uint32_t id, AuditRow *out);
+int audit_job_row(uint32_t job, AuditRow *out);
 
 // Undo. Reversible are `sector` rows (their bytes still kept in job<N>.bin, the image's sector still
 // equal to the row's new bytes, the job not running) and `setting` rows (the setting still has the

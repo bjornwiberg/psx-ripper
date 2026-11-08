@@ -13,11 +13,12 @@
 #define MCP_DEFAULT_GAMES 50
 
 #define MCP_MAX_QUERY 95                // list_games' query: at most this many bytes
+#define MCP_MAX_DISC 95                 // audit_log's disc key: at most this many bytes (as the log keeps them)
 
 #include <stdint.h>
 
 // The game list's query (list_games, check_games, empty_trash): the source ("hdd", "usbN", "all";
-// "" = all) and the filter panel's criteria as the config's games_filter has them (0 = any:
+// "" = all) and the filter panel's criteria as the panel and GameFilter have them (0 = any:
 // fmt 1 2352, 2 2048; redump 1 verified, 2 not checked, 3 no match, 4 not verified; errors 1 with,
 // 2 without; other 1 broken, 2 duplicates, 3 .sbi missing), trash = the trash instead of the games.
 // query (list_games): a part of the game's name, any case ("" = any). expect (empty_trash): how
@@ -28,6 +29,11 @@
 struct McpGameQuery { char source[8]; int fmt, redump, errors, other, trash; int offset, limit;
                       char query[MCP_MAX_QUERY + 1]; int expect, expect_ids; uint64_t expect_hash;
                       int fgiven, fclear; };
+
+// audit_log's query: domain "rips", "settings", "files" or "" (none); disc a disc's key in that domain
+// ("" none); job a job's number (0 none); offset and limit the page. row and confirm are for the
+// tools that undo.
+struct McpAuditQuery { char domain[12]; char disc[MCP_MAX_DISC + 1]; uint32_t row, job; int offset, limit, confirm; };
 
 // A game id's hash (64-bit FNV-1a) for empty_trash's expect.
 static inline uint64_t mcp_id_hash(const char *s)
@@ -61,6 +67,13 @@ struct McpHooks {
 	// filter, empty_trash's expect, show_games' source ("" = keep) and filter (fgiven, fclear). empty_trash is called only when the agent confirmed it (confirm:
 	// true) and named one source (never all).
 	int (*game)(const char *tool, const char *id, const char *pattern, const McpGameQuery *q, char *out, int n);
+	int (*app_info)(char *out, int n);                                // get_app_info
+	// audit_log: the domains (no domain, disc or job), a domain's discs or events, a disc's events
+	// (domain and disc), a job's rows (job)
+	int (*audit_log)(const McpAuditQuery *q, char *out, int n);
+	// preview_name: the names pattern gives, as the File name view shows them for the drives' discs
+	// (drive: that drive's only) or the rename view for a game (id). drive and id are NULL when not given.
+	int (*preview_name)(const char *pattern, const char *drive, const char *id, char *out, int n);
 };
 
 void mcp_init(const McpHooks *hooks, const char *version);
