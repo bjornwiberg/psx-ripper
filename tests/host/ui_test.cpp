@@ -4631,7 +4631,7 @@ int main()
 	reset_all(); usb(0, 0); usb(1, 1);
 	for (int c = 0; c < 3; c++) {
 		Card &k = g_cards[c];
-		k.present = 1; k.state = DISC_NONE;
+		k.present = 0; k.state = DISC_NONE;   // ejected: the drive is empty
 		snprintf(k.res_disc, sizeof(k.res_disc), "%s", c == 0 ? "Alundra (Europe) (SLES_011.35)" : c == 1 ? "Motorhead (SLUS_007.17)" : "Croc 2 (Europe) (En,Fr,De,Es,It,Nl,Sv) (SLES_020.88)");
 		snprintf(k.res_key, sizeof(k.res_key), "%s", c == 0 ? "SLES_011.35" : c == 1 ? "SLUS_007.17" : "SLES_020.88");
 		snprintf(k.res, sizeof(k.res), "%s", c == 1 ? "klar på 1:12:40 · 239 oläsbara · 39 lagade" : "klar på 14:02");
@@ -4653,6 +4653,38 @@ int main()
 		disc(0, "Alundra", "Alundra (Europe)", "SLES_011.35", 577);
 		frame("same-disc-in", 0);
 		if (!last_shown()) { printf("FAIL the same disc in again: the last rip's line is missing\n"); g_fail++; }
+		// a disc is in but could not be identified (yet): it may be another disc, so no last-rip line
+		k.state = DISC_NONE; k.present = 1;
+		frame("unidentified-disc-in", 0);
+		if (last_shown()) { printf("FAIL a disc in but not identified shows the last rip of another disc\n"); g_fail++; }
+		k.present = 0;
+		frame("empty-after-rip", 0);
+		if (!last_shown()) { printf("FAIL the empty drive after a rip: the last rip's line is missing\n"); g_fail++; }
+		// the drive connected again: the last rip from before is history
+		card_forget_last(k);
+		frame("reconnected", 0);
+		if (last_shown()) { printf("FAIL a drive connected again still shows the last rip from before\n"); g_fail++; }
+	}
+	{   // a USB drive that found a disc but could not read it yet is asked again: every 3 s, up to 5 times
+		Card k; memset(&k, 0, sizeof(k));
+		k.present = 1; k.tried = 1; k.state = DISC_NONE;
+		uint64_t t = 1000000;
+		int ok = !card_identify_again(k, 1, t)            // first: the wait starts
+		      && !card_identify_again(k, 1, t + 2999)     // not yet
+		      && card_identify_again(k, 1, t + 3000)      // again
+		      && k.tried == 0 && k.id_tries == 1;
+		if (!ok) { printf("FAIL identify again after 3 s\n"); g_fail++; }
+		int n = 1;
+		for (int i = 0; i < 20; i++) { k.tried = 1; t += 3000; card_identify_again(k, 1, t); t += 3000; if (card_identify_again(k, 1, t)) n++; }
+		if (n != 5) { printf("FAIL identify again: %d tries, not 5\n", n); g_fail++; }
+		Card m; memset(&m, 0, sizeof(m)); m.present = 1; m.tried = 1; m.state = DISC_NONE;
+		card_identify_again(m, 0, t);
+		if (card_identify_again(m, 0, t + 5000)) { printf("FAIL the internal drive is not asked again\n"); g_fail++; }
+		m.state = DISC_READY; card_identify_again(m, 1, t);
+		if (card_identify_again(m, 1, t + 5000)) { printf("FAIL an identified disc is not asked again\n"); g_fail++; }
+		m.state = DISC_NONE; m.present = 0;
+		if (card_identify_again(m, 1, t + 10000)) { printf("FAIL an empty drive is not asked again\n"); g_fail++; }
+		printf("%s identify-again\n", g_fail ? "?   " : "ok  ");
 	}
 
 	{   // About, in Swedish here and in English below

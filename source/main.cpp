@@ -185,6 +185,8 @@ struct Card {
 	volatile int present, inserted;   // a disc in the drive / just put in, not handled yet
 	volatile int state;               // DISC_*
 	int tried;                        // identification ran since the disc went in
+	int id_tries;                     // USB: identifications run again after "no readable disc" (a drive still spinning up)
+	uint64_t id_retry_at;             // when the next one may run (ms), 0 = none waiting
 	int fresh;                        // put in while the app runs: auto-rip, disc_identified
 	char title[128], serial[16];
 	uint32_t mb;
@@ -7111,6 +7113,7 @@ static void setting_applied(const char *key)
 // A thread looks every two seconds: USB optical drives (model and port when they connect, unlock
 // so the slot takes a disc, disc in and out) and each card's destination (the chosen one when it
 // is there, else the hard disk). A drive the app is reading from is left alone.
+static void card_forget_last(Card &k);
 static void usb_presence_thread(void *arg)
 {
 	int was[USBODD_DRIVES];   // disc in USB drive n: -1 unknown, 0 no, 1 yes
@@ -7150,6 +7153,8 @@ static void usb_presence_thread(void *arg)
 				card_defaults(k);
 				if (port >= 0 && port < 8 && g_usbcfg[port].set) card_from(k, g_usbcfg[port]);
 				k.state = DISC_NONE; k.tried = 0; k.base[0] = 0;
+				k.id_tries = 0; k.id_retry_at = 0;
+				card_forget_last(k);   // connected again: the last rip line from before is history
 				logf("usb drive %d: %s, port %d", i, usbodd_name(i), port);
 				settle[i] = now_ms() + 20000;
 				g_redraw = 2;
@@ -7488,9 +7493,10 @@ static int draw_page_body(int c, int y)
 		y += ls + ls / 3;
 	}
 	// the last rip on this drive: with no disc in it, or with that same disc; another disc's page
-	// does not show it (it would read as if it were about the disc in the drive)
+	// does not show it (it would read as if it were about the disc in the drive), nor does a disc
+	// that is in but not identified (yet): it may be another one
 	int same = st == DISC_READY && !strcmp(k.res_key, k.serial[0] ? k.serial : k.title);
-	if (k.res[0] && (st == DISC_NONE || same)) {
+	if (k.res[0] && ((st == DISC_NONE && !k.present) || same)) {
 		char last[420];   // which disc it was too: after an eject the page shows none
 		snprintf(last, sizeof(last), T(STR_LAST_RIP), k.res_disc, k.res);
 		ui_text_fit(UI_SMALL, L, y, k.res_col, last, R - L);
@@ -7743,6 +7749,34 @@ static void home_draw(const int *list, int nc, int sel)
 	}
 }
 
+// The last rip's line belongs to the disc that was ripped: once the drive is connected again it is
+// history from before, which would read as if it were about the disc in the drive now.
+static void card_forget_last(Card &k)
+{
+	k.res[0] = 0; k.res_rd = -2; k.res_bad = 0; k.res_failed = 0;
+	k.res_disc[0] = 0; k.res_key[0] = 0;
+}
+
+// A disc was just put in: identify it from scratch.
+static void card_new_disc(Card &k)
+{
+	k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0;
+	k.rd_done[0] = 0; k.rd_name[0] = 0; k.rd_state = -1;
+	k.id_tries = 0; k.id_retry_at = 0;   // the last rip's line stays: shown only while the drive is empty or holds that disc
+}
+
+// A USB drive that found a disc but could not read it yet (a SuperDrive takes a few seconds to spin
+// up, e.g. right after it is connected) is asked again: every 3 s, up to 5 times. Returns 1 when
+// the card may identify again (tried cleared).
+static int card_identify_again(Card &k, int usb, uint64_t now)
+{
+	if (!usb || !k.present || !k.tried || k.state != DISC_NONE || k.id_tries >= 5) return 0;
+	if (!k.id_retry_at) { k.id_retry_at = now + 3000; return 0; }
+	if (now < k.id_retry_at) return 0;
+	k.id_retry_at = 0; k.id_tries++; k.tried = 0;
+	return 1;
+}
+
 // Home screen: a card per drive. Up/down picks a card; left/right its destination; X, square and
 // triangle act on it; rips, repairs and checks run on their cards from here. Returns 0 = exit.
 static int home_screen()
@@ -7763,8 +7797,9 @@ static int home_screen()
 			for (int i = 0; i < nc; i++) {
 				Card &k = g_cards[list[i]];
 				if (k.job) continue;   // ripping: the rip has the drive
-				if (k.inserted) { k.inserted = 0; k.tried = 0; k.fresh = 1; k.state = DISC_NONE; k.base[0] = 0; k.rd_done[0] = 0; k.rd_name[0] = 0; k.rd_state = -1; }   // the last rip's line stays (it names its disc)
-				if (!k.present) { if (k.state != DISC_NONE) k.state = DISC_NONE; k.tried = 0; k.fresh = 0; continue; }
+				if (k.inserted) card_new_disc(k);
+				if (!k.present) { if (k.state != DISC_NONE) k.state = DISC_NONE; k.tried = 0; k.fresh = 0; k.id_tries = 0; k.id_retry_at = 0; continue; }
+				if (card_identify_again(k, list[i] > 0, now_ms())) logf("card %d: no readable disc yet, identify again (%d of 5)", list[i], k.id_tries);
 				if (!k.tried) { k.tried = 1; select_card(list[i]); identify_start(k.fresh); break; }
 				if (k.recheck) { k.recheck = 0; if (k.state == DISC_READY) { select_card(list[i]); prev_rip_check(); } g_redraw = 2; }
 			}
