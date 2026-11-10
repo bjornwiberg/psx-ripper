@@ -19,7 +19,7 @@ it rips.
 
 ## Why does my rip not match Redump?
 
-There are three common reasons:
+There are four common reasons:
 
 1. **Sectors could not be read.** The tab shows the warning and *Known errors*. Clean the disc
    and use **Repair**, or try another drive.
@@ -31,10 +31,16 @@ There are three common reasons:
    black, burned discs are blue, green, purple or silver.
 3. **The disc is a version Redump does not list**, for example another print or revision of
    the same game.
+4. **The disc has CD audio tracks.** A drive returns audio a few samples early or late (its
+   read offset), and every disc was written with an offset of its own. Redump corrects both;
+   PSX RiPPER does not yet, so the audio tracks' MD5s differ although the music sounds the
+   same. The data track is not affected. Correcting it is
+   [planned](design/2026-11-10-audio-offset-plan.md).
 
 A rip that does not match can still play perfectly. PSX RiPPER checks every data sector while it
-reads (sync, address, EDC and ECC), so a rip without known errors is a correct copy of the disc
-in the drive; it is only not the same as the disc Redump has.
+reads (sync, address, EDC and ECC), so a rip without known errors has a correct data track; it is
+only not the same as the disc Redump has. Audio has no checksum: only a match with Redump proves
+it, and the app does not use the drive's C2 error pointers.
 
 ## What does "Double-checking sectors without a checksum" mean, and why does it take so long?
 

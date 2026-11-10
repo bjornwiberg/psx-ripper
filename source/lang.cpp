@@ -266,7 +266,7 @@ static const char *en[STR_COUNT] = {
 	"Sector %u of %u",
 	"%u sectors (video and sound) have no checksum: they are read once more and compared%s",
 	"About PSX RiPPER",
-	"Rips your own PlayStation 1 discs to bit-perfect .bin/.cue images, from the PS3's drive and up to two Apple USB SuperDrives at once, and checks them against Redump.",
+	"Rips your own PlayStation 1 discs to raw .bin/.cue images, from the PS3's drive and up to two Apple USB SuperDrives at once, and checks them against Redump.",
 	"Made by %s · %s",
 	"Source code, help and releases: %s",
 	"Free software under the GNU General Public License v3.",

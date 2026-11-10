@@ -466,7 +466,7 @@ def main():
     pages.append(("index.html", page(
         shell, title="PSX RiPPER: rip your PS1 discs on a PS3", current="home", to_root="",
         body=glossarize(home, ""), version=version, main_class="home",
-        description="A PS3 homebrew app that rips your own PlayStation 1 discs to bit-perfect "
+        description="A PS3 homebrew app that rips your own PlayStation 1 discs to raw "
                     ".bin/.cue images and verifies them against Redump.")))
 
     # docs

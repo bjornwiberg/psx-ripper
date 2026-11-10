@@ -56,7 +56,7 @@ the ripper's Q calibration accounts for that.
 | Raw rip, CUE, title lookup | Tested (Evilnat 4.93, ~2.7 MB/s). MD5 identical to Redump for Final Fantasy VIII (USA) disc 1 and Final Fantasy IX (Europe) disc 1 |
 | Rip boots in webMAN/Cobra | Tested |
 | LibCrypt detection on protected PAL discs | Tested on an original disc: the `.sbi` for Final Fantasy IX (Europe) disc 1 matches the disc's known LibCrypt sectors byte for byte |
-| Multi-track discs (CD audio) | Tested: single-file `.cue` with pregaps from the Q subchannel, tracks split as Redump splits them |
+| Multi-track discs (CD audio) | Tested: single-file `.cue` with pregaps from the Q subchannel, tracks split as Redump splits them. Audio is **not offset-corrected yet**: of 12 multi-track rips without errors whose data track matches Redump, 7 have audio tracks that do not; the 5 that match all have a single audio track ([plan](design/2026-11-10-audio-offset-plan.md)) |
 | Several drives in parallel (internal + two Apple USB SuperDrives) | Tested: bit-perfect against Redump on all three at once (Alundra, Final Fantasy IX discs 1–3) |
 
 LibCrypt protection data lives in the disc's subchannel. A disc that is not an original
