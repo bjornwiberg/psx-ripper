@@ -1,0 +1,4 @@
+{
+  "_comment": "Serials missing from GameDB-PSX, checked on a real disc. tools/gen_titles.py adds these to db/PSX.titles.json (an entry here wins). Key: the boot file in SYSTEM.CNF, as SLES-02930.",
+  "SLES-02930": "Aqua GT"
+}

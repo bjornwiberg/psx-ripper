@@ -55,6 +55,22 @@ No. With *Rip immediately when a disc is inserted* on, a disc that is not ripped
 destination yet is ripped, one that is ripped with known errors is repaired, and one that is
 fine is left alone. Only **✕ New rip** rips over an existing rip.
 
+## Can I stop a disc from starting by itself when I put it in?
+
+Yes. Turn off the PS3's own auto-start: *Settings → System Settings → Disc Auto-Start → Off*
+(the exact wording can differ between firmwares). A PS1 disc you put in at the XMB then stays in
+the drive instead of starting the PS1 emulator, so you can put discs in before or after you start
+PSX RiPPER. Turning it off is a good idea while you rip: a disc that starts the emulator gets in
+the way of the app reading the drive.
+
+With auto-start on, a disc that is already in the drive when you switch the console on is not
+started. With it off you can still play a disc when you want: select it in the XMB, or press △ on
+it and start it from there.
+
+PSX RiPPER itself does not rip a disc that was already in a drive when the app started. Only a disc
+put in while the app runs is ripped automatically (when *Rip immediately when a disc is inserted*
+is on).
+
 ## Which USB drives work?
 
 The Apple USB SuperDrive (USB ID 05AC:1500). The PS3 does not pass commands to USB optical drives

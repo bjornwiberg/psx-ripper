@@ -422,6 +422,8 @@ int lib_scan(const char *dir, const LibIo *io, GameDisc *discs, int max)
 		}
 		const char *leaf = leaf_of(d.base);
 		if (!d.id[0]) id_from_name(leaf, d.id, sizeof d.id);
+		const char *known = io->title && d.id[0] ? io->title(d.id) : NULL;
+		if (known && known[0]) { snprintf(d.title, sizeof d.title, "%s", known); squeeze(d.title); }
 		if (!d.title[0]) without_brackets(leaf, d.title, sizeof d.title);
 		int broken = x.part || x.image_bad || x.images.empty() || (x.cue && (x.cue_unread || x.cue_missing || !x.cue_files))
 		             || (!x.cue && x.image_kind == K_BIN);
