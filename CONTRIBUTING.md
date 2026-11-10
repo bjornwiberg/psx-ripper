@@ -74,7 +74,12 @@ request title becomes the commit on `main`, so it must follow
 | `fix: ...` | patch (1.0.0 → 1.0.1) |
 | `feat: ...` | minor (1.0.0 → 1.1.0) |
 | `feat!: ...` or a `BREAKING CHANGE:` footer | major (1.0.0 → 2.0.0) |
-| `docs:`, `test:`, `refactor:`, `perf:`, `build:`, `ci:`, `chore:` | no release on their own (`perf` and `docs` appear in the changelog) |
+| `perf: ...`, `revert: ...` | patch, in the changelog |
+| `docs:`, `test:`, `refactor:`, `build:`, `ci:`, `chore:` (also `chore(deps):` bumps) | no release, not in the changelog |
+
+A release is made only when a change reaches the app. A docs-only change (including the site)
+goes live on the next push to `main` without one, as the site is built from every push. A
+change to text the app shows (its About text, a message) is a `fix:`, not a `docs:`.
 
 Write the title for users: it ends up in the changelog. A check on every pull request rejects
 titles that do not follow the format.
