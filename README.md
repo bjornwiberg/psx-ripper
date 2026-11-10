@@ -7,8 +7,8 @@
 
 **Website: [psxripper.bjrn.nu](https://psxripper.bjrn.nu/)**: download, screenshots and the docs.
 
-A PS3 homebrew app that rips your own PlayStation 1 discs to bit-perfect `.bin`/`.cue` images,
-ready to play with webMAN MOD / Cobra. It reads from the PS3's own Blu-ray drive and from up to
+A PS3 homebrew app that rips your own PlayStation 1 discs to raw `.bin`/`.cue` images, ready to
+play with webMAN MOD / Cobra. It reads from the PS3's own Blu-ray drive and from up to
 two Apple USB SuperDrives, all three at the same time, and checks every rip against
 [Redump](http://redump.org/).
 
@@ -24,9 +24,12 @@ two Apple USB SuperDrives, all three at the same time, and checks every rip agai
 
 ## Features
 
-- **Bit-perfect rips**: raw 2352-byte sectors, all tracks including CD audio, with pregaps read
+- **Checked raw rips**: 2352-byte sectors, all tracks including CD audio, with pregaps read
   from the Q subchannel. Every data sector is checked (sync, header, EDC/ECC); damaged sectors
-  are re-read slowly, and a verify pass confirms uncertain sectors with identical reads.
+  are re-read slowly, and a verify pass confirms uncertain sectors with identical reads. A rip
+  that matches Redump is bit-perfect. CD audio tracks are not offset-corrected yet, so discs
+  with audio tracks usually do not match Redump
+  ([plan](docs/design/2026-11-10-audio-offset-plan.md)).
 - **Several drives in parallel**: the internal drive and up to two Apple USB SuperDrives, each
   on its own tab with its own progress, destination and settings.
 - **Redump verification**: per-track MD5s compared with Redump, online or from a local copy of

@@ -299,7 +299,7 @@ What *About* in the settings shows, the console's address, whether drives can ri
 time, and the local Redump copy. No arguments. Reading only.
 
 ```json
-{"version":"1.4.0","about":{"description":"Rips your own PlayStation 1 discs to bit-perfect .bin/.cue images, …",
+{"version":"1.4.0","about":{"description":"Rips your own PlayStation 1 discs to raw .bin/.cue images, …",
   "author":"Björn Wiberg","email":"b@bjrn.nu","source":"github.com/bjornwiberg/psx-ripper",
   "libraries":"PSL1GHT (PS3 SDK) · zlib · …","license":"Free software under the GNU General Public License v3.",
   "note":"Not affiliated with Sony Interactive Entertainment. Only rip discs you own."},
