@@ -5,6 +5,13 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.3](https://github.com/bjornwiberg/psx-ripper/compare/v1.4.2...v1.4.3) (2026-11-10)
+
+
+### Bug fixes
+
+* a USB drive asks again when a disc cannot be read yet, and an unread disc shows no earlier rip ([#39](https://github.com/bjornwiberg/psx-ripper/issues/39)) ([b040b49](https://github.com/bjornwiberg/psx-ripper/commit/b040b49755f791274b98e072fce2823527edcfbb))
+
 ## [1.4.2](https://github.com/bjornwiberg/psx-ripper/compare/v1.4.1...v1.4.2) (2026-11-08)
 
 
