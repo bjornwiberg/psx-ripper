@@ -57,6 +57,7 @@ a:hover { color: var(--ink); }
    (8.4:1 or more) and never on the element's own colour (WCAG 2.4.7, 2.4.13) */
 :focus-visible { outline: 3px solid var(--amber); outline-offset: 3px; border-radius: 2px; }
 main:focus { outline: none; }   /* the skip link's target, not a control */
+:is(h1, h2, h3, h4)[tabindex="-1"]:focus { outline: none; }   /* where a search result on this page moved focus */
 
 /* text for screen readers only */
 .sr-only {

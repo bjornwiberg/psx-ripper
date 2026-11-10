@@ -189,7 +189,25 @@ if (typeof document === "undefined") {
       q.removeAttribute("aria-activedescendant");
       status.textContent = msg;
     };
-    const pick = (o) => o && (location.href = o.dataset.url);
+    // A result on another page loads it. One on this page (a section of it) only moves the page,
+    // so the dialog is closed here and focus goes to that section: otherwise the dialog stayed open
+    // with focus lost, and the arrow keys scrolled the results instead of moving between them.
+    const samePage = (u) => u.origin === location.origin &&
+      u.pathname.replace(/index\.html$/, "") === location.pathname.replace(/index\.html$/, "");
+    const pick = (o) => {
+      if (!o) return;
+      const u = new URL(o.dataset.url);
+      if (!samePage(u)) return void (location.href = u.href);
+      dlg.close();
+      const t = (u.hash && document.getElementById(decodeURIComponent(u.hash.slice(1)))) ||
+        document.querySelector("main h1") || document.querySelector("main");
+      if (u.hash !== location.hash) history.pushState(null, "", u.hash || u.pathname);
+      if (!t) return;
+      if (!t.hasAttribute("tabindex")) t.setAttribute("tabindex", "-1");
+      t.focus({ preventScroll: true });
+      t.scrollIntoView({ block: "start" });
+      dispatchEvent(new HashChangeEvent("hashchange"));
+    };
 
     const run = async () => {
       const term = q.value.trim();
