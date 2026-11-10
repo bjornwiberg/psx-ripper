@@ -5,6 +5,18 @@ All notable changes are listed here. The format follows the release notes that
 [Conventional Commits](https://www.conventionalcommits.org/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [1.4.4](https://github.com/bjornwiberg/psx-ripper/compare/v1.4.3...v1.4.4) (2026-11-10)
+
+
+### Bug fixes
+
+* **site:** same-page search results close the search and move focus ([#41](https://github.com/bjornwiberg/psx-ripper/issues/41)) ([8400f07](https://github.com/bjornwiberg/psx-ripper/commit/8400f07ead2ddf2152df0af65c707a3cad31841f))
+
+
+### Documentation
+
+* bit-perfect only where a rip matches Redump, and a plan for CD audio offsets ([#42](https://github.com/bjornwiberg/psx-ripper/issues/42)) ([821bbd1](https://github.com/bjornwiberg/psx-ripper/commit/821bbd1117fda22272cf1088a5b5be14abb47b5a))
+
 ## [1.4.3](https://github.com/bjornwiberg/psx-ripper/compare/v1.4.2...v1.4.3) (2026-11-10)
 
 
