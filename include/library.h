@@ -40,13 +40,16 @@ struct Game { char name[128]; int first, ndiscs; GameStatus st; };   // a row: o
 // list: calls cb with each name in dir (without the folder), returns < 0 when dir cannot be read.
 // stat_size/read/exists take full paths; read returns the bytes read (< 0 on error), no 0 added.
 // libcrypt (may be NULL): whether a disc ID is on the app's LibCrypt list; sbi_dir: where the
-// installed .sbi files are (<sbi_dir>/<ID>.sbi).
+// installed .sbi files are (<sbi_dir>/<ID>.sbi). title (may be NULL): the title database's name for
+// a disc ID, NULL when unknown; it wins over the rip log's title= (the log keeps what was known when
+// the disc was ripped, the database may know more now) and the file name.
 struct LibIo { int (*list)(const char *dir, void (*cb)(const char *, void *), void *);
                int (*stat_size)(const char *path, uint64_t *size);
                int (*read)(const char *path, char *buf, int max);   // whole small text files
                int (*exists)(const char *path);
                int (*libcrypt)(const char *id);
-               const char *sbi_dir; };
+               const char *sbi_dir;
+               const char *(*title)(const char *id); };
 
 // The sets of one folder, unsorted; up to max. Returns how many, -1 when the folder cannot be read.
 // dup is -1 in each: lib_mark_dups() over all the scanned sources sets it.

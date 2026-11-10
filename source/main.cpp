@@ -2833,7 +2833,7 @@ static int gl_io_read(const char *p, char *buf, int max)
 }
 static int gl_io_exists(const char *p) { return vf_exists(p); }
 static int gl_io_lc(const char *id) { return is_libcrypt_disc(id); }
-static LibIo gl_libio() { LibIo io = {vf_listdir, vf_size, gl_io_read, gl_io_exists, gl_io_lc, SBI_DIR}; return io; }
+static LibIo gl_libio() { LibIo io = {vf_listdir, vf_size, gl_io_read, gl_io_exists, gl_io_lc, SBI_DIR, lookup_title}; return io; }
 // The app's own log or .md5 (what = "log", "md5") of an image to read: <base><type>.<what>, else the
 // old <base>.<what> when it is this image's (lib_own_find). 1 when there is one; out = its path.
 static int own_find(const char *base, const char *image, const char *what, char *out, int n) { return lib_own_find(base, image, what, gl_io_exists, out, n); }

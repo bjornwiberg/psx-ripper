@@ -191,6 +191,26 @@ static void log_parsed(int &bad)
 	CHECK((i = find(n, "E")) >= 0 && g_d[i].st == GS_UNCHECKED && g_d[i].rd == -1);
 }
 
+// The title database's name for a disc ID wins over the rip log's title= and the file name: the
+// log keeps what was known when the disc was ripped, the database may know more now.
+static const char *db_title(const char *id) { return !strcmp(id, "SLES_029.30") ? "Aqua GT" : NULL; }
+static void title_from_database(int &bad)
+{
+	fresh();
+	rip("PSX DISC [SLES_029.30]", 10, "PSX Ripper rip log\ntitle=PSX DISC  \xC2\xB7  SLES_029.30\nserial=SLES_029.30\n");
+	rip("Own name [SLES_029.30]", 10, NULL);   // no log: the ID from the file name
+	rip("B", 10, "PSX Ripper rip log\ntitle=B game  \xC2\xB7  SLUS_000.01\nserial=SLUS_000.01\n");   // unknown: the log's
+	LibIo io = IO;
+	io.title = db_title;
+	int n = lib_scan(DIR_, &io, g_d, 600), i;
+	CHECK(n == 3);
+	CHECK((i = find(n, "PSX DISC [SLES_029.30]")) >= 0 && !strcmp(g_d[i].title, "Aqua GT"));
+	CHECK((i = find(n, "Own name [SLES_029.30]")) >= 0 && !strcmp(g_d[i].title, "Aqua GT"));
+	CHECK((i = find(n, "B")) >= 0 && !strcmp(g_d[i].title, "B game"));
+	n = scan();   // without a database: the log's title, as before
+	CHECK((i = find(n, "PSX DISC [SLES_029.30]")) >= 0 && !strcmp(g_d[i].title, "PSX DISC"));
+}
+
 static void status_precedence(int &bad)
 {
 	fresh();
@@ -705,7 +725,7 @@ int main()
 {
 	struct { const char *name; void (*fn)(int &); } tests[] = {
 		{"sets_by_base_name", sets_by_base_name}, {"format_from_size_and_cue", format_from_size_and_cue},
-		{"log_parsed", log_parsed}, {"status_precedence", status_precedence},
+		{"log_parsed", log_parsed}, {"title_from_database", title_from_database}, {"status_precedence", status_precedence},
 		{"iso_and_bin_with_one_name", iso_and_bin_with_one_name}, {"multi_disc_grouping", multi_disc_grouping},
 		{"duplicates", duplicates}, {"libcrypt_marks", libcrypt_marks}, {"sorting", sorting},
 		{"jump_by_letter", jump_by_letter}, {"filters", filters}, {"summary_counts", summary_counts},
