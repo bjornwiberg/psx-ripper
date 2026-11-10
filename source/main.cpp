@@ -7244,6 +7244,16 @@ static int drive_column(int c, int right, int y, const char *idl)
 }
 
 
+// The last rip on a drive belongs to the disc that was ripped: it shows with no disc in the drive,
+// or with that same disc; another disc (or one not identified yet, it may be another) does not show
+// it, on the page or on the tab, as it would read as if it were about the disc in the drive.
+static bool card_last_shows(const Card &k)
+{
+	if (!k.res[0]) return false;
+	if (k.state == DISC_NONE) return !k.present;
+	return k.state == DISC_READY && !strcmp(k.res_key, k.serial[0] ? k.serial : k.title);
+}
+
 // Tabs: one per drive, with a short status, the selected one blue. They scroll sideways when
 // there are more than fit. Returns the height used.
 static int draw_tabs(const int *list, int nc, int sel, int y)
@@ -7279,7 +7289,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 			if (pm < 100) snprintf(stt[i], sizeof(stt[0]), T(STR_PCT_DEC), pm / 10, pm % 10);
 			else snprintf(stt[i], sizeof(stt[0]), "%u %%", pm / 10);
 			scol[i] = 0xC8E05A;
-		} else if (k.res[0] && (k.state == DISC_READY || k.state == DISC_NONE)) {
+		} else if (card_last_shows(k)) {
 			snprintf(stt[i], sizeof(stt[0]), "%s", T(k.res_failed == 2 ? STR_TAB_CANCELLED : k.res_failed ? STR_TAB_FAILED : STR_TAB_DONE));
 			scol[i] = k.res_failed ? 0xF0C060 : k.res_col;
 		} else if (k.state == DISC_READING) { snprintf(stt[i], sizeof(stt[0]), "%s", T(STR_TAB_READING)); }
@@ -7295,7 +7305,7 @@ static int draw_tabs(const int *list, int nc, int sel, int y)
 		if (k.job) { OnCard o(c); warn[i] = g_readerrs ? 2 : k.rd_state == 1 ? 1 : 3; }   // ripping: ?, the warning from the first sector it could not read
 		else {
 			if (k.state == DISC_READY && k.prev_rip) warn[i] = k.repair_n > 0 || k.rd_state == 0 ? 2 : k.rd_state == 1 ? 1 : 3;
-			else if (k.res[0] && !k.res_failed && (k.state == DISC_READY || k.state == DISC_NONE) && k.res_rd >= -1)
+			else if (card_last_shows(k) && !k.res_failed && k.res_rd >= -1)
 				warn[i] = k.res_bad || k.res_rd == 0 ? 2 : k.res_rd == 1 ? 1 : 3;
 		}
 		if (warn[i]) w[i] += igap + isz;
@@ -7492,11 +7502,8 @@ static int draw_page_body(int c, int y)
 		ui_text_fit(UI_SMALL, L, y, 0xF0C060, T(STR_USB_NORESP_TIP), R - L);
 		y += ls + ls / 3;
 	}
-	// the last rip on this drive: with no disc in it, or with that same disc; another disc's page
-	// does not show it (it would read as if it were about the disc in the drive), nor does a disc
-	// that is in but not identified (yet): it may be another one
-	int same = st == DISC_READY && !strcmp(k.res_key, k.serial[0] ? k.serial : k.title);
-	if (k.res[0] && ((st == DISC_NONE && !k.present) || same)) {
+	// the last rip on this drive: only when it is about the disc in it, or there is none
+	if (card_last_shows(k)) {
 		char last[420];   // which disc it was too: after an eject the page shows none
 		snprintf(last, sizeof(last), T(STR_LAST_RIP), k.res_disc, k.res);
 		ui_text_fit(UI_SMALL, L, y, k.res_col, last, R - L);

@@ -2,7 +2,9 @@
 """Generates source/titles.inc (serial -> title) from GameDB-PSX's PSX.titles.json.
 
 Data: https://github.com/niemasd/GameDB-PSX (GPL-3.0).
-Usage: python3 tools/gen_titles.py db/PSX.titles.json source/titles.inc
+Usage: python3 tools/gen_titles.py db/PSX.titles.json source/titles.inc [db/titles.extra.json ...]
+
+Extra files: serials GameDB-PSX does not have, checked on a real disc; an entry there wins.
 """
 import json
 import re
@@ -10,6 +12,8 @@ import sys
 
 src, dst = sys.argv[1], sys.argv[2]
 data = json.load(open(src, encoding="utf-8"))
+for extra in sys.argv[3:]:
+    data.update(json.load(open(extra, encoding="utf-8")))
 serial = re.compile(r"^[A-Z]{4}-\d{5}$")
 rows = sorted((k, v) for k, v in data.items() if serial.match(k))
 
